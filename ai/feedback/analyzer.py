@@ -74,7 +74,7 @@ class FeedbackAnalyzer:
                     host=os.getenv("PG_HOST", "localhost"),
                     port=os.getenv("PG_PORT", "5432"),
                     user=os.getenv("PG_USER", "postgres"),
-                    password=os.getenv("PG_PASSWORD", "admin123"),
+                    password=os.getenv("PG_PASSWORD"),
                     database=os.getenv("PG_DATABASE", "dev_metric")
                 )
             except Exception as e:
@@ -95,26 +95,54 @@ class FeedbackAnalyzer:
         Returns:
             ClarificationStats: 追问统计
         """
-        # TODO: 从数据库查询实际数据
-        # 示例 SQL:
-        # SELECT
-        #     COUNT(*) as total,
-        #     SUM(CASE WHEN feedback = 1 THEN 1 ELSE 0 END) as success,
-        #     SUM(CASE WHEN feedback = -1 THEN 1 ELSE 0 END) as fail,
-        #     SUM(CASE WHEN feedback_source = 'silent' THEN 1 ELSE 0 END) as silent
-        # FROM clarification_feedback
-        # WHERE clarification_type = ?
+        db = self._get_db_connection()
+        if not db:
+            return ClarificationStats(total=0, success=0, fail=0, silent=0,
+                                      success_rate=0, fail_rate=0, silent_rate=0)
 
-        # 临时返回示例数据
-        return ClarificationStats(
-            total=100,
-            success=45,
-            fail=15,
-            silent=40,
-            success_rate=45.0,
-            fail_rate=15.0,
-            silent_rate=40.0
-        )
+        try:
+            cursor = db.cursor()
+            if clarification_type:
+                sql = """
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN feedback = 1 THEN 1 ELSE 0 END) as success,
+                           SUM(CASE WHEN feedback = -1 THEN 1 ELSE 0 END) as fail,
+                           SUM(CASE WHEN feedback_source = 'silent' THEN 1 ELSE 0 END) as silent
+                    FROM clarification_feedback
+                    WHERE clarification_type = %s
+                """
+                cursor.execute(sql, (clarification_type,))
+            else:
+                sql = """
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN feedback = 1 THEN 1 ELSE 0 END) as success,
+                           SUM(CASE WHEN feedback = -1 THEN 1 ELSE 0 END) as fail,
+                           SUM(CASE WHEN feedback_source = 'silent' THEN 1 ELSE 0 END) as silent
+                    FROM clarification_feedback
+                """
+                cursor.execute(sql)
+
+            row = cursor.fetchone()
+            cursor.close()
+
+            total = row[0] or 0
+            success = row[1] or 0
+            fail = row[2] or 0
+            silent = row[3] or 0
+
+            return ClarificationStats(
+                total=total,
+                success=success,
+                fail=fail,
+                silent=silent,
+                success_rate=(success / total * 100) if total > 0 else 0,
+                fail_rate=(fail / total * 100) if total > 0 else 0,
+                silent_rate=(silent / total * 100) if total > 0 else 0
+            )
+        except Exception as e:
+            print(f"[FeedbackAnalyzer] 查询追问统计失败: {e}")
+            return ClarificationStats(total=0, success=0, fail=0, silent=0,
+                                      success_rate=0, fail_rate=0, silent_rate=0)
 
     def get_fail_reason_distribution(self) -> List[FailReasonStats]:
         """
@@ -123,21 +151,35 @@ class FeedbackAnalyzer:
         Returns:
             List[FailReasonStats]: 失败原因统计列表
         """
-        # TODO: 从数据库查询实际数据
-        # 示例 SQL:
-        # SELECT fail_reason, COUNT(*) as count
-        # FROM clarification_feedback
-        # WHERE feedback_source = 'auto' AND fail_reason IS NOT NULL
-        # GROUP BY fail_reason
-        # ORDER BY count DESC
+        db = self._get_db_connection()
+        if not db:
+            return []
 
-        # 临时返回示例数据
-        return [
-            FailReasonStats(fail_reason="no_data", count=35, percentage=50.0),
-            FailReasonStats(fail_reason="no_metric", count=20, percentage=28.6),
-            FailReasonStats(fail_reason="sql_error", count=10, percentage=14.3),
-            FailReasonStats(fail_reason="intent_fail", count=5, percentage=7.1),
-        ]
+        try:
+            cursor = db.cursor()
+            sql = """
+                SELECT fail_reason, COUNT(*) as count
+                FROM clarification_feedback
+                WHERE feedback_source = 'auto' AND fail_reason IS NOT NULL
+                GROUP BY fail_reason
+                ORDER BY count DESC
+            """
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            total = sum(row[1] for row in rows)
+            return [
+                FailReasonStats(
+                    fail_reason=row[0],
+                    count=row[1],
+                    percentage=(row[1] / total * 100) if total > 0 else 0
+                )
+                for row in rows
+            ]
+        except Exception as e:
+            print(f"[FeedbackAnalyzer] 查询失败原因分布失败: {e}")
+            return []
 
     def get_missing_fields_patterns(
         self,
@@ -152,37 +194,37 @@ class FeedbackAnalyzer:
         Returns:
             List[MissingFieldsPattern]: 缺失字段组合列表
         """
-        # TODO: 从数据库查询实际数据
-        # 示例 SQL:
-        # SELECT missing_fields, COUNT(*) as freq,
-        #        SUM(CASE WHEN feedback = -1 THEN 1 ELSE 0 END) as fail_count
-        # FROM clarification_feedback
-        # WHERE feedback = -1 AND missing_fields IS NOT NULL
-        # GROUP BY missing_fields
-        # ORDER BY freq DESC
-        # LIMIT ?
+        db = self._get_db_connection()
+        if not db:
+            return []
 
-        # 临时返回示例数据
-        return [
-            MissingFieldsPattern(
-                missing_fields='["time_range"]',
-                frequency=45,
-                fail_count=10,
-                fail_rate=22.2
-            ),
-            MissingFieldsPattern(
-                missing_fields='["metric_name", "time_range"]',
-                frequency=30,
-                fail_count=12,
-                fail_rate=40.0
-            ),
-            MissingFieldsPattern(
-                missing_fields='["dimension"]',
-                frequency=20,
-                fail_count=3,
-                fail_rate=15.0
-            ),
-        ]
+        try:
+            cursor = db.cursor()
+            sql = """
+                SELECT missing_fields, COUNT(*) as freq,
+                       SUM(CASE WHEN feedback = -1 THEN 1 ELSE 0 END) as fail_count
+                FROM clarification_feedback
+                WHERE feedback = -1 AND missing_fields IS NOT NULL
+                GROUP BY missing_fields
+                ORDER BY freq DESC
+                LIMIT %s
+            """
+            cursor.execute(sql, (limit,))
+            rows = cursor.fetchall()
+            cursor.close()
+
+            return [
+                MissingFieldsPattern(
+                    missing_fields=row[0],
+                    frequency=row[1],
+                    fail_count=row[2] or 0,
+                    fail_rate=(row[2] or 0) / row[1] * 100 if row[1] > 0 else 0
+                )
+                for row in rows
+            ]
+        except Exception as e:
+            print(f"[FeedbackAnalyzer] 查询缺失字段模式失败: {e}")
+            return []
 
     def get_clarification_success_rate_by_type(self) -> Dict[str, float]:
         """
@@ -191,22 +233,27 @@ class FeedbackAnalyzer:
         Returns:
             Dict[str, float]: 类型 -> 成功率
         """
-        # TODO: 从数据库查询实际数据
-        # 示例 SQL:
-        # SELECT clarification_type,
-        #        ROUND(SUM(CASE WHEN feedback = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as success_rate
-        # FROM clarification_feedback
-        # GROUP BY clarification_type
-        # ORDER BY success_rate
+        db = self._get_db_connection()
+        if not db:
+            return {}
 
-        # 临时返回示例数据
-        return {
-            "metric_missing": 65.5,
-            "time_range_missing": 78.2,
-            "dimension_missing": 72.0,
-            "no_data": 45.0,
-            "sql_error": 30.0,
-        }
+        try:
+            cursor = db.cursor()
+            sql = """
+                SELECT clarification_type,
+                       ROUND(SUM(CASE WHEN feedback = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as success_rate
+                FROM clarification_feedback
+                WHERE clarification_type IS NOT NULL
+                GROUP BY clarification_type
+            """
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            return {row[0]: row[1] for row in rows}
+        except Exception as e:
+            print(f"[FeedbackAnalyzer] 查询追问成功率失败: {e}")
+            return {}
 
     def get_silent_user_sessions(
         self,
@@ -220,34 +267,12 @@ class FeedbackAnalyzer:
 
         Returns:
             List[Dict[str, Any]]: 沉默会话列表
-        """
-        # TODO: 从数据库查询实际数据
-        # 示例 SQL:
-        # SELECT cf.session_id, cf.clarification_question, cf.created_at,
-        #        (SELECT COUNT(*) FROM messages m
-        #         WHERE m.session_id = cf.session_id
-        #           AND m.role = 'user'
-        #           AND m.created_at > cf.created_at
-        #           AND m.created_at < cf.created_at + INTERVAL '5 minute') as followup_count
-        # FROM clarification_feedback cf
-        # WHERE cf.feedback_source = 'auto' AND cf.feedback = 0
-        # HAVING followup_count = 0
 
-        # 临时返回示例数据
-        return [
-            {
-                "session_id": "sess_001",
-                "clarification_question": "请问您想查询哪个时间段的销售额？",
-                "created_at": "2026-03-28T10:30:00",
-                "threshold_minutes": threshold_minutes,
-            },
-            {
-                "session_id": "sess_002",
-                "clarification_question": "需要按什么维度查看？",
-                "created_at": "2026-03-28T10:25:00",
-                "threshold_minutes": threshold_minutes,
-            },
-        ]
+        Note: 当前 sessions 在内存中，需要会话持久化才能支持此功能
+        """
+        # 当前 sessions 在内存中不支持查询，返回空列表
+        # 未来需要会话持久化到数据库才能实现此功能
+        return []
 
     def get_low_success_rate_types(
         self,
@@ -291,16 +316,16 @@ class FeedbackAnalyzer:
 
         try:
             cursor = db.cursor()
-            sql = f"""
+            sql = """
                 SELECT id, session_id, turn_index, fail_reason, clarification_type,
                        clarification_question, context_snapshot, user_response, created_at
                 FROM clarification_feedback
-                WHERE created_at >= NOW() - INTERVAL '{days} days'
+                WHERE created_at >= NOW() - INTERVAL %s
                   AND (feedback = -1 OR (feedback = 0 AND fail_reason IS NOT NULL))
                 ORDER BY created_at DESC
-                LIMIT {limit}
+                LIMIT %s
             """
-            cursor.execute(sql)
+            cursor.execute(sql, (f"{days} days", limit))
             rows = cursor.fetchall()
             cursor.close()
 
@@ -449,27 +474,42 @@ class FeedbackAnalyzer:
         Returns:
             List[Dict[str, Any]]: 失败案例列表
         """
-        # TODO: 从数据库查询实际数据
-        # 示例 SQL:
-        # SELECT context_snapshot, raw_llm_output, created_at
-        # FROM clarification_feedback
-        # WHERE fail_reason = ?
-        # ORDER BY created_at DESC
-        # LIMIT ?
+        db = self._get_db_connection()
+        if not db:
+            return []
 
-        # 临时返回示例数据
-        return [
-            {
-                "session_id": "sess_003",
-                "context_snapshot": {
-                    "metric_name": "广告转化率",
-                    "time_range": None,
-                    "entities": {"metric_name": "广告转化率"}
-                },
-                "raw_llm_output": '{"needs_clarification": true, "question": "请问您想查询哪个时间范围？"}',
-                "created_at": "2026-03-28T11:00:00",
-            },
-        ]
+        try:
+            cursor = db.cursor()
+            sql = """
+                SELECT session_id, context_snapshot, raw_llm_output, created_at
+                FROM clarification_feedback
+                WHERE fail_reason = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+            """
+            cursor.execute(sql, (fail_reason, limit))
+            rows = cursor.fetchall()
+            cursor.close()
+
+            results = []
+            for row in rows:
+                context = None
+                if row[1]:
+                    try:
+                        context = json.loads(row[1])
+                    except:
+                        pass
+
+                results.append({
+                    "session_id": row[0],
+                    "context_snapshot": context,
+                    "raw_llm_output": row[2],
+                    "created_at": str(row[3]) if row[3] else None
+                })
+            return results
+        except Exception as e:
+            print(f"[FeedbackAnalyzer] 查询失败上下文失败: {e}")
+            return []
 
     def generate_optimization_suggestions(self) -> List[str]:
         """

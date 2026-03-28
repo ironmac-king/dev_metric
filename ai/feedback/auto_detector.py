@@ -106,9 +106,18 @@ class AutoFailDetector:
 
     def _metric_not_found_in_kb(self, metric_name: str) -> bool:
         """检查指标是否在知识库中"""
-        # TODO: 实际调用知识库 API 验证
-        # 目前通过判断 metric_id 是否为 None 来间接判断
-        return True
+        try:
+            from ai.client.metric_client import MetricClient
+            client = MetricClient()
+            metrics = client.get_all_metrics()
+            # 检查是否有指标名称匹配
+            for m in metrics:
+                if m.get("name") == metric_name or m.get("name_en") == metric_name:
+                    return False  # 找到了
+            return True  # 没找到
+        except Exception as e:
+            print(f"[AutoFailDetector] 检查指标失败: {e}")
+            return True  # 检查失败时保守返回 True
 
     def _is_sql_error(self, error: str) -> bool:
         """判断是否为 SQL 相关错误"""

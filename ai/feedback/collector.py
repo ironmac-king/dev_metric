@@ -75,7 +75,7 @@ class FeedbackCollector:
                     host=os.getenv("PG_HOST", "localhost"),
                     port=os.getenv("PG_PORT", "5432"),
                     user=os.getenv("PG_USER", "postgres"),
-                    password=os.getenv("PG_PASSWORD", "admin123"),
+                    password=os.getenv("PG_PASSWORD"),
                     database=os.getenv("PG_DATABASE", "dev_metric")
                 )
             except Exception as e:
