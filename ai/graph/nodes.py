@@ -116,11 +116,26 @@ class ConversationNodes:
                     "entities": confirmation_entities,
                 }
 
-        if rule_result and rule_result.confidence > 0.5:
-            intent_result = rule_result
+        # Step 2: LLM 审核规则引擎结果（方案C：LLM最终决策）
+        if rule_result:
+            print(f"[DEBUG intent_node] 规则引擎初排: intent={rule_result.intent}, confidence={rule_result.confidence}")
+
+            # 获取可用指标列表
+            available_metrics = list(self.rule_engine.metric_templates.keys()) if hasattr(self.rule_engine, 'metric_templates') else []
+
+            # LLM 审核并纠正
+            print(f"[DEBUG intent_node] LLM 开始审核规则引擎结果...")
+            intent_result = self.llm_engine.validate_and_correct_intent(
+                text=last_message,
+                rule_intent=rule_result.intent,
+                rule_entities=rule_result.entities or {},
+                available_metrics=available_metrics,
+                inherited_entities=inherited_entities
+            )
+            print(f"[DEBUG intent_node] LLM 审核后: intent={intent_result.intent}, confidence={intent_result.confidence}")
         else:
-            # Step 2: LLM 兜底
-            print(f"[DEBUG intent_node] 规则引擎未匹配，调用 LLM")
+            # 规则引擎没结果，直接用 LLM
+            print(f"[DEBUG intent_node] 规则引擎无结果，直接调用 LLM")
             intent_result = self.llm_engine.recognize_intent_enhanced(
                 last_message,
                 inherited_entities

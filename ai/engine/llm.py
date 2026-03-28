@@ -170,6 +170,132 @@ class LLMEngine:
                 entities={}
             )
 
+    def validate_and_correct_intent(
+        self,
+        text: str,
+        rule_intent: str,
+        rule_entities: dict,
+        available_metrics: list = None,
+        inherited_entities: dict = None
+    ) -> IntentResult:
+        """
+        LLM 审核并纠正规则引擎的结果
+
+        Args:
+            text: 用户输入
+            rule_intent: 规则引擎识别的意图
+            rule_entities: 规则引擎识别的实体
+            available_metrics: 可用的指标列表
+            inherited_entities: 继承的上下文
+
+        Returns:
+            IntentResult: LLM 审核后的最终结果
+        """
+        import json
+
+        # 获取指标列表
+        if available_metrics is None:
+            available_metrics = self._get_available_metrics()
+
+        metrics_str = ", ".join(available_metrics[:30]) if available_metrics else "无"
+        inherited = ""
+        if inherited_entities:
+            metric = inherited_entities.get("inherited_metric")
+            if metric:
+                inherited = f"\n继承的上下文：用户上一轮正在查询指标「{metric}」"
+
+        prompt = f"""你是一个业务指标查询助手。规则引擎对用户问题进行了初步分析，请审核并纠正。
+
+## 用户问题
+「{text}」{inherited}
+
+## 规则引擎初步结果
+- 识别意图: {rule_intent}
+- 识别指标: {rule_entities.get('metric_name', '无')}
+- 时间范围: {rule_entities.get('time_range', '无')}
+
+## 可用的指标列表（部分）
+{metrics_str}
+{"...(还有更多)" if len(available_metrics) > 30 else ""}
+
+## 你的任务
+1. 判断规则引擎的结果是否正确
+2. 如果正确，保持原结果
+3. 如果错误或不完整，纠正它
+4. 如果用户问的是指标，必须从上面的指标列表中选择，不要瞎编
+
+## 意图类型说明
+- query_value: 查询指标数值
+- query_trend: 查询指标趋势（上升/下降）
+- query_comparison: 对比分析（对比两个时间/维度）
+- query_metadata: 查询指标元数据（业务口径、技术口径）
+- greeting: 打招呼
+- thanks: 感谢
+- bye: 告别
+
+## 输出格式（必须是合法 JSON）
+{{
+  "is_valid": true/false,  // 规则引擎结果是否正确
+  "intent": "最终确认的意图",
+  "confidence": 0.0-1.0,  // 置信度
+  "metric_name": "指标名称（从可用列表中选择，不要瞎编）",
+  "time_range": "时间范围",
+  "correction_reason": "纠正原因（如果纠正了的话）",
+  "entities": {{}}
+}}
+
+请输出JSON："""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=300,
+            )
+            content = response.choices[0].message.content.strip()
+
+            # 提取 JSON 部分
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+
+            result = json.loads(content)
+
+            is_valid = result.get("is_valid", True)
+            correction_reason = result.get("correction_reason", "")
+
+            # 如果纠正了，打印原因
+            if not is_valid and correction_reason:
+                print(f"[LLM] 纠正意图: {correction_reason}")
+
+            return IntentResult(
+                intent=result.get("intent", rule_intent),
+                confidence=result.get("confidence", 0.7),
+                entities={
+                    "metric_name": result.get("metric_name"),
+                    "time_range": result.get("time_range"),
+                    **result.get("entities", {})
+                }
+            )
+
+        except json.JSONDecodeError as e:
+            print(f"[LLM] 意图审核 JSON 解析失败: {e}")
+            # 解析失败，使用规则引擎结果
+            return IntentResult(
+                intent=rule_intent,
+                confidence=0.5,
+                entities=rule_entities
+            )
+        except Exception as e:
+            print(f"[LLM] 意图审核失败: {e}")
+            return IntentResult(
+                intent=rule_intent,
+                confidence=0.5,
+                entities=rule_entities
+            )
+
     def _parse_intent_fallback(self, text: str, inherited_entities: dict = None) -> IntentResult:
         """意图识别回退 - 简单规则匹配"""
         text_lower = text.lower()
