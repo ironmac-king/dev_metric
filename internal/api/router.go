@@ -122,6 +122,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			nlp.POST("/sql-templates", handler.CreateSQLTemplate)
 			nlp.PUT("/sql-templates/:id", handler.UpdateSQLTemplate)
 			nlp.DELETE("/sql-templates/:id", handler.DeleteSQLTemplate)
+
+			// 向量重建 API
+			nlp.POST("/intents/rebuild-embeddings", handler.RebuildIntentEmbeddings)
+			nlp.POST("/metrics/rebuild-embeddings", handler.RebuildMetricEmbeddings)
 		}
 
 		// 认证
