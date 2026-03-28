@@ -213,3 +213,47 @@ type SQLTemplate struct {
 func (SQLTemplate) TableName() string {
 	return "sql_templates"
 }
+
+// MetricRelation 指标关系表
+type MetricRelation struct {
+	ID              uint      `json:"id" gorm:"primaryKey"`
+	SourceMetricCode string `json:"source_metric_code" gorm:"size:64;index"`
+	TargetMetricCode string `json:"target_metric_code" gorm:"size:64;index"`
+	RelationType    string `json:"relation_type" gorm:"size:32"`
+	Weight          float64 `json:"weight" gorm:"type:decimal(3,2)"`
+	Description     string `json:"description" gorm:"type:text"`
+	Status          int16   `json:"status" gorm:"default:1"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+func (MetricRelation) TableName() string {
+	return "metric_relations"
+}
+
+// IntentEmbedding 意图向量表
+type IntentEmbedding struct {
+	ID         uint      `json:"id" gorm:"primaryKey"`
+	IntentID   uint      `json:"intent_id" gorm:"index"`
+	IntentType string    `json:"intent_type" gorm:"size:32"`
+	Text       string    `json:"text" gorm:"type:text"`
+	Embedding  string    `json:"embedding" gorm:"type:text"` // 存储为 JSON 字符串
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (IntentEmbedding) TableName() string {
+	return "intent_embeddings"
+}
+
+// MetricEmbedding 指标向量表
+type MetricEmbedding struct {
+	ID         uint      `json:"id" gorm:"primaryKey"`
+	MetricID   uint      `json:"metric_id" gorm:"index"`
+	MetricCode string    `json:"metric_code" gorm:"size:64"`
+	Text       string    `json:"text" gorm:"type:text"`
+	Embedding  string    `json:"embedding" gorm:"type:text"` // 存储为 JSON 字符串
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (MetricEmbedding) TableName() string {
+	return "metric_embeddings"
+}
