@@ -4,7 +4,7 @@
 """
 import re
 import httpx
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from ai.graph.state import IntentResult, SQLGenerationResult
 
 
@@ -613,3 +613,13 @@ class RuleEngine:
             params={"metric_code": metric_code},
             is_safe=True
         )
+
+    def semantic_search_intent(self, query: str) -> Tuple[Optional[str], float]:
+        """语义搜索意图（委托给 SemanticSearch）"""
+        from ai.engine.semantic_search import semantic_search
+        return semantic_search.match_intent(query)
+
+    def semantic_search_metric(self, query: str) -> Tuple[Optional[Dict], float]:
+        """语义搜索指标（委托给 SemanticSearch）"""
+        from ai.engine.semantic_search import semantic_search
+        return semantic_search.match_metric(query)
