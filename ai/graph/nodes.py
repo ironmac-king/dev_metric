@@ -120,8 +120,8 @@ class ConversationNodes:
         if rule_result:
             print(f"[DEBUG intent_node] 规则引擎初排: intent={rule_result.intent}, confidence={rule_result.confidence}")
 
-            # 获取可用指标列表
-            available_metrics = list(self.rule_engine.metric_templates.keys()) if hasattr(self.rule_engine, 'metric_templates') else []
+            # 获取完整指标库（包含 metric_code, metric_name, unit）
+            available_metrics_info = self.rule_engine.metric_templates if hasattr(self.rule_engine, 'metric_templates') else {}
 
             # LLM 审核并纠正
             print(f"[DEBUG intent_node] LLM 开始审核规则引擎结果...")
@@ -129,7 +129,7 @@ class ConversationNodes:
                 text=last_message,
                 rule_intent=rule_result.intent,
                 rule_entities=rule_result.entities or {},
-                available_metrics=available_metrics,
+                available_metrics_info=available_metrics_info,
                 inherited_entities=inherited_entities
             )
             print(f"[DEBUG intent_node] LLM 审核后: intent={intent_result.intent}, confidence={intent_result.confidence}")

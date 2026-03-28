@@ -175,7 +175,7 @@ class LLMEngine:
         text: str,
         rule_intent: str,
         rule_entities: dict,
-        available_metrics: list = None,
+        available_metrics_info: dict = None,
         inherited_entities: dict = None
     ) -> IntentResult:
         """
@@ -185,7 +185,7 @@ class LLMEngine:
             text: 用户输入
             rule_intent: 规则引擎识别的意图
             rule_entities: 规则引擎识别的实体
-            available_metrics: 可用的指标列表
+            available_metrics_info: 可用的指标完整信息（dict，key为指标名）
             inherited_entities: 继承的上下文
 
         Returns:
@@ -193,11 +193,21 @@ class LLMEngine:
         """
         import json
 
-        # 获取指标列表
-        if available_metrics is None:
-            available_metrics = self._get_available_metrics()
+        # 获取指标列表和完整信息
+        if available_metrics_info is None:
+            available_metrics_info = {}
 
-        metrics_str = ", ".join(available_metrics[:30]) if available_metrics else "无"
+        # 构建指标列表字符串（格式化输出）
+        metrics_lines = []
+        for name, info in available_metrics_info.items():
+            if isinstance(info, dict):
+                code = info.get("metric_code", "")
+                unit = info.get("unit", "")
+                metrics_lines.append(f"- {name} ({code}) - 单位: {unit}" if unit else f"- {name} ({code})")
+        metrics_str = "\n".join(metrics_lines[:50])  # 最多50个
+        if len(metrics_lines) > 50:
+            metrics_str += f"\n...（还有 {len(metrics_lines) - 50} 个指标）"
+
         inherited = ""
         if inherited_entities:
             metric = inherited_entities.get("inherited_metric")
@@ -214,21 +224,21 @@ class LLMEngine:
 - 识别指标: {rule_entities.get('metric_name', '无')}
 - 时间范围: {rule_entities.get('time_range', '无')}
 
-## 可用的指标列表（部分）
-{metrics_str}
-{"...(还有更多)" if len(available_metrics) > 30 else ""}
+## 可用的指标库（{len(metrics_lines)} 个指标）
+{metrics_str if metrics_str else '无'}
 
 ## 你的任务
 1. 判断规则引擎的结果是否正确
 2. 如果正确，保持原结果
 3. 如果错误或不完整，纠正它
-4. 如果用户问的是指标，必须从上面的指标列表中选择，不要瞎编
+4. **重要**：如果用户问的是指标，必须从上面的指标库中选择，不要瞎编指标名
+5. 从指标库选择时，注意中英文名称的对应（如"访客数"和"visitors"是同一个指标）
 
 ## 意图类型说明
 - query_value: 查询指标数值
 - query_trend: 查询指标趋势（上升/下降）
 - query_comparison: 对比分析（对比两个时间/维度）
-- query_metadata: 查询指标元数据（业务口径、技术口径）
+- query_metadata: 查询指标元数据（业务口径、技术口径、定义等）
 - greeting: 打招呼
 - thanks: 感谢
 - bye: 告别
@@ -238,7 +248,8 @@ class LLMEngine:
   "is_valid": true/false,  // 规则引擎结果是否正确
   "intent": "最终确认的意图",
   "confidence": 0.0-1.0,  // 置信度
-  "metric_name": "指标名称（从可用列表中选择，不要瞎编）",
+  "metric_name": "指标名称（必须从指标库中选择）",
+  "metric_code": "指标编号",
   "time_range": "时间范围",
   "correction_reason": "纠正原因（如果纠正了的话）",
   "entities": {{}}
@@ -251,7 +262,7 @@ class LLMEngine:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
-                max_tokens=300,
+                max_tokens=400,
             )
             content = response.choices[0].message.content.strip()
 
@@ -270,11 +281,27 @@ class LLMEngine:
             if not is_valid and correction_reason:
                 print(f"[LLM] 纠正意图: {correction_reason}")
 
+            # 如果 LLM 返回了指标名，尝试从指标库中获取更多信息
+            metric_name = result.get("metric_name")
+            metric_code = result.get("metric_code")
+            if metric_name and available_metrics_info:
+                if metric_name in available_metrics_info:
+                    info = available_metrics_info[metric_name]
+                    if isinstance(info, dict) and not metric_code:
+                        metric_code = info.get("metric_code", "")
+                # 尝试用 metric_code 查找
+                if not metric_code:
+                    for name, info in available_metrics_info.items():
+                        if isinstance(info, dict) and info.get("metric_code") == metric_code:
+                            metric_name = name
+                            break
+
             return IntentResult(
                 intent=result.get("intent", rule_intent),
                 confidence=result.get("confidence", 0.7),
                 entities={
-                    "metric_name": result.get("metric_name"),
+                    "metric_name": metric_name,
+                    "metric_code": metric_code,
                     "time_range": result.get("time_range"),
                     **result.get("entities", {})
                 }
