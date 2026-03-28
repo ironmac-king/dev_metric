@@ -1,0 +1,37 @@
+# 数据库配置
+database:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: admin123
+  name: dev_metric
+
+# StarRocks 配置
+starrocks:
+  host: localhost
+  port: 9030
+  user: root
+  password: ""
+  database: metrics_db
+
+# 钉钉配置
+dingtalk:
+  webhook: ""
+  secret: ""
+
+# LLM 配置（实际配置存储在数据库）
+llm:
+  default_provider: "tencent"
+
+# Go 服务配置
+app:
+  host: 0.0.0.0
+  port: 8080
+  jwt_secret: "your-super-secret-key-change-in-production"
+  jwt_expire: 3600        # Access Token 过期时间（秒）
+  refresh_expire: 604800   # Refresh Token 过期时间（秒）
+
+# Python AI 服务配置
+ai:
+  host: localhost
+  port: 8081
