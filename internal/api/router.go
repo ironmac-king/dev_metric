@@ -91,6 +91,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			metadata.GET("/metrics/:id", handler.GetMetricMetadata)
 			metadata.GET("/dimensions", handler.GetAllDimensions)
 			metadata.GET("/terms", handler.GetAllTerms)
+			metadata.POST("/terms", handler.CreateTerm)
+			metadata.PUT("/terms/:id", handler.UpdateTerm)
+			metadata.DELETE("/terms/:id", handler.DeleteTerm)
 		}
 
 		// LLM 配置管理

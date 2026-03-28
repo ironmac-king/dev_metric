@@ -501,10 +501,18 @@ function showTermDialog(mode, term = null) {
 async function saveTerm() {
   try {
     if (editingTermId.value) {
-      // TODO: 调用更新接口
+      await fetch(`/api/v1/metadata/terms/${editingTermId.value}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(termForm.value)
+      })
       ElMessage.success('更新成功')
     } else {
-      // TODO: 调用创建接口
+      await fetch('/api/v1/metadata/terms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(termForm.value)
+      })
       ElMessage.success('创建成功')
     }
     termDialogVisible.value = false
@@ -515,8 +523,16 @@ async function saveTerm() {
 }
 
 async function deleteTerm(id) {
-  await ElMessageBox.confirm('确定删除这个映射吗？', '提示', { type: 'warning' })
-  ElMessage.info('功能开发中')
+  try {
+    await ElMessageBox.confirm('确定删除这个映射吗？', '提示', { type: 'warning' })
+    await fetch(`/api/v1/metadata/terms/${id}`, { method: 'DELETE' })
+    ElMessage.success('删除成功')
+    loadData()
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error('删除失败')
+    }
+  }
 }
 
 // 优化建议

@@ -75,3 +75,50 @@ func GetAllTerms(c *gin.Context) {
 	postgres.Get().Find(&terms)
 	response.Success(c, terms)
 }
+
+// CreateTerm 创建业务术语
+func CreateTerm(c *gin.Context) {
+	var term model.BusinessTerm
+	if err := c.ShouldBindJSON(&term); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+
+	if err := postgres.Get().Create(&term).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "创建失败")
+		return
+	}
+
+	response.Success(c, term)
+}
+
+// UpdateTerm 更新业务术语
+func UpdateTerm(c *gin.Context) {
+	id := c.Param("id")
+	var term model.BusinessTerm
+
+	if err := postgres.Get().First(&term, id).Error; err != nil {
+		response.Error(c, response.CodeNotFound, "术语不存在")
+		return
+	}
+
+	var updates map[string]interface{}
+	if err := c.ShouldBindJSON(&updates); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+
+	if err := postgres.Get().Model(&term).Updates(updates).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "更新失败")
+		return
+	}
+
+	response.Success(c, term)
+}
+
+// DeleteTerm 删除业务术语
+func DeleteTerm(c *gin.Context) {
+	id := c.Param("id")
+	postgres.Get().Delete(&model.BusinessTerm{}, id)
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
