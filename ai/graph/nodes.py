@@ -158,13 +158,32 @@ class ConversationNodes:
         """
         entities = state.entities.copy()
 
-        # 继承上一轮的指标信息
-        if not entities.get("metric_id") and not entities.get("metric_name"):
-            prev_entities = getattr(state, 'previous_entities', {})
-            if prev_entities:
-                entities.setdefault("metric_name", prev_entities.get("metric_name"))
-                entities.setdefault("metric_code", prev_entities.get("metric_code"))
-                entities.setdefault("metric_id", prev_entities.get("metric_id"))
+        # ========== 获取对话上下文 ==========
+        ctx = getattr(state, 'conversation_context', None)
+
+        # ========== 继承上轮的指标信息 ==========
+        if ctx and not entities.get("metric_id") and not entities.get("metric_name"):
+            if ctx.current_metric_name or ctx.current_metric_code:
+                entities.setdefault("metric_name", ctx.current_metric_name)
+                entities.setdefault("metric_code", ctx.current_metric_code)
+                entities.setdefault("metric_id", ctx.current_metric_id)
+                print(f"[DEBUG entity_node] 继承上轮指标: {ctx.current_metric_name}")
+
+        # ========== 继承上轮的时间表达式 ==========
+        if ctx and not entities.get("time_range") and ctx.current_time_expr:
+            # 检查用户是否明确指定了新的时间
+            last_message = state.messages[-1].content if state.messages else ""
+            has_explicit_time = any(kw in last_message for kw in ["昨天", "今日", "本周", "本月", "去年"])
+            if not has_explicit_time:
+                entities.setdefault("time_range", ctx.current_time_expr)
+                print(f"[DEBUG entity_node] 继承上轮时间: {ctx.current_time_expr}")
+
+        # ========== 继承上轮的维度 ==========
+        if ctx:
+            for dim_key, dim_value in ctx.current_dimensions.items():
+                if dim_key not in entities and dim_value:
+                    entities[dim_key] = dim_value
+                    print(f"[DEBUG entity_node] 继承上轮维度: {dim_key}={dim_value}")
 
         last_message = state.messages[-1].content if state.messages else ""
 
