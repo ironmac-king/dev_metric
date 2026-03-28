@@ -4,6 +4,8 @@ import (
 	"dev_metric/config"
 	"dev_metric/internal/model"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -58,4 +60,83 @@ func Close() error {
 		return err
 	}
 	return sqlDB.Close()
+}
+
+// SearchIntentEmbeddings 搜索相似意图向量（使用余弦距离）
+func (db *DB) SearchIntentEmbeddings(queryEmbedding []float64, topK int) ([]IntentEmbedding, error) {
+	var results []IntentEmbedding
+
+	// 将 []float64 转换为 pgvector 格式
+	embeddingStr := formatVectorForPostgres(queryEmbedding)
+
+	sql := `
+        SELECT id, intent_id, intent_type, text, embedding, updated_at,
+               1 - (embedding <=> ?::vector) AS similarity
+        FROM intent_embeddings
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> ?::vector
+        LIMIT ?
+    `
+
+	rows, err := db.Raw(sql, embeddingStr, embeddingStr, topK).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var item IntentEmbedding
+		var similarity float64
+		if err := rows.Scan(&item.ID, &item.IntentID, &item.IntentType, &item.Text, &item.Embedding, &item.UpdatedAt, &similarity); err != nil {
+			return nil, err
+		}
+		results = append(results, item)
+	}
+
+	return results, nil
+}
+
+// SearchMetricEmbeddings 搜索相似指标向量
+func (db *DB) SearchMetricEmbeddings(queryEmbedding []float64, topK int) ([]MetricEmbedding, error) {
+	var results []MetricEmbedding
+
+	embeddingStr := formatVectorForPostgres(queryEmbedding)
+
+	sql := `
+        SELECT id, metric_id, metric_code, text, embedding, updated_at,
+               1 - (embedding <=> ?::vector) AS similarity
+        FROM metric_embeddings
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> ?::vector
+        LIMIT ?
+    `
+
+	rows, err := db.Raw(sql, embeddingStr, embeddingStr, topK).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var item MetricEmbedding
+		var similarity float64
+		if err := rows.Scan(&item.ID, &item.MetricID, &item.MetricCode, &item.Text, &item.Embedding, &item.UpdatedAt, &similarity); err != nil {
+			return nil, err
+		}
+		results = append(results, item)
+	}
+
+	return results, nil
+}
+
+// formatVectorForPostgres 将 []float64 转换为 pgvector 格式字符串 "[0.1,0.2,0.3]"
+func formatVectorForPostgres(v []float64) string {
+	if len(v) == 0 {
+		return "[]"
+	}
+	parts := make([]string, len(v))
+	for i, f := range v {
+		parts[i] = strconv.FormatFloat(f, 'f', 6, 64)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
