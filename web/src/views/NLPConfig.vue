@@ -7,6 +7,20 @@
       </div>
     </header>
 
+    <el-card class="mb-3">
+      <template #header>
+        <span>向量管理</span>
+      </template>
+      <el-space>
+        <el-button type="primary" @click="rebuildIntentEmbeddings">
+          重新生成意图向量
+        </el-button>
+        <el-button type="primary" @click="rebuildMetricEmbeddings">
+          重新生成指标向量
+        </el-button>
+      </el-space>
+    </el-card>
+
     <el-tabs v-model="activeTab" class="config-tabs">
       <!-- 意图模板 -->
       <el-tab-pane label="意图模板" name="intents">
@@ -609,6 +623,32 @@ function formatTime(timeStr) {
   if (!timeStr) return '-'
   const d = new Date(timeStr)
   return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// 重新生成意图向量
+async function rebuildIntentEmbeddings() {
+  try {
+    const response = await fetch('/api/v1/nlp/intents/rebuild-embeddings', { method: 'POST' })
+    const data = await response.json()
+    if (data.code === 0) {
+      ElMessage.success(`成功重建 ${data.data.count} 条意图向量`)
+    }
+  } catch (error) {
+    ElMessage.error('重建失败')
+  }
+}
+
+// 重新生成指标向量
+async function rebuildMetricEmbeddings() {
+  try {
+    const response = await fetch('/api/v1/nlp/metrics/rebuild-embeddings', { method: 'POST' })
+    const data = await response.json()
+    if (data.code === 0) {
+      ElMessage.success(`成功重建 ${data.data.count} 条指标向量`)
+    }
+  } catch (error) {
+    ElMessage.error('重建失败')
+  }
 }
 
 onMounted(() => {
