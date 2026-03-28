@@ -19,6 +19,7 @@ class ThinkingStep(BaseModel):
     step: str                                    # 步骤名称
     status: str = "pending"                      # pending/completed/error
     content: Optional[str] = None                 # 步骤内容/详情
+    llm_used: bool = False                       # 是否使用了 LLM
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
@@ -57,6 +58,10 @@ class ConversationState(BaseModel):
     applied_defaults: Dict[str, Any] = {}
     # ========== 思考过程相关字段 ==========
     thinking_steps: List[ThinkingStep] = []      # 思考步骤列表
+    # ========== 图谱上下文相关字段 ==========
+    context: Dict[str, Any] = {}                 # 知识图谱上下文（上游/下游/相关指标）
+    # ========== 多轮对话上下文继承 ==========
+    conversation_context: Optional[ConversationContext] = None  # 对话上下文
 
 
 class IntentResult(BaseModel):
@@ -64,6 +69,32 @@ class IntentResult(BaseModel):
     intent: str
     confidence: float
     entities: Dict[str, Any] = {}
+
+
+class ConversationContext(BaseModel):
+    """多轮对话上下文 - 用于继承上轮对话的关键信息"""
+    current_metric_id: Optional[int] = None
+    current_metric_code: Optional[str] = None
+    current_metric_name: Optional[str] = None
+    current_time_expr: Optional[str] = None
+    current_dimensions: Dict[str, str] = {}
+    time_inherited: bool = False
+    dimensions_inherited: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "current_metric_id": self.current_metric_id,
+            "current_metric_code": self.current_metric_code,
+            "current_metric_name": self.current_metric_name,
+            "current_time_expr": self.current_time_expr,
+            "current_dimensions": self.current_dimensions,
+            "time_inherited": self.time_inherited,
+            "dimensions_inherited": self.dimensions_inherited,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ConversationContext":
+        return cls(**data) if data else cls()
 
 
 class SQLGenerationResult(BaseModel):
