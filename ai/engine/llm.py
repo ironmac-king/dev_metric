@@ -15,11 +15,61 @@ class LLMEngine:
     """LLM 引擎"""
 
     def __init__(self):
+        self._config = None
+        self._load_llm_config()
+
+    def _load_llm_config(self):
+        """从数据库加载 LLM 配置"""
+        try:
+            import httpx
+            response = httpx.get(
+                f"http://localhost:8080/api/v1/llm/configs",
+                timeout=5
+            )
+            if response.status_code == 200:
+                data = response.json()
+                configs = data.get("data", [])
+
+                # 找默认配置
+                default_config = None
+                for cfg in configs:
+                    if cfg.get("is_default") == 1 or cfg.get("is_default") == True:
+                        default_config = cfg
+                        break
+
+                # 如果没有默认的，用第一个
+                if not default_config and configs:
+                    default_config = configs[0]
+
+                if default_config:
+                    self._config = default_config
+                    self.client = OpenAI(
+                        api_key=default_config.get("api_key", ""),
+                        base_url=default_config.get("api_url", ""),
+                    )
+                    self.model = default_config.get("model_name", "deepseek-3.2")
+                    print(f"[LLMEngine] 已加载 LLM 配置: {default_config.get('name')}")
+                    return
+
+            # 配置加载失败，使用环境变量作为回退
+            print("[LLMEngine] 使用环境变量配置（LLM 配置未找到）")
+            self._use_env_config()
+        except Exception as e:
+            print(f"[LLMEngine] 加载 LLM 配置失败: {e}，使用环境变量")
+            self._use_env_config()
+
+    def _use_env_config(self):
+        """使用环境变量配置"""
         self.client = OpenAI(
             api_key=os.getenv("TENCENT_API_KEY", ""),
             base_url=os.getenv("TENCENT_API_URL", ""),
         )
-        self.model = "ms-nbgbkz24"
+        self.model = os.getenv("LLM_MODEL", "ms-nbgbkz24")
+
+    def reload_config(self):
+        """重新加载配置（用于配置变更后刷新）"""
+        self._config = None
+        self._load_llm_config()
 
     def recognize_intent(self, text: str) -> IntentResult:
         """LLM 意图识别"""
