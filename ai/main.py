@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
 
@@ -47,6 +47,7 @@ class ThinkingStepResponse(BaseModel):
     status: str
     content: Optional[str] = None
     timestamp: Optional[str] = None
+    llm_used: bool = False
 
 
 class AskResponse(BaseModel):
@@ -55,6 +56,10 @@ class AskResponse(BaseModel):
     suggest: List[str]
     sql: Optional[str] = None
     thinking_steps: Optional[List[ThinkingStepResponse]] = None
+    needs_clarification: Optional[bool] = None
+    clarification_message: Optional[str] = None
+    clarification_type: Optional[str] = None
+    matched_metrics: Optional[List[Dict[str, Any]]] = None
 
 
 @app.post("/api/v1/ask", response_model=AskResponse)
@@ -77,7 +82,11 @@ async def ask_question(req: AskRequest):
     # 清除上一轮的错误状态，开始新一轮查询
     state.needs_clarification = False
     state.clarification_message = None
+    state.clarification_type = None
+    state.matched_metrics = None
     state.error = None
+    # 清除 dimension，避免残留上一轮的维度信息干扰当前查询
+    state.entities.pop("dimension", None)
     # 清空思考步骤
     state.thinking_steps = []
 
@@ -121,7 +130,6 @@ async def ask_question(req: AskRequest):
             state.clarification_message = sql_updates.get("clarification_message")
             state.clarification_type = sql_updates.get("clarification_type")
             state.matched_metrics = sql_updates.get("matched_metrics")
-            print(f"[DEBUG main] 设置追问状态: clarification_type={state.clarification_type}, matched_metrics数量={len(state.matched_metrics) if state.matched_metrics else 0}")
 
         # 执行查询
         execute_updates = conversation_nodes.execute_node(state)
@@ -172,7 +180,8 @@ async def ask_question(req: AskRequest):
                 step=step.step,
                 status=step.status,
                 content=step.content,
-                timestamp=step.timestamp.isoformat() if step.timestamp else None
+                timestamp=step.timestamp.isoformat() if step.timestamp else None,
+                llm_used=step.llm_used
             ))
 
         return AskResponse(
@@ -180,7 +189,11 @@ async def ask_question(req: AskRequest):
             answer=response_updates.get("answer", "抱歉，我无法回答这个问题。"),
             suggest=response_updates.get("suggest_questions", []),
             sql=current_sql,
-            thinking_steps=thinking_steps if thinking_steps else None
+            thinking_steps=thinking_steps if thinking_steps else None,
+            needs_clarification=state.needs_clarification if hasattr(state, 'needs_clarification') else None,
+            clarification_message=state.clarification_message if hasattr(state, 'clarification_message') else None,
+            clarification_type=state.clarification_type if hasattr(state, 'clarification_type') else None,
+            matched_metrics=state.matched_metrics if hasattr(state, 'matched_metrics') else None
         )
 
     except Exception as e:

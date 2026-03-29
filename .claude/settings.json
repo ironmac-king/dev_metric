@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Agent",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "deny": []
+  },
+  "goals": {
+    "default": "高效完成开发任务，代码质量优先"
+  },
+  "project": {
+    "name": "业务指标管理平台",
+    "path": "C:\\Users\\4014\\Desktop\\dev_metric\\dev_metric",
+    "language": "zh-CN"
+  },
+  "behavior": {
+    "confirmationRequired": [
+      "git push --force",
+      "rm -rf",
+      "drop table"
+    ]
+  }
+}

@@ -14,6 +14,11 @@ import (
 
 var db *gorm.DB
 
+// VectorDB 包装 gorm.DB 用于向量搜索
+type VectorDB struct {
+	*gorm.DB
+}
+
 func Init(cfg *config.DatabaseConfig) error {
 	var err error
 	dsn := cfg.DSN()
@@ -53,6 +58,11 @@ func Get() *gorm.DB {
 	return db
 }
 
+// GetVectorDB 返回 VectorDB 实例用于向量搜索
+func GetVectorDB() *VectorDB {
+	return &VectorDB{db}
+}
+
 // Close 关闭数据库连接
 func Close() error {
 	sqlDB, err := db.DB()
@@ -63,8 +73,8 @@ func Close() error {
 }
 
 // SearchIntentEmbeddings 搜索相似意图向量（使用余弦距离）
-func (db *DB) SearchIntentEmbeddings(queryEmbedding []float64, topK int) ([]IntentEmbedding, error) {
-	var results []IntentEmbedding
+func (db *VectorDB) SearchIntentEmbeddings(queryEmbedding []float64, topK int) ([]model.IntentEmbedding, error) {
+	var results []model.IntentEmbedding
 
 	// 将 []float64 转换为 pgvector 格式
 	embeddingStr := formatVectorForPostgres(queryEmbedding)
@@ -85,7 +95,7 @@ func (db *DB) SearchIntentEmbeddings(queryEmbedding []float64, topK int) ([]Inte
 	defer rows.Close()
 
 	for rows.Next() {
-		var item IntentEmbedding
+		var item model.IntentEmbedding
 		var similarity float64
 		if err := rows.Scan(&item.ID, &item.IntentID, &item.IntentType, &item.Text, &item.Embedding, &item.UpdatedAt, &similarity); err != nil {
 			return nil, err
@@ -97,8 +107,8 @@ func (db *DB) SearchIntentEmbeddings(queryEmbedding []float64, topK int) ([]Inte
 }
 
 // SearchMetricEmbeddings 搜索相似指标向量
-func (db *DB) SearchMetricEmbeddings(queryEmbedding []float64, topK int) ([]MetricEmbedding, error) {
-	var results []MetricEmbedding
+func (db *VectorDB) SearchMetricEmbeddings(queryEmbedding []float64, topK int) ([]model.MetricEmbedding, error) {
+	var results []model.MetricEmbedding
 
 	embeddingStr := formatVectorForPostgres(queryEmbedding)
 
@@ -118,7 +128,7 @@ func (db *DB) SearchMetricEmbeddings(queryEmbedding []float64, topK int) ([]Metr
 	defer rows.Close()
 
 	for rows.Next() {
-		var item MetricEmbedding
+		var item model.MetricEmbedding
 		var similarity float64
 		if err := rows.Scan(&item.ID, &item.MetricID, &item.MetricCode, &item.Text, &item.Embedding, &item.UpdatedAt, &similarity); err != nil {
 			return nil, err

@@ -43,9 +43,13 @@ class LLMEngine:
 
                 if default_config:
                     self._config = default_config
+                    # OpenAI SDK expects base_url without /chat/completions
+                    api_url = default_config.get("api_url", "")
+                    if api_url.endswith("/chat/completions"):
+                        api_url = api_url.rsplit("/chat/completions", 1)[0]
                     self.client = OpenAI(
                         api_key=default_config.get("api_key", ""),
-                        base_url=default_config.get("api_url", ""),
+                        base_url=api_url,
                     )
                     self.model = default_config.get("model_name", "deepseek-3.2")
                     print(f"[LLMEngine] 已加载 LLM 配置: {default_config.get('name')}")
@@ -176,7 +180,8 @@ class LLMEngine:
         rule_intent: str,
         rule_entities: dict,
         available_metrics_info: dict = None,
-        inherited_entities: dict = None
+        inherited_entities: dict = None,
+        metric_context: dict = None
     ) -> IntentResult:
         """
         LLM 审核并纠正规则引擎的结果
@@ -187,6 +192,7 @@ class LLMEngine:
             rule_entities: 规则引擎识别的实体
             available_metrics_info: 可用的指标完整信息（dict，key为指标名）
             inherited_entities: 继承的上下文
+            metric_context: 指标知识图谱上下文（包含上游、下游、相关指标）
 
         Returns:
             IntentResult: LLM 审核后的最终结果
@@ -214,6 +220,23 @@ class LLMEngine:
             if metric:
                 inherited = f"\n继承的上下文：用户上一轮正在查询指标「{metric}」"
 
+        # 构建知识图谱上下文
+        graph_context = ""
+        if metric_context:
+            upstream = metric_context.get("upstream", [])
+            downstream = metric_context.get("downstream", [])
+            correlated = metric_context.get("correlated", [])
+
+            if upstream:
+                upstream_str = ", ".join([f"「{m['name']}」" for m in upstream[:5]])
+                graph_context += f"\n上游指标（影响当前指标）：{upstream_str}"
+            if downstream:
+                downstream_str = ", ".join([f"「{m['name']}」" for m in downstream[:5]])
+                graph_context += f"\n下游指标（被当前指标影响）：{downstream_str}"
+            if correlated:
+                correlated_str = ", ".join([f"「{m['name']}」" for m in correlated[:5]])
+                graph_context += f"\n相关指标：{correlated_str}"
+
         prompt = f"""你是一个业务指标查询助手。规则引擎对用户问题进行了初步分析，请审核并纠正。
 
 ## 用户问题
@@ -227,12 +250,19 @@ class LLMEngine:
 ## 可用的指标库（{len(metrics_lines)} 个指标）
 {metrics_str if metrics_str else '无'}
 
+## 指标知识图谱上下文
+{graph_context if graph_context else '（暂无图谱数据）'}
+
 ## 你的任务
 1. 判断规则引擎的结果是否正确
 2. 如果正确，保持原结果
 3. 如果错误或不完整，纠正它
 4. **重要**：如果用户问的是指标，必须从上面的指标库中选择，不要瞎编指标名
 5. 从指标库选择时，注意中英文名称的对应（如"访客数"和"visitors"是同一个指标）
+6. **关键**：如果用户问题中包含泛指词如"各平台"、"各地区"、"各维度"等，说明用户想要多维度分组查询。但指标库中一般没有"各平台X指标"这种指标，只有具体平台的具体指标。此时应该：
+   - 识别用户实际想查询的基础指标（如"销售额"）
+   - 在entities中设置dimension字段为用户提到的维度
+   - 保持is_valid=True，让后续流程处理维度追问
 
 ## 意图类型说明
 - query_value: 查询指标数值
@@ -251,6 +281,7 @@ class LLMEngine:
   "metric_name": "指标名称（必须从指标库中选择）",
   "metric_code": "指标编号",
   "time_range": "时间范围",
+  "dimension": "维度（如平台、地区等，如果用户提到的话）",
   "correction_reason": "纠正原因（如果纠正了的话）",
   "entities": {{}}
 }}
@@ -714,6 +745,30 @@ class LLMEngine:
             reason=f"缺少{field}",
             missing_fields=[field],
         )
+
+    def call(self, prompt: str, temperature: float = 0.7, max_tokens: int = 2000) -> str:
+        """
+        通用 LLM 调用接口
+
+        Args:
+            prompt: 提示词
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+
+        Returns:
+            LLM 返回的文本内容
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[LLMEngine] LLM 调用失败: {e}")
+            return ""
 
 
 class CircuitBreaker:

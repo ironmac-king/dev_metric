@@ -329,7 +329,7 @@ async function loadSession(id) {
         content: m.content,
         sql: m.sql,
         created_at: m.created_at,
-        thinking_expanded: false,
+        thinking_expanded: true,
         thinking_steps: []
       }))
       await scrollToBottom()
@@ -376,7 +376,7 @@ async function handleSend() {
     role: 'user',
     content: question,
     created_at: new Date().toISOString(),
-    thinking_expanded: false,
+    thinking_expanded: true,
     thinking_steps: []
   })
 
@@ -405,7 +405,7 @@ async function handleSend() {
         content: res.data.answer,
         sql: res.data.sql,
         created_at: new Date().toISOString(),
-        thinking_expanded: false,
+        thinking_expanded: true,
         thinking_steps: res.data.thinking_steps || []
       })
     }
@@ -414,7 +414,7 @@ async function handleSend() {
       role: 'assistant',
       content: '抱歉，服务暂时不可用，请稍后再试。',
       created_at: new Date().toISOString(),
-      thinking_expanded: false,
+      thinking_expanded: true,
       thinking_steps: []
     })
   } finally {
