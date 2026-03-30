@@ -1,212 +1,260 @@
 <template>
-  <div class="nlp-config">
-    <header class="header">
+  <div class="nlp-config-page">
+    <!-- Page Header -->
+    <div class="page-header">
       <div class="header-left">
-        <h1 class="page-title">NLP 配置</h1>
-        <p class="page-desc">管理意图识别和 SQL 模板</p>
+        <div class="page-icon">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+            <path d="M4 6L11 4L18 6V16L11 18L4 16V6Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+            <path d="M8 11L10 13L14 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="header-text">
+          <h1>意图配置</h1>
+          <p>管理意图识别和 SQL 模板</p>
+        </div>
       </div>
-    </header>
+    </div>
 
-    <el-card class="mb-3">
-      <template #header>
+    <!-- Vector Management -->
+    <div class="vector-bar">
+      <div class="vector-info">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="9" cy="9" r="3" fill="currentColor"/>
+        </svg>
         <span>向量管理</span>
-      </template>
-      <el-space>
-        <el-button type="primary" @click="rebuildIntentEmbeddings">
+      </div>
+      <div class="vector-actions">
+        <el-button @click="rebuildIntentEmbeddings">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 7C2 4.2 4.2 2 7 2C9.8 2 12 4.2 12 7M12 7C12 9.8 9.8 12 7 12C4.2 12 2 9.8 2 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <path d="M10 5L12 7L10 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
           重新生成意图向量
         </el-button>
-        <el-button type="primary" @click="rebuildMetricEmbeddings">
+        <el-button @click="rebuildMetricEmbeddings">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 7C2 4.2 4.2 2 7 2C9.8 2 12 4.2 12 7M12 7C12 9.8 9.8 12 7 12C4.2 12 2 9.8 2 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <path d="M10 5L12 7L10 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
           重新生成指标向量
         </el-button>
-      </el-space>
-    </el-card>
+      </div>
+    </div>
 
-    <el-tabs v-model="activeTab" class="config-tabs">
-      <!-- 意图模板 -->
-      <el-tab-pane label="意图模板" name="intents">
-        <div class="section">
-          <div class="section-header">
-            <h2 class="section-title">意图模板管理</h2>
-            <el-button type="primary" @click="showIntentDialog('create')">
-              添加模板
-            </el-button>
+    <!-- Tabs -->
+    <div class="config-tabs-wrapper">
+      <el-tabs v-model="activeTab" class="config-tabs">
+        <!-- 意图模板 -->
+        <el-tab-pane label="意图模板" name="intents">
+          <div class="section">
+            <div class="section-header">
+              <h2 class="section-title">意图模板管理</h2>
+              <el-button type="primary" class="btn-primary" @click="showIntentDialog('create')">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                添加模板
+              </el-button>
+            </div>
+            <div class="table-card">
+              <table class="config-table">
+                <thead>
+                  <tr>
+                    <th>模板名称</th>
+                    <th>意图类型</th>
+                    <th>匹配模式</th>
+                    <th>优先级</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="tpl in intentTemplates" :key="tpl.id">
+                    <td class="name-cell">{{ tpl.name }}</td>
+                    <td><span class="intent-badge">{{ tpl.intent }}</span></td>
+                    <td class="patterns-cell">{{ tpl.patterns }}</td>
+                    <td class="priority-cell">{{ tpl.priority }}</td>
+                    <td>
+                      <el-switch
+                        v-model="tpl.status"
+                        :active-value="1"
+                        :inactive-value="0"
+                        @change="updateIntentStatus(tpl)"
+                      />
+                    </td>
+                    <td>
+                      <div class="action-group">
+                        <el-button link class="action-btn" @click="showIntentDialog('edit', tpl)">编辑</el-button>
+                        <el-button link class="action-btn delete" @click="deleteIntent(tpl.id)">删除</el-button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
-          <div class="table-card">
-            <table class="config-table">
-              <thead>
-                <tr>
-                  <th>模板名称</th>
-                  <th>意图类型</th>
-                  <th>匹配模式</th>
-                  <th>优先级</th>
-                  <th>状态</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="tpl in intentTemplates" :key="tpl.id">
-                  <td>{{ tpl.name }}</td>
-                  <td><span class="intent-badge">{{ tpl.intent }}</span></td>
-                  <td class="patterns-cell">{{ tpl.patterns }}</td>
-                  <td>{{ tpl.priority }}</td>
-                  <td>
-                    <el-switch
-                      v-model="tpl.status"
-                      :active-value="1"
-                      :inactive-value="0"
-                      @change="updateIntentStatus(tpl)"
-                    />
-                  </td>
-                  <td>
-                    <el-button link type="primary" @click="showIntentDialog('edit', tpl)">编辑</el-button>
-                    <el-button link type="danger" @click="deleteIntent(tpl.id)">删除</el-button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </el-tab-pane>
+        </el-tab-pane>
 
-      <!-- SQL 模板 -->
-      <el-tab-pane label="SQL 模板" name="sql">
-        <div class="section">
-          <div class="section-header">
-            <h2 class="section-title">SQL 模板管理</h2>
-            <el-button type="primary" @click="showSQLDialog('create')">
-              添加模板
-            </el-button>
+        <!-- SQL 模板 -->
+        <el-tab-pane label="SQL 模板" name="sql">
+          <div class="section">
+            <div class="section-header">
+              <h2 class="section-title">SQL 模板管理</h2>
+              <el-button type="primary" class="btn-primary" @click="showSQLDialog('create')">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                添加模板
+              </el-button>
+            </div>
+            <div class="table-card">
+              <table class="config-table">
+                <thead>
+                  <tr>
+                    <th>模板名称</th>
+                    <th>指标编号</th>
+                    <th>适意图图</th>
+                    <th>SQL 模板</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="tpl in sqlTemplates" :key="tpl.id">
+                    <td class="name-cell">{{ tpl.name }}</td>
+                    <td><code class="metric-code">{{ tpl.metric_code }}</code></td>
+                    <td><span class="intent-badge">{{ tpl.intent }}</span></td>
+                    <td class="sql-cell">{{ tpl.sql_template }}</td>
+                    <td>
+                      <el-switch
+                        v-model="tpl.status"
+                        :active-value="1"
+                        :inactive-value="0"
+                        @change="updateSQLStatus(tpl)"
+                      />
+                    </td>
+                    <td>
+                      <div class="action-group">
+                        <el-button link class="action-btn" @click="showSQLDialog('edit', tpl)">编辑</el-button>
+                        <el-button link class="action-btn delete" @click="deleteSQL(tpl.id)">删除</el-button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
-          <div class="table-card">
-            <table class="config-table">
-              <thead>
-                <tr>
-                  <th>模板名称</th>
-                  <th>指标编号</th>
-                  <th>适用意图</th>
-                  <th>SQL 模板</th>
-                  <th>状态</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="tpl in sqlTemplates" :key="tpl.id">
-                  <td>{{ tpl.name }}</td>
-                  <td><code class="metric-code">{{ tpl.metric_code }}</code></td>
-                  <td><span class="intent-badge">{{ tpl.intent }}</span></td>
-                  <td class="sql-cell">{{ tpl.sql_template }}</td>
-                  <td>
-                    <el-switch
-                      v-model="tpl.status"
-                      :active-value="1"
-                      :inactive-value="0"
-                      @change="updateSQLStatus(tpl)"
-                    />
-                  </td>
-                  <td>
-                    <el-button link type="primary" @click="showSQLDialog('edit', tpl)">编辑</el-button>
-                    <el-button link type="danger" @click="deleteSQL(tpl.id)">删除</el-button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </el-tab-pane>
+        </el-tab-pane>
 
-      <!-- 业务术语 -->
-      <el-tab-pane label="业务术语" name="terms">
-        <div class="section">
-          <div class="section-header">
-            <h2 class="section-title">业务术语映射</h2>
-            <el-button type="primary" @click="showTermDialog('create')">
-              添加映射
-            </el-button>
+        <!-- 业务术语 -->
+        <el-tab-pane label="业务术语" name="terms">
+          <div class="section">
+            <div class="section-header">
+              <h2 class="section-title">业务术语映射</h2>
+              <el-button type="primary" class="btn-primary" @click="showTermDialog('create')">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                添加映射
+              </el-button>
+            </div>
+            <div class="table-card">
+              <table class="config-table">
+                <thead>
+                  <tr>
+                    <th>术语</th>
+                    <th>描述</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="term in businessTerms" :key="term.id">
+                    <td class="name-cell">{{ term.term }}</td>
+                    <td class="desc-cell">{{ term.description }}</td>
+                    <td>
+                      <div class="action-group">
+                        <el-button link class="action-btn" @click="showTermDialog('edit', term)">编辑</el-button>
+                        <el-button link class="action-btn delete" @click="deleteTerm(term.id)">删除</el-button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
-          <div class="table-card">
-            <table class="config-table">
-              <thead>
-                <tr>
-                  <th>术语</th>
-                  <th>描述</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="term in businessTerms" :key="term.id">
-                  <td>{{ term.term }}</td>
-                  <td>{{ term.description }}</td>
-                  <td>
-                    <el-button link type="primary" @click="showTermDialog('edit', term)">编辑</el-button>
-                    <el-button link type="danger" @click="deleteTerm(term.id)">删除</el-button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </el-tab-pane>
+        </el-tab-pane>
 
-      <!-- 优化建议 -->
-      <el-tab-pane label="优化建议" name="suggestions">
-        <div class="section">
-          <div class="section-header">
-            <h2 class="section-title">基于负反馈的优化建议</h2>
-            <el-button type="success" @click="triggerAnalysis" :loading="analyzing">
-              手动触发分析
-            </el-button>
+        <!-- 意图反馈审核 -->
+        <el-tab-pane label="意图反馈" name="feedback">
+          <div class="section">
+            <div class="section-header">
+              <h2 class="section-title">意图反馈审核</h2>
+              <el-button @click="loadFeedback" :loading="feedbackLoading" class="btn-refresh">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M2 7C2 4.2 4.2 2 7 2C9.8 2 12 4.2 12 7M12 7C12 9.8 9.8 12 7 12C4.2 12 2 9.8 2 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                  <path d="M10 5L12 7L10 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                刷新
+              </el-button>
+            </div>
+            <div class="table-card">
+              <table class="config-table" v-if="intentFeedbacks.length > 0">
+                <thead>
+                  <tr>
+                    <th>用户输入</th>
+                    <th>预测意图</th>
+                    <th>正确意图</th>
+                    <th>会话ID</th>
+                    <th>时间</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="fb in intentFeedbacks" :key="fb.id">
+                    <td class="name-cell">{{ fb.user_input }}</td>
+                    <td><span class="intent-badge error">{{ fb.predicted_intent }}</span></td>
+                    <td><span class="intent-badge success">{{ fb.correct_intent }}</span></td>
+                    <td class="mono-cell">{{ fb.session_id?.substring(0, 8) }}...</td>
+                    <td class="time-cell">{{ formatTime(fb.created_at) }}</td>
+                    <td>
+                      <el-tag v-if="fb.status === 0" type="warning" size="small">待审核</el-tag>
+                      <el-tag v-else-if="fb.status === 1" type="success" size="small">已通过</el-tag>
+                      <el-tag v-else type="info" size="small">已拒绝</el-tag>
+                    </td>
+                    <td>
+                      <div class="action-group" v-if="fb.status === 0">
+                        <el-button link class="action-btn approve" @click="reviewFeedback(fb, 1)">通过</el-button>
+                        <el-button link class="action-btn delete" @click="reviewFeedback(fb, 2)">拒绝</el-button>
+                      </div>
+                      <span v-else class="reviewed-label">已处理</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else class="empty-state">
+                <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                  <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="2"/>
+                  <path d="M16 24L22 30L32 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <p>暂无待审核的意图反馈</p>
+              </div>
+            </div>
           </div>
-          <div class="info-box">
-            <p>系统每天凌晨2点自动分析负反馈，生成优化建议。管理员审核后可以"应用"或"忽略"。</p>
-          </div>
-          <div class="table-card" v-if="optimizationSuggestions.length > 0">
-            <table class="config-table">
-              <thead>
-                <tr>
-                  <th>建议类型</th>
-                  <th>目标表</th>
-                  <th>建议内容</th>
-                  <th>失败次数</th>
-                  <th>置信度</th>
-                  <th>原因</th>
-                  <th>时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="sug in optimizationSuggestions" :key="sug.id">
-                  <td><span class="type-badge" :class="sug.suggestion_type">{{ getTypeLabel(sug.suggestion_type) }}</span></td>
-                  <td><code class="metric-code">{{ sug.target_table }}</code></td>
-                  <td class="value-cell">{{ sug.suggested_value }}</td>
-                  <td><span class="fail-count">{{ sug.fail_count }}</span></td>
-                  <td><span class="confidence">{{ (sug.confidence * 100).toFixed(0) }}%</span></td>
-                  <td class="reason-cell">{{ sug.reason || '-' }}</td>
-                  <td>{{ formatTime(sug.created_at) }}</td>
-                  <td>
-                    <el-button link type="success" @click="applySuggestion(sug.id)">应用</el-button>
-                    <el-button link type="info" @click="ignoreSuggestion(sug.id)">忽略</el-button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <el-empty v-else description="暂无待审核的优化建议" />
-        </div>
-      </el-tab-pane>
-    </el-tabs>
+        </el-tab-pane>
+      </el-tabs>
+    </div>
 
-    <!-- 意图模板弹窗 -->
-    <el-dialog
-      v-model="intentDialogVisible"
-      :title="intentDialogTitle"
-      width="600px"
-    >
-      <el-form :model="intentForm" label-width="100px">
+    <!-- Intent Dialog -->
+    <el-dialog v-model="intentDialogVisible" :title="intentDialogTitle" width="550px" class="config-dialog">
+      <el-form :model="intentForm" label-width="90px" class="config-form">
         <el-form-item label="模板名称">
           <el-input v-model="intentForm.name" placeholder="如：查询昨日数据" />
         </el-form-item>
         <el-form-item label="意图类型">
-          <el-select v-model="intentForm.intent" placeholder="选择意图">
+          <el-select v-model="intentForm.intent" placeholder="选择意图" style="width: 100%">
             <el-option label="查数值" value="query_value" />
             <el-option label="查趋势" value="query_trend" />
             <el-option label="对比分析" value="query_comparison" />
@@ -230,23 +278,19 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="intentDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveIntent">保存</el-button>
+        <el-button size="large" @click="intentDialogVisible = false">取消</el-button>
+        <el-button type="primary" size="large" @click="saveIntent" class="btn-primary">保存</el-button>
       </template>
     </el-dialog>
 
-    <!-- SQL 模板弹窗 -->
-    <el-dialog
-      v-model="sqlDialogVisible"
-      :title="sqlDialogTitle"
-      width="700px"
-    >
-      <el-form :model="sqlForm" label-width="100px">
+    <!-- SQL Dialog -->
+    <el-dialog v-model="sqlDialogVisible" :title="sqlDialogTitle" width="650px" class="config-dialog">
+      <el-form :model="sqlForm" label-width="90px" class="config-form">
         <el-form-item label="模板名称">
           <el-input v-model="sqlForm.name" placeholder="如：访客数昨日查询" />
         </el-form-item>
         <el-form-item label="指标编号">
-          <el-select v-model="sqlForm.metric_code" placeholder="选择指标" filterable>
+          <el-select v-model="sqlForm.metric_code" placeholder="选择指标" filterable style="width: 100%">
             <el-option
               v-for="m in metricsList"
               :key="m.metric_code"
@@ -256,7 +300,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="适用意图">
-          <el-select v-model="sqlForm.intent" placeholder="选择意图">
+          <el-select v-model="sqlForm.intent" placeholder="选择意图" style="width: 100%">
             <el-option label="查数值" value="query_value" />
             <el-option label="查趋势" value="query_trend" />
             <el-option label="对比分析" value="query_comparison" />
@@ -275,18 +319,14 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="sqlDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveSQL">保存</el-button>
+        <el-button size="large" @click="sqlDialogVisible = false">取消</el-button>
+        <el-button type="primary" size="large" @click="saveSQL" class="btn-primary">保存</el-button>
       </template>
     </el-dialog>
 
-    <!-- 业务术语弹窗 -->
-    <el-dialog
-      v-model="termDialogVisible"
-      :title="termDialogTitle"
-      width="500px"
-    >
-      <el-form :model="termForm" label-width="100px">
+    <!-- Term Dialog -->
+    <el-dialog v-model="termDialogVisible" :title="termDialogTitle" width="450px" class="config-dialog">
+      <el-form :model="termForm" label-width="80px" class="config-form">
         <el-form-item label="术语">
           <el-input v-model="termForm.term" placeholder="如：访客数" />
         </el-form-item>
@@ -295,25 +335,34 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="termDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveTerm">保存</el-button>
+        <el-button size="large" @click="termDialogVisible = false">取消</el-button>
+        <el-button type="primary" size="large" @click="saveTerm" class="btn-primary">保存</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { metricAPI } from '../api'
+
+// 切换到反馈标签时加载数据
+watch(activeTab, (tab) => {
+  if (tab === 'feedback' && intentFeedbacks.value.length === 0) {
+    loadFeedback()
+  }
+})
 
 const activeTab = ref('intents')
 const intentTemplates = ref([])
 const sqlTemplates = ref([])
 const businessTerms = ref([])
 const metricsList = ref([])
+const intentFeedbacks = ref([])
+const feedbackLoading = ref(false)
 
-// 意图模板弹窗
+// Intent Dialog
 const intentDialogVisible = ref(false)
 const intentDialogTitle = ref('添加意图模板')
 const intentForm = ref({
@@ -326,7 +375,7 @@ const intentForm = ref({
 })
 const editingIntentId = ref(null)
 
-// SQL 模板弹窗
+// SQL Dialog
 const sqlDialogVisible = ref(false)
 const sqlDialogTitle = ref('添加 SQL 模板')
 const sqlForm = ref({
@@ -339,7 +388,7 @@ const sqlForm = ref({
 })
 const editingSQLId = ref(null)
 
-// 业务术语弹窗
+// Term Dialog
 const termDialogVisible = ref(false)
 const termDialogTitle = ref('添加术语映射')
 const termForm = ref({
@@ -348,31 +397,25 @@ const termForm = ref({
 })
 const editingTermId = ref(null)
 
-// 优化建议
-const optimizationSuggestions = ref([])
-const analyzing = ref(false)
-
 async function loadData() {
   try {
-    const [intentsRes, sqlRes, termsRes, metricsRes, suggestionsRes] = await Promise.all([
+    const [intentsRes, sqlRes, termsRes, metricsRes] = await Promise.all([
       fetch('/api/v1/nlp/intents').then(r => r.json()),
       fetch('/api/v1/nlp/sql-templates').then(r => r.json()),
       fetch('/api/v1/metadata/terms').then(r => r.json()),
-      metricAPI.list({ page: 1, page_size: 500 }),
-      fetch('http://localhost:8081/api/v1/feedback/suggestions').then(r => r.json()).catch(() => ({ data: [] }))
+      metricAPI.list({ page: 1, page_size: 500 })
     ])
 
     intentTemplates.value = intentsRes.data || []
     sqlTemplates.value = sqlRes.data || []
     businessTerms.value = termsRes.data || []
     metricsList.value = metricsRes.data?.list || []
-    optimizationSuggestions.value = suggestionsRes.data || []
   } catch (e) {
     console.error('加载数据失败:', e)
   }
 }
 
-// 意图模板
+// Intent
 function showIntentDialog(mode, tpl = null) {
   if (mode === 'create') {
     intentDialogTitle.value = '添加意图模板'
@@ -435,7 +478,7 @@ async function deleteIntent(id) {
   }
 }
 
-// SQL 模板
+// SQL
 function showSQLDialog(mode, tpl = null) {
   if (mode === 'create') {
     sqlDialogTitle.value = '添加 SQL 模板'
@@ -498,7 +541,7 @@ async function deleteSQL(id) {
   }
 }
 
-// 业务术语
+// Term
 function showTermDialog(mode, term = null) {
   if (mode === 'create') {
     termDialogTitle.value = '添加术语映射'
@@ -537,95 +580,51 @@ async function saveTerm() {
 }
 
 async function deleteTerm(id) {
+  await ElMessageBox.confirm('确定删除这个映射吗？', '提示', { type: 'warning' })
   try {
-    await ElMessageBox.confirm('确定删除这个映射吗？', '提示', { type: 'warning' })
     await fetch(`/api/v1/metadata/terms/${id}`, { method: 'DELETE' })
     ElMessage.success('删除成功')
     loadData()
   } catch (e) {
-    if (e !== 'cancel') {
-      ElMessage.error('删除失败')
-    }
+    ElMessage.error('删除失败')
   }
 }
 
-// 优化建议
-async function loadSuggestions() {
+// Intent Feedback
+async function loadFeedback() {
+  feedbackLoading.value = true
   try {
-    const res = await fetch('http://localhost:8081/api/v1/feedback/suggestions')
+    const res = await fetch('/api/v1/feedback/intent')
     const data = await res.json()
-    optimizationSuggestions.value = data.data || []
+    intentFeedbacks.value = data.data || []
   } catch (e) {
-    console.error('加载优化建议失败:', e)
-  }
-}
-
-async function triggerAnalysis() {
-  analyzing.value = true
-  try {
-    await fetch('http://localhost:8081/api/v1/feedback/analyze', { method: 'POST' })
-    ElMessage.success('分析已触发，请稍后刷新查看结果')
-    // 延迟刷新
-    setTimeout(() => loadSuggestions(), 2000)
-  } catch (e) {
-    ElMessage.error('触发分析失败')
+    console.error('加载反馈失败:', e)
   } finally {
-    analyzing.value = false
+    feedbackLoading.value = false
   }
 }
 
-async function applySuggestion(id) {
+async function reviewFeedback(feedback, status) {
   try {
-    const res = await fetch(`http://localhost:8081/api/v1/feedback/suggestions/${id}/apply`, {
+    await fetch(`/api/v1/feedback/intent/${feedback.id}/review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ applied_by: 'admin' })
+      body: JSON.stringify({ status })
     })
-    const data = await res.json()
-    if (data.success) {
-      ElMessage.success('建议已应用')
-      loadSuggestions()
-    } else {
-      ElMessage.error(data.message || '应用失败')
-    }
-  } catch (e) {
-    ElMessage.error('应用失败')
-  }
-}
-
-async function ignoreSuggestion(id) {
-  try {
-    const res = await fetch(`http://localhost:8081/api/v1/feedback/suggestions/${id}/ignore`, {
-      method: 'POST'
-    })
-    const data = await res.json()
-    if (data.success) {
-      ElMessage.success('已忽略')
-      loadSuggestions()
-    } else {
-      ElMessage.error(data.message || '操作失败')
-    }
+    ElMessage.success(status === 1 ? '已通过' : '已拒绝')
+    loadFeedback()
   } catch (e) {
     ElMessage.error('操作失败')
   }
 }
 
-function getTypeLabel(type) {
-  const labels = {
-    'add_intent_pattern': '新增模式',
-    'modify_pattern': '修改模式',
-    'add_synonym': '添加同义词'
-  }
-  return labels[type] || type
-}
-
 function formatTime(timeStr) {
   if (!timeStr) return '-'
   const d = new Date(timeStr)
-  return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+  return `${d.getMonth()+1}/${d.getDate()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`
 }
 
-// 重新生成意图向量
+// Vector
 async function rebuildIntentEmbeddings() {
   try {
     const response = await fetch('/api/v1/nlp/intents/rebuild-embeddings', { method: 'POST' })
@@ -638,7 +637,6 @@ async function rebuildIntentEmbeddings() {
   }
 }
 
-// 重新生成指标向量
 async function rebuildMetricEmbeddings() {
   try {
     const response = await fetch('/api/v1/nlp/metrics/rebuild-embeddings', { method: 'POST' })
@@ -657,57 +655,169 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.nlp-config {
-  padding: 48px;
+.nlp-config-page {
+  padding: 28px 32px;
+  max-width: 1440px;
+  margin: 0 auto;
+  background: var(--bg-primary);
+  min-height: 100vh;
 }
 
-.header {
+/* Header */
+.page-header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 32px;
+  align-items: center;
+  margin-bottom: 24px;
 }
 
-.page-title {
-  font-size: 28px;
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.page-icon {
+  width: 44px;
+  height: 44px;
+  background: var(--primary-glow);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+}
+
+.header-text h1 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 4px 0;
+  letter-spacing: -0.3px;
+}
+
+.header-text p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* Vector Bar */
+.vector-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  padding: 14px 20px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.vector-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
   font-weight: 600;
-  color: #1a1a1a;
-  letter-spacing: -0.5px;
-  margin-bottom: 4px;
+  color: var(--text-primary);
 }
 
-.page-desc {
-  font-size: 14px;
-  color: #7177a4;
+.vector-actions {
+  display: flex;
+  gap: 10px;
 }
 
-.config-tabs {
-  background: #fff;
-  border-radius: 12px;
+.vector-actions .el-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+/* Tabs Wrapper */
+.config-tabs-wrapper {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
   padding: 24px;
+  box-shadow: var(--shadow-sm);
 }
 
+/* Tabs */
+.config-tabs :deep(.el-tabs__header) {
+  margin: 0 0 20px 0;
+  padding: 0;
+}
+
+.config-tabs :deep(.el-tabs__nav-wrap::after) {
+  display: none;
+}
+
+.config-tabs :deep(.el-tabs__item) {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.config-tabs :deep(.el-tabs__item.is-active) {
+  color: var(--primary);
+}
+
+.config-tabs :deep(.el-tabs__active-bar) {
+  height: 2px;
+  background: var(--primary);
+}
+
+/* Section */
 .section {
-  margin-bottom: 32px;
+  margin-bottom: 24px;
+}
+
+.section:last-child {
+  margin-bottom: 0;
 }
 
 .section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .section-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #1a1a1a;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
 }
 
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--primary);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-lg);
+  font-weight: 600;
+  font-size: 14px;
+  padding: 12px 24px;
+  transition: all 0.25s ease;
+  box-shadow: var(--shadow-card);
+}
+
+.btn-primary:hover {
+  background: var(--primary-dark);
+  transform: translateY(-2px) scale(1.01);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* Table */
 .table-card {
-  background: #fff;
-  border: 1px solid #ebeef5;
-  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
@@ -718,21 +828,21 @@ onMounted(() => {
 
 .config-table th {
   text-align: left;
-  padding: 14px 20px;
-  font-size: 12px;
+  padding: 12px 14px;
+  font-size: 11px;
   font-weight: 600;
-  color: #7177a4;
+  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  background: #fafafa;
-  border-bottom: 1px solid #ebeef5;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
 }
 
 .config-table td {
-  padding: 14px 20px;
-  border-bottom: 1px solid #f0f0f5;
-  font-size: 14px;
-  color: #1a1a1a;
+  padding: 12px 14px;
+  border-bottom: 1px solid #f4f4f5;
+  font-size: 13px;
+  color: var(--text-primary);
 }
 
 .config-table tr:last-child td {
@@ -740,125 +850,170 @@ onMounted(() => {
 }
 
 .config-table tr:hover td {
-  background: #fafafa;
+  background: var(--bg-primary);
+}
+
+.name-cell {
+  font-weight: 600;
 }
 
 .intent-badge {
   display: inline-block;
-  padding: 4px 10px;
-  background: #f0f0ff;
-  color: #6366f1;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
+  padding: 3px 8px;
+  background: var(--primary-glow);
+  color: var(--primary);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .patterns-cell {
-  max-width: 200px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-secondary);
 }
 
-.sql-cell {
-  max-width: 250px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 13px;
-  color: #7177a4;
+.priority-cell {
+  font-family: 'SF Mono', Monaco, monospace;
+  color: var(--text-secondary);
 }
 
 .metric-code {
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-family: 'SF Mono', Monaco, monospace;
   font-size: 12px;
-  background: #f5f5f5;
+  background: var(--bg-primary);
   padding: 2px 6px;
   border-radius: 4px;
 }
 
-:deep(.el-tabs__item) {
-  font-weight: 500;
-}
-
-:deep(.el-tabs__item.is-active) {
-  color: #6366f1;
-}
-
-:deep(.el-tabs__active-bar) {
-  background-color: #6366f1;
-}
-
-:deep(.el-select) {
-  width: 100%;
-}
-
-.info-box {
-  background: #f0f9eb;
-  border: 1px solid #e1f3d8;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  font-size: 13px;
-  color: #67c23a;
-}
-
-.info-box p {
-  margin: 0;
-}
-
-.type-badge {
-  display: inline-block;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.type-badge.add_intent_pattern {
-  background: #ecf5ff;
-  color: #409eff;
-}
-
-.type-badge.modify_pattern {
-  background: #fef0f0;
-  color: #f56c6c;
-}
-
-.type-badge.add_synonym {
-  background: #f0f9eb;
-  color: #67c23a;
-}
-
-.value-cell {
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fail-count {
-  display: inline-block;
-  padding: 2px 8px;
-  background: #fef0f0;
-  color: #f56c6c;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.confidence {
-  color: #67c23a;
-  font-weight: 500;
-}
-
-.reason-cell {
+.sql-cell {
   max-width: 200px;
-  font-size: 12px;
-  color: #7177a4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.desc-cell {
+  color: var(--text-secondary);
+  max-width: 250px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-group {
+  display: flex;
+  gap: 2px;
+}
+
+.action-btn {
+  padding: 4px 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: 4px;
+}
+
+.action-btn:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.action-btn.delete:hover {
+  color: #ef4444;
+  background: #fef2f2;
+}
+
+.action-btn.approve:hover {
+  color: #22c55e;
+  background: #f0fdf4;
+}
+
+.intent-badge.error {
+  background: #fef2f2;
+  color: #ef4444;
+}
+
+.intent-badge.success {
+  background: #f0fdf4;
+  color: #22c55e;
+}
+
+.mono-cell {
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.time-cell {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.reviewed-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.empty-state {
+  padding: 48px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.empty-state svg {
+  margin-bottom: 12px;
+  opacity: 0.4;
+}
+
+.empty-state p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.btn-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+:deep(.el-switch.is-checked .el-switch__core) {
+  background-color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* Dialog */
+.config-dialog :deep(.el-dialog__header) {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-dialog :deep(.el-dialog__title) {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.config-form :deep(.el-form-item__label) {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.config-form :deep(.el-input__wrapper),
+.config-form :deep(.el-textarea__inner) {
+  border-radius: var(--radius-sm);
+  box-shadow: none !important;
+  border: 1px solid var(--border);
+}
+
+.config-form :deep(.el-input__wrapper:hover),
+.config-form :deep(.el-input__wrapper.is-focus) {
+  border-color: var(--primary);
 }
 </style>
