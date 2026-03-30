@@ -666,10 +666,12 @@ class ConversationNodes:
             if contains_time_word and (metric_code or metric_name):
                 # 这是时间限定查询，构建一个基于 metric_code 的查询 SQL
                 # 尝试从 metric_client 获取 starrocks_sql
+                print(f"[DEBUG sql_gen] contains_time_word=True, metric_code={metric_code}, metric_name={metric_name}, metric_id={metric_id}")
                 actual_starrocks_sql = None
                 if metric_id:
                     try:
                         metric_info = self.metric_client.get_metric(metric_id)
+                        print(f"[DEBUG sql_gen] get_metric({metric_id}) returned: starrocks_sql={repr(metric_info.get('starrocks_sql', 'NOT_FOUND')[:100] if metric_info.get('starrocks_sql') else 'EMPTY')}")
                         if metric_info and metric_info.get("starrocks_sql"):
                             actual_starrocks_sql = metric_info.get("starrocks_sql")
                     except Exception as e:
@@ -890,6 +892,36 @@ class ConversationNodes:
 
         return None
 
+    # 维度配置缓存（避免每次查询都调 API）
+    _table_dimensions_cache: Dict[str, Dict[str, Dict]] = {}
+
+    def _get_table_dimensions_cached(self, table_name: str) -> Dict[str, Dict]:
+        """获取表的维度配置，带缓存"""
+        import json
+        if table_name in _table_dimensions_cache:
+            return _table_dimensions_cache[table_name]
+        try:
+            configs = self.metric_client.get_dimension_configs(table_name)
+            result = {}
+            for cfg in configs:
+                if cfg.get("status") == 1:
+                    result[cfg["dimension_name"]] = {
+                        "column_name": cfg["column_name"],
+                        "values": json.loads(cfg["dimension_values"]) if cfg.get("dimension_values") else []
+                    }
+            _table_dimensions_cache[table_name] = result
+        except Exception as e:
+            print(f"[DEBUG] 获取维度配置失败: {e}")
+            _table_dimensions_cache[table_name] = {}
+        return _table_dimensions_cache[table_name]
+
+    def _extract_table_name(self, sql: str) -> str:
+        """从 SQL 中提取表名（FROM 后第一个表名）"""
+        match = re.search(r'FROM\s+([^\s,;]+)', sql, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return ""
+
     def _extract_sql_dimensions(self, entities: Dict[str, Any]) -> Dict[str, Any]:
         """
         从 entities 中提取可用于 SQL 的维度参数
@@ -937,54 +969,68 @@ class ConversationNodes:
 
         adjusted_sql = sql
 
-        # 维度字段到数据库列名的映射
-        dimension_columns = {
-            "platform": "platform",
-            "region": "region",
-            "department": "dept_id",
-            "site": "site_id",
-            "category": "category_id",
-            "device": "device_type",
-        }
+        # 从 SQL 提取表名
+        table_name = self._extract_table_name(sql)
 
-        # 1. 处理时间范围
+        # === 1. 处理时间范围（占位符替换 + 自动注入）===
         if time_info:
             start_date = time_info.get("start")
             end_date = time_info.get("end")
+            # 先替换占位符
             if start_date:
                 adjusted_sql = adjusted_sql.replace("{start_date}", f"'{start_date}'")
             if end_date:
                 adjusted_sql = adjusted_sql.replace("{end_date}", f"'{end_date}'")
-            # 也支持没有引号的版本
-            adjusted_sql = adjusted_sql.replace("{start_date}", f"'{start_date}'")
-            adjusted_sql = adjusted_sql.replace("{end_date}", f"'{end_date}'")
+            # 如果没有占位符，自动追加到 WHERE
+            if table_name and ("{start_date}" not in adjusted_sql and "{end_date}" not in adjusted_sql):
+                if start_date:
+                    time_conditions = [
+                        f"fdate = '{start_date}'",
+                        f"report_month = '{start_date[:7]}'" if len(start_date) >= 7 else None,
+                        f"the_year = '{start_date[:4]}'" if len(start_date) >= 4 else None,
+                    ]
+                    for cond in [c for c in time_conditions if c]:
+                        if "WHERE" in adjusted_sql.upper():
+                            adjusted_sql += f" AND {cond}"
+                        else:
+                            adjusted_sql += f" WHERE {cond}"
 
-        # 2. 处理动态维度 (GROUP BY)
+        # === 2. 处理动态维度 (GROUP BY) ===
         dimension = entities.get("dimension")  # 如 "department"
         if dimension:
-            # 有维度，保留 GROUP BY
-            # 替换 {dimension} 为实际的列名
-            column = dimension_columns.get(dimension, dimension)
+            # 有维度，保留 GROUP BY，从配置查列名
+            if table_name:
+                dim_configs = self._get_table_dimensions_cached(table_name)
+                if dimension in dim_configs:
+                    column = dim_configs[dimension].get("column_name", dimension)
+                else:
+                    column = dimension
+            else:
+                column = dimension
             adjusted_sql = adjusted_sql.replace("{dimension}", column)
         else:
             # 无维度，去掉 GROUP BY 相关
-            # 替换 {dimension} 为空或 *
             adjusted_sql = adjusted_sql.replace("{dimension}", "*")
-            # 去掉 GROUP BY 子句
-            import re
             adjusted_sql = re.sub(r'\s*GROUP\s+BY\s+\{[^}]*\}', '', adjusted_sql, flags=re.IGNORECASE)
             adjusted_sql = re.sub(r'\s*GROUP\s+BY\s+\*', '', adjusted_sql, flags=re.IGNORECASE)
-            # 去掉 HAVING 子句
             adjusted_sql = re.sub(r'\s*HAVING\s+\{[^}]*\}\s*IS\s+NOT\s+NULL', '', adjusted_sql, flags=re.IGNORECASE)
             adjusted_sql = re.sub(r'\s*HAVING\s+\*\s*IS\s+NOT\s+NULL', '', adjusted_sql, flags=re.IGNORECASE)
 
-        # 3. 处理其他维度参数
+        # === 3. 处理其他维度参数（使用配置而非硬编码）===
+        if table_name:
+            dim_configs = self._get_table_dimensions_cached(table_name)
+        else:
+            dim_configs = {}
+
         for dim_key, dim_value in dimensions.items():
             if not dim_value or dim_key == "dimension":
                 continue
 
-            # 获取对应的列名
-            column = dimension_columns.get(dim_key, dim_key)
+            # 从配置获取列名，没有则用 dim_key 本身
+            if dim_key in dim_configs:
+                column = dim_configs[dim_key].get("column_name", dim_key)
+            else:
+                column = dim_key
 
             # 替换 SQL 中的占位符
             for pattern in [f"{{{dim_key}}}", f"{{{{{dim_key}}}}}", f"{{{dim_key}_name}}"]:
@@ -993,18 +1039,15 @@ class ConversationNodes:
                         adjusted_sql = adjusted_sql.replace(pattern, dim_value)
                     else:
                         adjusted_sql = adjusted_sql.replace(pattern, f"'{dim_value}'")
-                    print(f"[DEBUG] 维度替换: {pattern} -> '{dim_value}'")
 
-            # 如果 SQL 中没有占位符，但有维度值，追加到 WHERE 条件
+            # 如果 SQL 中没有占位符，追加到 WHERE 条件
             if f"{{{dim_key}}}" not in adjusted_sql and f"{{{{{dim_key}}}}}" not in adjusted_sql:
-                where_key = column
                 if "WHERE" in adjusted_sql.upper():
-                    adjusted_sql += f" AND {where_key} = '{dim_value}'"
+                    adjusted_sql += f" AND {column} = '{dim_value}'"
                 else:
-                    adjusted_sql += f" WHERE {where_key} = '{dim_value}'"
+                    adjusted_sql += f" WHERE {column} = '{dim_value}'"
 
-        # 4. 清理未替换的占位符
-        import re
+        # === 4. 清理未替换的占位符 ===
         adjusted_sql = re.sub(r'\{[^}]+\}', '', adjusted_sql)
 
         return adjusted_sql
