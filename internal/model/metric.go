@@ -246,6 +246,23 @@ func (IntentEmbedding) TableName() string {
 	return "intent_embeddings"
 }
 
+// IntentFeedback 意图反馈记录
+type IntentFeedback struct {
+	ID              uint       `json:"id" gorm:"primaryKey"`
+	UserInput       string     `json:"user_input" gorm:"type:varchar(512)"`       // 用户原始输入
+	PredictedIntent string     `json:"predicted_intent" gorm:"size:32"`          // 系统识别的意图
+	CorrectIntent   string     `json:"correct_intent" gorm:"size:32"`           // 用户纠正的意图
+	Status          int16      `json:"status" gorm:"default:0"`                // 0=待审核 1=已采纳 2=已忽略
+	SessionID       string     `json:"session_id" gorm:"size:64"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ReviewedAt      *time.Time `json:"reviewed_at"`
+	ReviewedBy      string     `json:"reviewed_by" gorm:"size:64"`
+}
+
+func (IntentFeedback) TableName() string {
+	return "intent_feedback"
+}
+
 // MetricEmbedding 指标向量表
 type MetricEmbedding struct {
 	ID         uint      `json:"id" gorm:"primaryKey"`

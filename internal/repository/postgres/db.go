@@ -52,6 +52,7 @@ func autoMigrate() error {
 		&model.IntentTemplate{},
 		&model.SQLTemplate{},
 		&model.DimensionConfig{},
+		&model.IntentFeedback{},
 	)
 }
 
