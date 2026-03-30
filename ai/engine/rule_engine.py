@@ -615,9 +615,9 @@ class RuleEngine:
         )
 
     def semantic_search_intent(self, query: str) -> Tuple[Optional[str], float]:
-        """语义搜索意图（委托给 SemanticSearch）"""
+        """语义搜索意图 - 返回原始相似度分数"""
         from ai.engine.semantic_search import semantic_search
-        return semantic_search.match_intent(query)
+        return semantic_search.search_intent(query)
 
     def semantic_search_metric(self, query: str) -> Tuple[Optional[Dict], float]:
         """语义搜索指标（委托给 SemanticSearch）"""

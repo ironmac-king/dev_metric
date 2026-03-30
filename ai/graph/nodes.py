@@ -80,6 +80,7 @@ class ConversationNodes:
         INTENT_HIGH_THRESHOLD = 0.85
         INTENT_MEDIUM_THRESHOLD = 0.5
 
+        # 直接调用 semantic_search.search_intent 获取原始相似度分数
         semantic_intent_raw, similarity = self.rule_engine.semantic_search_intent(last_message)
         print(f"[DEBUG intent_node] 语义层结果: intent={semantic_intent_raw}, similarity={similarity:.3f}")
 
