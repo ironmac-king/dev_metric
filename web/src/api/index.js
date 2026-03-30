@@ -34,9 +34,27 @@ export const metricAPI = {
   update: (id, data) => api.put(`/metrics/${id}`, data),
   delete: (id) => api.delete(`/metrics/${id}`),
   getData: (id) => api.get(`/metrics/${id}/data`),
-  import: (formData) => api.post('/metrics/import', formData, {
+  getStats: () => api.get('/metrics/stats'),
+  importPreview: (formData) => api.post('/metrics/import-preview', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
-  })
+  }),
+  importCommit: (token) => api.post('/metrics/import-commit', { token })
+}
+
+// StarRocks 配置 API
+export const starrocksAPI = {
+  getConfig: () => api.get('/starrocks/config'),
+  updateConfig: (data) => api.put('/starrocks/config', data),
+  testConnection: (data) => api.post('/starrocks/config/test', data)
+}
+
+// 维度配置 API
+export const dimensionConfigAPI = {
+  list: (params) => api.get('/dimension-configs', { params }),
+  getTables: () => api.get('/dimension-configs/tables'),
+  create: (data) => api.post('/dimension-configs', data),
+  update: (id, data) => api.put(`/dimension-configs/${id}`, data),
+  delete: (id) => api.delete(`/dimension-configs/${id}`)
 }
 
 // 告警 API
@@ -51,7 +69,8 @@ export const alertAPI = {
 // Dashboard API
 export const dashboardAPI = {
   getSummary: () => api.get('/dashboard/summary'),
-  getCharts: () => api.get('/dashboard/charts')
+  getCharts: () => api.get('/dashboard/charts'),
+  getMetricCards: () => api.get('/dashboard/metric-cards')
 }
 
 // 智能问数 API
