@@ -138,6 +138,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			nlp.GET("/vectors/metrics", handler.GetMetricVectors)
 		}
 
+		// 意图反馈
+		intentFeedback := v1.Group("/feedback")
+		{
+			intentFeedback.GET("/intent", handler.ListIntentFeedback)
+			intentFeedback.POST("/intent", handler.RecordIntentFeedback)
+			intentFeedback.PUT("/intent/:id/review", handler.ReviewIntentFeedback)
+		}
+
 		// StarRocks 配置
 		starrocksRoutes := v1.Group("/starrocks")
 		{
