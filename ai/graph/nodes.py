@@ -74,35 +74,39 @@ class ConversationNodes:
                 "entities": rule_result.entities,
             }
 
-        # ========== Step 2: 语义层匹配 ==========
-        semantic_intent, match_level = self.rule_engine.semantic_search_intent(last_message)
-        print(f"[DEBUG intent_node] 语义层结果: intent={semantic_intent}, level={match_level}")
+        # ========== Step 2: 语义层匹配（置信度决策）==========
+        # 使用原始相似度分数进行置信度决策
+        # 阈值：>0.85 直接确认，0.5-0.85 LLM审核，<0.5 追问
+        INTENT_HIGH_THRESHOLD = 0.85
+        INTENT_MEDIUM_THRESHOLD = 0.5
 
-        # 语义层高置信度匹配，直接使用
-        if match_level == "high" and semantic_intent:
+        semantic_intent_raw, similarity = self.rule_engine.semantic_search_intent(last_message)
+        print(f"[DEBUG intent_node] 语义层结果: intent={semantic_intent_raw}, similarity={similarity:.3f}")
+
+        # 语义层高置信度匹配（>0.85），直接使用
+        if semantic_intent_raw and similarity > INTENT_HIGH_THRESHOLD:
             self._update_context(state, rule_result.entities)
+            self._add_thinking_step(state, "意图理解", "completed",
+                f"直接确认「{semantic_intent_raw}」，相似度 {similarity:.2f}")
             return {
-                "current_intent": semantic_intent,
+                "current_intent": semantic_intent_raw,
                 "entities": rule_result.entities,
             }
 
-        # ========== Step 3: LLM 层兜底 ==========
-        # 语义层中低置信度或规则层不确信时，调用 LLM
-        if match_level in ["medium", "low"] or rule_result.confidence < 0.9:
-            print(f"[DEBUG intent_node] 进入 LLM 层...")
-            available_metrics_info = self.rule_engine.metric_templates if hasattr(self.rule_engine, 'metric_templates') else {}
-
-            # 构建候选意图
-            candidate_intent = semantic_intent or rule_result.intent
-
-            intent_result = self.llm_engine.validate_and_correct_intent(
-                text=last_message,
-                rule_intent=candidate_intent,
-                rule_entities=rule_result.entities or {},
-                available_metrics_info=available_metrics_info,
-                inherited_entities=inherited_entities,
-                metric_context=None
-            )
+        # 语义层中等置信度（0.5-0.85），LLM 审核
+        if semantic_intent_raw and similarity > INTENT_MEDIUM_THRESHOLD:
+            print(f"[DEBUG intent_node] 进入 LLM 审核（相似度 {similarity:.2f}）...")
+            intent_result = self._llm_review_intent(state, semantic_intent_raw, similarity)
+        # 语义层低置信度（<0.5），追问用户
+        elif semantic_intent_raw and similarity <= INTENT_MEDIUM_THRESHOLD:
+            print(f"[DEBUG intent_node] 相似度太低（{similarity:.2f}），追问用户")
+            state.needs_clarification = True
+            state.clarification_type = "intent"
+            state.clarification_message = "抱歉，我没理解您的意思。您是想查询指标值、趋势、还是对比数据呢？"
+            self._add_thinking_step(state, "意图理解", "requires_clarification",
+                f"相似度 {similarity:.2f} < {INTENT_MEDIUM_THRESHOLD}，需要追问")
+            return {"current_intent": None, "entities": {}}
+        # 无语义匹配，使用规则层结果
         else:
             intent_result = rule_result
 
@@ -127,6 +131,29 @@ class ConversationNodes:
             "current_intent": intent_result.intent,
             "entities": intent_result.entities,
         }
+
+    def _llm_review_intent(self, state: ConversationState, semantic_intent: str, similarity: float):
+        """LLM 审核意图（中等置信度时调用）"""
+        last_message = state.messages[-1].content if state.messages else ""
+        available_metrics_info = self.rule_engine.metric_templates if hasattr(self.rule_engine, 'metric_templates') else {}
+
+        # 构建候选意图
+        candidate_intent = semantic_intent
+
+        intent_result = self.llm_engine.validate_and_correct_intent(
+            text=last_message,
+            rule_intent=candidate_intent,
+            rule_entities={},
+            available_metrics_info=available_metrics_info,
+            inherited_entities={},
+            metric_context=None
+        )
+
+        self._update_context(state, intent_result.entities)
+        self._add_thinking_step(state, "意图理解", "completed",
+            f"LLM审核确认「{intent_result.intent}」，原始相似度 {similarity:.2f}")
+
+        return intent_result
 
     def _update_context(self, state: ConversationState, entities: Dict[str, Any]):
         """更新对话上下文"""
@@ -898,8 +925,8 @@ class ConversationNodes:
     def _get_table_dimensions_cached(self, table_name: str) -> Dict[str, Dict]:
         """获取表的维度配置，带缓存"""
         import json
-        if table_name in _table_dimensions_cache:
-            return _table_dimensions_cache[table_name]
+        if table_name in self._table_dimensions_cache:
+            return self._table_dimensions_cache[table_name]
         try:
             configs = self.metric_client.get_dimension_configs(table_name)
             result = {}
@@ -909,11 +936,11 @@ class ConversationNodes:
                         "column_name": cfg["column_name"],
                         "values": json.loads(cfg["dimension_values"]) if cfg.get("dimension_values") else []
                     }
-            _table_dimensions_cache[table_name] = result
+            self._table_dimensions_cache[table_name] = result
         except Exception as e:
             print(f"[DEBUG] 获取维度配置失败: {e}")
-            _table_dimensions_cache[table_name] = {}
-        return _table_dimensions_cache[table_name]
+            self._table_dimensions_cache[table_name] = {}
+        return self._table_dimensions_cache[table_name]
 
     def _extract_table_name(self, sql: str) -> str:
         """从 SQL 中提取表名（FROM 后第一个表名）"""
