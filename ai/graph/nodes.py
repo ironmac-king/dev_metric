@@ -76,9 +76,9 @@ class ConversationNodes:
 
         # ========== Step 2: 语义层匹配（置信度决策）==========
         # 使用原始相似度分数进行置信度决策
-        # 阈值：>0.85 直接确认，0.5-0.85 LLM审核，<0.5 追问
+        # 阈值：>0.85 直接确认，0.35-0.85 LLM审核，<0.35 追问
         INTENT_HIGH_THRESHOLD = 0.85
-        INTENT_MEDIUM_THRESHOLD = 0.5
+        INTENT_MEDIUM_THRESHOLD = 0.35
 
         # 直接调用 semantic_search.search_intent 获取原始相似度分数
         semantic_intent_raw, similarity = self.rule_engine.semantic_search_intent(last_message)
