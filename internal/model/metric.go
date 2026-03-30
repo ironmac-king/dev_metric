@@ -49,6 +49,7 @@ type AlertRule struct {
 	Name            string    `json:"name" gorm:"size:128"`
 	ConditionType   string    `json:"condition_type" gorm:"size:32"`    // gt/lt/gte/lte/eq
 	ThresholdValue  float64   `json:"threshold_value" gorm:"type:decimal(20,4)"`
+	WhereCondition  string    `json:"where_condition" gorm:"column:where_condition;type:text"` // WHERE 条件
 	Duration        int       `json:"duration"`                         // 持续时间(分钟)
 	DingtalkWebhook string    `json:"dingtalk_webhook" gorm:"size:512"`
 	DingtalkSecret  string    `json:"dingtalk_secret" gorm:"size:128"`
@@ -86,8 +87,9 @@ type LLMConfig struct {
 	Provider   string          `json:"provider" gorm:"size:32"`      // tencent/openai/anthropic
 	APIURL     string          `json:"api_url" gorm:"size:512"`
 	APIKey     string          `json:"api_key" gorm:"size:256"`
-	ModelName  string          `json:"model_name" gorm:"size:128"`
-	IsDefault  int16          `json:"is_default" gorm:"default:0"` // 0=否 1=是
+	ModelName       string          `json:"model_name" gorm:"size:128"`
+	EmbeddingApiKey string          `json:"embedding_api_key" gorm:"size:256"` // 阿里 dashscope 向量服务 API Key
+	IsDefault      int16           `json:"is_default" gorm:"default:0"`          // 0=否 1=是
 	ExtraConfig json.RawMessage `json:"extra_config" gorm:"type:jsonb"`
 	Status     int16           `json:"status" gorm:"default:1"`     // 0=禁用 1=启用
 	CreatedAt  time.Time      `json:"created_at"`
