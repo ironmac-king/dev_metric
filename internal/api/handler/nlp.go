@@ -174,36 +174,62 @@ func RebuildIntentEmbeddings(c *gin.Context) {
 	var templates []model.IntentTemplate
 	postgres.Get().Where("status = ?", 1).Find(&templates)
 
-	count := 0
+	// 第一步：收集所有文本及其意图信息
+	type textIntent struct {
+		text      string
+		intentID  uint
+		intentType string
+	}
+	var allTexts []string
+	textIntentMap := make(map[string]textIntent) // text -> intent info
+
 	for _, tpl := range templates {
-		// 构建待向量化的文本：pattern + intent
-		texts := strings.Split(tpl.Patterns, ",")
-		for _, text := range texts {
+		patterns := strings.Split(tpl.Patterns, ",")
+		for _, text := range patterns {
 			text = strings.TrimSpace(text)
 			if text == "" {
 				continue
 			}
-			// 调用 AI 服务生成向量
-			embedding, err := generateEmbedding(text)
-			if err != nil {
-				continue
+			allTexts = append(allTexts, text)
+			textIntentMap[text] = textIntent{
+				intentID:   tpl.ID,
+				intentType: tpl.Intent,
 			}
-
-			// 存储向量
-			embeddingJSON, _ := json.Marshal(embedding)
-			emb := model.IntentEmbedding{
-				IntentID:   tpl.ID,
-				IntentType: tpl.Intent,
-				Text:       text,
-				Embedding:  string(embeddingJSON),
-			}
-
-			// 使用 upsert
-			postgres.Get().Where("intent_id = ? AND text = ?", tpl.ID, text).
-				Assign(emb).
-				FirstOrCreate(&model.IntentEmbedding{})
-			count++
 		}
+	}
+
+	if len(allTexts) == 0 {
+		response.Success(c, gin.H{"success": true, "count": 0})
+		return
+	}
+
+	// 第二步：调用 Python AI 服务批量生成向量
+	vectors, err := generateEmbeddingsBatch(allTexts)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, fmt.Sprintf("调用向量生成服务失败: %v", err))
+		return
+	}
+
+	// 第三步：存储向量到 PostgreSQL
+	count := 0
+	for text, info := range textIntentMap {
+		embedding, ok := vectors[text]
+		if !ok {
+			continue
+		}
+		embeddingJSON, _ := json.Marshal(embedding)
+		emb := model.IntentEmbedding{
+			IntentID:   info.intentID,
+			IntentType: info.intentType,
+			Text:       text,
+			Embedding:  string(embeddingJSON),
+		}
+
+		// 使用 upsert
+		postgres.Get().Where("intent_id = ? AND text = ?", info.intentID, text).
+			Assign(emb).
+			FirstOrCreate(&model.IntentEmbedding{})
+		count++
 	}
 
 	response.Success(c, gin.H{"success": true, "count": count})
@@ -252,13 +278,62 @@ func RebuildMetricEmbeddings(c *gin.Context) {
 	response.Success(c, gin.H{"success": true, "count": count})
 }
 
+// GetIntentVectors 获取所有意图向量（供 Python AI 服务调用）
+func GetIntentVectors(c *gin.Context) {
+	var embeddings []model.IntentEmbedding
+	postgres.Get().Find(&embeddings)
+
+	// 转换为响应格式
+	result := make([]map[string]interface{}, 0, len(embeddings))
+	for _, emb := range embeddings {
+		// 解析 JSON 字符串为浮点数组
+		var embedding []float64
+		if err := json.Unmarshal([]byte(emb.Embedding), &embedding); err != nil {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"text":        emb.Text,
+			"intent_type": emb.IntentType,
+			"embedding":   embedding,
+		})
+	}
+
+	response.Success(c, result)
+}
+
+// GetMetricVectors 获取所有指标向量（供 Python AI 服务调用）
+func GetMetricVectors(c *gin.Context) {
+	var embeddings []model.MetricEmbedding
+	postgres.Get().Find(&embeddings)
+
+	// 转换为响应格式
+	result := make([]map[string]interface{}, 0, len(embeddings))
+	for _, emb := range embeddings {
+		// 解析 JSON 字符串为浮点数组
+		var embedding []float64
+		if err := json.Unmarshal([]byte(emb.Embedding), &embedding); err != nil {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"metric_code": emb.MetricCode,
+			"text":        emb.Text,
+			"embedding":   embedding,
+			"info": map[string]interface{}{
+				"metric_id": emb.MetricID,
+			},
+		})
+	}
+
+	response.Success(c, result)
+}
+
 // generateEmbedding 调用 AI 服务生成向量
 func generateEmbedding(text string) ([]float64, error) {
-	apiURL := "https://dashscope.aliyuncs.com/compatible-mode/text-embedding/text-embedding-v2"
-	apiKey := os.Getenv("DASHSCOPE_API_KEY") // 需要在环境变量中配置阿里云百炼 API Key
+	apiURL := "https://api.deepseek.com/embeddings"
+	apiKey := os.Getenv("DEEPSEEK_API_KEY")
 
 	reqBody := map[string]interface{}{
-		"model": "text-embedding-v2",
+		"model": "deepseek-embedding",
 		"input": text,
 	}
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -281,12 +356,58 @@ func generateEmbedding(text string) ([]float64, error) {
 		return nil, fmt.Errorf("embedding API error: %d", resp.StatusCode)
 	}
 
-	output := result["output"].(map[string]interface{})
-	embedding := output["embedding"].([]interface{})
+	data := result["data"].([]interface{})
+	embedding := data[0].(map[string]interface{})["embedding"].([]interface{})
 	resultVec := make([]float64, len(embedding))
 	for i, v := range embedding {
 		resultVec[i] = v.(float64)
 	}
 
 	return resultVec, nil
+}
+
+// generateEmbeddingsBatch 调用 Python AI 服务批量生成向量
+// 返回 map[text]embedding
+func generateEmbeddingsBatch(texts []string) (map[string][]float64, error) {
+	aiHost := "http://localhost:8081"
+	url := aiHost + "/internal/generate-embeddings"
+
+	reqBody := map[string]interface{}{
+		"texts": texts,
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 Python 服务失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Code int `json:"code"`
+		Data []struct {
+			Text      string    `json:"text"`
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+		Message string `json:"message"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	if result.Code != 0 {
+		return nil, fmt.Errorf("Python 服务错误: %s", result.Message)
+	}
+
+	vectors := make(map[string][]float64)
+	for _, item := range result.Data {
+		vectors[item.Text] = item.Embedding
+	}
+
+	return vectors, nil
 }
