@@ -40,12 +40,17 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		metrics := v1.Group("/metrics")
 		{
 			metrics.GET("", handler.ListMetrics)
-			metrics.GET("/:id", handler.GetMetric)
 			metrics.POST("", handler.CreateMetric)
+			metrics.POST("/import-preview", handler.ImportPreviewMetrics)
+			metrics.POST("/import-commit", handler.ImportCommitMetrics)
+			metrics.POST("/import", handler.ImportMetricsFile)
+			metrics.GET("/export-template", handler.ExportTemplateMetrics)
+			metrics.GET("/export-sample", handler.ExportSampleMetrics)
+			metrics.GET("/stats", handler.GetMetricStats)
+			metrics.GET("/:id/data", handler.GetMetricData)
+			metrics.GET("/:id", handler.GetMetric)
 			metrics.PUT("/:id", handler.UpdateMetric)
 			metrics.DELETE("/:id", handler.DeleteMetric)
-			metrics.GET("/:id/data", handler.GetMetricData)
-			metrics.POST("/import", handler.ImportMetrics)
 		}
 
 		// 告警规则
@@ -63,6 +68,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		{
 			dashboard.GET("/summary", handler.GetDashboardSummary)
 			dashboard.GET("/charts", handler.GetDashboardCharts)
+			dashboard.GET("/metric-cards", handler.GetMetricCards)
 		}
 
 		// 反馈看板
@@ -126,6 +132,28 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			// 向量重建 API
 			nlp.POST("/intents/rebuild-embeddings", handler.RebuildIntentEmbeddings)
 			nlp.POST("/metrics/rebuild-embeddings", handler.RebuildMetricEmbeddings)
+
+			// 向量获取 API（供 Python AI 服务调用）
+			nlp.GET("/vectors/intents", handler.GetIntentVectors)
+			nlp.GET("/vectors/metrics", handler.GetMetricVectors)
+		}
+
+		// StarRocks 配置
+		starrocksRoutes := v1.Group("/starrocks")
+		{
+			starrocksRoutes.GET("/config", handler.GetStarRocksConfig)
+			starrocksRoutes.PUT("/config", handler.UpdateStarRocksConfig)
+			starrocksRoutes.POST("/config/test", handler.TestStarRocksConnection)
+		}
+
+		// 维度配置
+		dimension := v1.Group("/dimension-configs")
+		{
+			dimension.GET("", handler.ListDimensionConfigs)
+			dimension.GET("/tables", handler.GetDimensionTables)
+			dimension.POST("", handler.CreateDimensionConfig)
+			dimension.PUT("/:id", handler.UpdateDimensionConfig)
+			dimension.DELETE("/:id", handler.DeleteDimensionConfig)
 		}
 
 		// 认证

@@ -51,6 +51,7 @@ func autoMigrate() error {
 		&model.SQLAuditLog{},
 		&model.IntentTemplate{},
 		&model.SQLTemplate{},
+		&model.DimensionConfig{},
 	)
 }
 
