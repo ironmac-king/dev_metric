@@ -8,7 +8,7 @@ import numpy as np
 import httpx
 import json
 import os
-from ai.engine.embedding_client import embedding_client
+from ai.engine.embedding_client import embedding_client, alibaba_embedding_client
 
 
 class SemanticSearch:
@@ -147,8 +147,8 @@ class SemanticSearch:
         if not self._intent_vectors:
             return None, 0.0
 
-        # 生成查询向量
-        query_embedding = embedding_client.embed_single(query)
+        # 生成查询向量（使用阿里 embedding，与 PG 中存储的向量一致）
+        query_embedding = alibaba_embedding_client.embed_single(query)
         if query_embedding is None or len(query_embedding) == 0:
             return None, 0.0
 
@@ -179,8 +179,8 @@ class SemanticSearch:
         if not self._metric_vectors:
             return None, 0.0
 
-        # 生成查询向量
-        query_embedding = embedding_client.embed_single(query)
+        # 生成查询向量（使用阿里 embedding，与 PG 中存储的向量一致）
+        query_embedding = alibaba_embedding_client.embed_single(query)
         if query_embedding is None or len(query_embedding) == 0:
             return None, 0.0
 
