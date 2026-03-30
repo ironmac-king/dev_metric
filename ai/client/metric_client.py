@@ -41,6 +41,19 @@ class MetricClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    def get_dimension_configs(self, table_name: str = None) -> List[Dict[str, Any]]:
+        """获取维度配置"""
+        params = {}
+        if table_name:
+            params["table_name"] = table_name
+        response = httpx.get(
+            f"{self.base_url}/api/v1/dimension-configs",
+            params=params,
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json().get("data", [])
+
     async def get_all_metrics_async(self) -> List[Dict[str, Any]]:
         """异步获取所有指标"""
         async with httpx.AsyncClient() as client:
