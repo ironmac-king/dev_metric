@@ -1,13 +1,18 @@
 """
-语义搜索模块 - 基于 pgvector 的向量相似度搜索
+语义搜索模块 - 基于内存向量相似度搜索
+使用 sklearn 的余弦相似度，支持直连 PostgreSQL pgvector
 """
-import httpx
 from typing import List, Dict, Any, Optional, Tuple
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import httpx
+import json
+import os
 from ai.engine.embedding_client import embedding_client
 
 
 class SemanticSearch:
-    """语义搜索 - 意图/指标向量搜索"""
+    """语义搜索 - 内存向量搜索"""
 
     # 相似度阈值
     HIGH_THRESHOLD = 0.85   # >0.85 直接确认
@@ -16,6 +21,119 @@ class SemanticSearch:
 
     def __init__(self, api_base: str = "http://localhost:8080"):
         self.api_base = api_base
+        # 内存向量存储
+        self._intent_vectors: Dict[str, np.ndarray] = {}  # text -> embedding
+        self._intent_types: Dict[str, str] = {}  # text -> intent_type
+        self._metric_vectors: Dict[str, np.ndarray] = {}  # metric_code -> embedding
+        self._metric_info: Dict[str, Dict] = {}  # metric_code -> info
+        self._initialized = False
+        self._loading = False
+
+    def load_intent_vectors(self, intents: List[Dict[str, Any]]):
+        """加载意图向量到内存"""
+        for item in intents:
+            text = item.get("text", "")
+            intent_type = item.get("intent_type", "")
+            embedding = item.get("embedding", [])
+
+            if text and embedding and len(embedding) > 0:
+                self._intent_vectors[text] = np.array(embedding)
+                self._intent_types[text] = intent_type
+
+        self._initialized = True
+        print(f"[SemanticSearch] 加载了 {len(self._intent_vectors)} 个意图向量")
+
+    def load_metric_vectors(self, metrics: List[Dict[str, Any]]):
+        """加载指标向量到内存"""
+        for item in metrics:
+            metric_code = item.get("metric_code", "")
+            text = item.get("text", "")
+            embedding = item.get("embedding", [])
+            info = item.get("info", {})
+
+            if metric_code and embedding and len(embedding) > 0:
+                self._metric_vectors[metric_code] = np.array(embedding)
+                self._metric_info[metric_code] = {
+                    "text": text,
+                    "info": info
+                }
+
+        print(f"[SemanticSearch] 加载了 {len(self._metric_vectors)} 个指标向量")
+
+    def ensure_loaded(self):
+        """确保向量已加载（懒加载）"""
+        if self._initialized or self._loading:
+            return
+
+        self._loading = True
+        try:
+            # 优先从 PostgreSQL pgvector 加载
+            self._load_vectors_from_pgvector()
+        except Exception as e:
+            print(f"[SemanticSearch] 加载向量失败: {e}")
+        finally:
+            self._loading = False
+
+    def _load_vectors_from_api(self):
+        """从 Go API 加载向量数据"""
+        try:
+            # 加载意图向量
+            response = httpx.get(f"{self.api_base}/api/v1/nlp/vectors/intents", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("code") == 0:
+                    intents = data.get("data", [])
+                    self.load_intent_vectors(intents)
+
+            # 加载指标向量
+            response = httpx.get(f"{self.api_base}/api/v1/nlp/vectors/metrics", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("code") == 0:
+                    metrics = data.get("data", [])
+                    self.load_metric_vectors(metrics)
+
+        except Exception as e:
+            print(f"[SemanticSearch] 从API加载向量失败: {e}")
+
+    def _load_vectors_from_pgvector(self):
+        """从 PostgreSQL pgvector 加载向量"""
+        try:
+            import psycopg2
+
+            DATABASE_URL = os.getenv(
+                "DATABASE_URL",
+                "postgresql://postgres:admin123@192.168.1.225:5432/dev_metric"
+            )
+
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+
+            # 加载意图向量
+            cur.execute("SELECT text, intent_type, embedding FROM intent_embeddings")
+            for row in cur.fetchall():
+                text, intent_type, embedding_str = row
+                embedding = json.loads(embedding_str)
+                self._intent_vectors[text] = np.array(embedding)
+                self._intent_types[text] = intent_type
+
+            # 加载指标向量
+            cur.execute("SELECT metric_code, text, embedding FROM metric_embeddings")
+            for row in cur.fetchall():
+                metric_code, text, embedding_str = row
+                embedding = json.loads(embedding_str)
+                self._metric_vectors[metric_code] = np.array(embedding)
+                self._metric_info[metric_code] = {"text": text}
+
+            cur.close()
+            conn.close()
+            self._initialized = True
+            print(f"[SemanticSearch] 从 PG 加载了 {len(self._intent_vectors)} 意图向量, {len(self._metric_vectors)} 指标向量")
+
+        except Exception as e:
+            print(f"[SemanticSearch] 从PG加载向量失败: {e}")
+            # 降级到 API 加载
+            self._load_vectors_from_api()
 
     def search_intent(self, query: str, top_k: int = 5) -> Tuple[Optional[str], float]:
         """
@@ -24,29 +142,30 @@ class SemanticSearch:
         Returns:
             (意图类型, 相似度) 如果找到返回意图类型，否则返回 None
         """
-        # 1. 生成查询向量
-        query_embedding = embedding_client.embed_single(query)
-        if not query_embedding:
+        self.ensure_loaded()
+
+        if not self._intent_vectors:
             return None, 0.0
 
-        # 2. 调用 Go API 搜索
-        try:
-            response = httpx.post(
-                f"{self.api_base}/api/v1/nlp/semantic-search/intent",
-                json={"embedding": query_embedding, "top_k": top_k},
-                timeout=10,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("code") == 0:
-                    results = data.get("data", [])
-                    if results:
-                        best = results[0]
-                        return best.get("intent_type"), best.get("similarity", 0.0)
-        except Exception as e:
-            print(f"[SemanticSearch] 搜索意图失败: {e}")
+        # 生成查询向量
+        query_embedding = embedding_client.embed_single(query)
+        if query_embedding is None or len(query_embedding) == 0:
+            return None, 0.0
 
-        return None, 0.0
+        query_vec = np.array(query_embedding).reshape(1, -1)
+
+        # 计算所有向量的相似度
+        best_intent = None
+        best_similarity = 0.0
+
+        for text, vec in self._intent_vectors.items():
+            vec = vec.reshape(1, -1)
+            sim = cosine_similarity(query_vec, vec)[0][0]
+            if sim > best_similarity:
+                best_similarity = sim
+                best_intent = self._intent_types.get(text)
+
+        return best_intent, float(best_similarity)
 
     def search_metric(self, query: str, top_k: int = 5) -> Tuple[Optional[Dict], float]:
         """
@@ -55,41 +174,41 @@ class SemanticSearch:
         Returns:
             (指标信息 dict, 相似度) 如果找到返回指标信息，否则返回 None
         """
-        # 1. 生成查询向量
-        query_embedding = embedding_client.embed_single(query)
-        if not query_embedding:
+        self.ensure_loaded()
+
+        if not self._metric_vectors:
             return None, 0.0
 
-        # 2. 调用 Go API 搜索
-        try:
-            response = httpx.post(
-                f"{self.api_base}/api/v1/nlp/semantic-search/metric",
-                json={"embedding": query_embedding, "top_k": top_k},
-                timeout=10,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("code") == 0:
-                    results = data.get("data", [])
-                    if results:
-                        best = results[0]
-                        return {
-                            "metric_id": best.get("metric_id"),
-                            "metric_code": best.get("metric_code"),
-                            "metric_name": best.get("text", "").split()[0] if best.get("text") else "",
-                        }, best.get("similarity", 0.0)
-        except Exception as e:
-            print(f"[SemanticSearch] 搜索指标失败: {e}")
+        # 生成查询向量
+        query_embedding = embedding_client.embed_single(query)
+        if query_embedding is None or len(query_embedding) == 0:
+            return None, 0.0
+
+        query_vec = np.array(query_embedding).reshape(1, -1)
+
+        # 计算所有向量的相似度
+        best_code = None
+        best_similarity = 0.0
+
+        for code, vec in self._metric_vectors.items():
+            vec = vec.reshape(1, -1)
+            sim = cosine_similarity(query_vec, vec)[0][0]
+            if sim > best_similarity:
+                best_similarity = sim
+                best_code = code
+
+        if best_code:
+            info = self._metric_info.get(best_code, {})
+            return {
+                "metric_code": best_code,
+                "metric_name": info.get("text", "").split()[0] if info.get("text") else "",
+                "info": info.get("info", {}),
+            }, float(best_similarity)
 
         return None, 0.0
 
     def match_intent(self, query: str) -> Tuple[Optional[str], str]:
-        """
-        匹配意图 - 三层降级
-
-        Returns:
-            (意图类型, 匹配级别) 匹配级别: "high", "medium", "low", "none"
-        """
+        """匹配意图 - 三层降级"""
         intent_type, similarity = self.search_intent(query)
 
         if similarity > self.HIGH_THRESHOLD:
@@ -102,12 +221,7 @@ class SemanticSearch:
             return None, "none"
 
     def match_metric(self, query: str) -> Tuple[Optional[Dict], str]:
-        """
-        匹配指标 - 三层降级
-
-        Returns:
-            (指标信息, 匹配级别)
-        """
+        """匹配指标 - 三层降级"""
         metric_info, similarity = self.search_metric(query)
 
         if similarity > self.HIGH_THRESHOLD:

@@ -1,5 +1,5 @@
 """
-阿里云百炼 Embedding 调用客户端
+统一的 Embedding 调用客户端，支持 DeepSeek 和阿里
 """
 import os
 import httpx
@@ -7,29 +7,53 @@ from typing import List, Optional
 
 
 class EmbeddingClient:
-    """阿里云百炼 Embedding 客户端"""
+    """统一的 Embedding 客户端，支持 DeepSeek 和阿里"""
 
-    def __init__(self):
-        self.api_key = os.getenv("DASHSCOPE_API_KEY", "")
-        self.api_url = "https://dashscope.aliyuncs.com/compatible-mode/text-embedding/text-embedding-v2"
-        self.model = "text-embedding-v2"
+    def __init__(self, provider: str = "deepseek"):
+        self.provider = provider
+        self._alibaba_client = None
+
+        if provider == "alibaba":
+            from ai.engine.alibaba_embedding import alibaba_embedding
+            self._alibaba_client = alibaba_embedding
+
+        # DeepSeek 配置
+        self.api_key = os.getenv("DEEPSEEK_API_KEY", "")
+        self.api_url = "https://api.deepseek.com/embeddings"
+        self.model = "deepseek-embedding"
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         """
-        调用百炼 API 获取文本向量
+        调用 Embedding API 获取文本向量
 
         Args:
-            texts: 文本列表（最多 25 条）
+            texts: 文本列表
 
         Returns:
-            向量列表，每个向量 1536 维
+            向量列表
         """
         if not texts:
             return []
 
+        if self.provider == "alibaba":
+            return self._embed_alibaba(texts)
+        else:
+            return self._embed_deepseek(texts)
+
+    def _embed_alibaba(self, texts: List[str]) -> List[List[float]]:
+        """使用阿里 text-embedding-v2"""
+        try:
+            vectors = self._alibaba_client.embed(texts)
+            return vectors
+        except Exception as e:
+            print(f"[EmbeddingClient] 阿里 embedding 失败: {e}")
+            return [[] for _ in texts]
+
+    def _embed_deepseek(self, texts: List[str]) -> List[List[float]]:
+        """使用 DeepSeek embedding"""
         if not self.api_key:
-            print("[EmbeddingClient] 警告：DASHSCOPE_API_KEY 未设置")
-            return []
+            print("[EmbeddingClient] 警告：DEEPSEEK_API_KEY 未设置")
+            return [[] for _ in texts]
 
         headers = {
             "Content-Type": "application/json",
@@ -51,10 +75,8 @@ class EmbeddingClient:
             response.raise_for_status()
             result = response.json()
 
-            output = result.get("output", {})
-            embeddings = output.get("embeddings", [])
-
-            return [e.get("embedding", []) for e in embeddings]
+            data = result.get("data", [])
+            return [item.get("embedding", []) for item in data]
 
         except httpx.HTTPStatusError as e:
             print(f"[EmbeddingClient] HTTP 错误: {e.response.status_code}")
@@ -69,5 +91,8 @@ class EmbeddingClient:
         return results[0] if results else None
 
 
-# 全局实例
-embedding_client = EmbeddingClient()
+# 全局实例 - 默认使用 DeepSeek
+embedding_client = EmbeddingClient(provider="deepseek")
+
+# 阿里 embedding 客户端全局实例
+alibaba_embedding_client = EmbeddingClient(provider="alibaba")
