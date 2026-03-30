@@ -48,6 +48,16 @@ const routes = [
         path: 'feedback',
         name: 'Feedback',
         component: () => import('../views/FeedbackDashboard.vue')
+      },
+      {
+        path: 'starrocks-config',
+        name: 'StarRocksConfig',
+        component: () => import('../views/StarRocksConfig.vue')
+      },
+      {
+        path: 'dimension-config',
+        name: 'DimensionConfig',
+        component: () => import('../views/DimensionConfig.vue')
       }
     ]
   }
