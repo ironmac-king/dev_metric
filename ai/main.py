@@ -396,10 +396,40 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post("/internal/generate-embeddings")
+def generate_embeddings():
+    """内部接口：接收文本列表，返回阿里 embedding 向量"""
+    from fastapi import Request
+    from ai.engine.alibaba_embedding import alibaba_embedding
+
+    body = request.json
+    texts = body.get("texts", [])
+
+    if not texts:
+        return {"code": 0, "data": []}
+
+    try:
+        vectors = alibaba_embedding.embed(texts)
+        data = [{"text": text, "embedding": vec} for text, vec in zip(texts, vectors)]
+        return {"code": 0, "data": data}
+    except Exception as e:
+        return {"code": 500, "message": str(e)}, 500
+
+
+def load_semantic_vectors():
+    """启动时加载语义向量"""
+    from ai.engine.semantic_search import semantic_search
+    print("[启动] 正在加载语义向量...")
+    semantic_search.ensure_loaded()
+    print("[启动] 语义向量加载完成")
+
+
 if __name__ == "__main__":
     import uvicorn
     # 启动每日调度器
     from ai.scheduler import start_daily_scheduler
     start_daily_scheduler()
+    # 加载语义向量
+    load_semantic_vectors()
     print("[启动] AI 服务已启动，调度器运行中...")
     uvicorn.run(app, host="0.0.0.0", port=8081)
