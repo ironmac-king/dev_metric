@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -397,19 +397,19 @@ async def health():
 
 
 @app.post("/internal/generate-embeddings")
-def generate_embeddings():
+async def generate_embeddings(request: Request):
     """内部接口：接收文本列表，返回阿里 embedding 向量"""
-    from fastapi import Request
     from ai.engine.alibaba_embedding import alibaba_embedding
 
-    body = request.json
+    body = await request.json()
     texts = body.get("texts", [])
 
     if not texts:
         return {"code": 0, "data": []}
 
     try:
-        vectors = alibaba_embedding.embed(texts)
+        import asyncio
+        vectors = await asyncio.to_thread(alibaba_embedding.embed, texts)
         data = [{"text": text, "embedding": vec} for text, vec in zip(texts, vectors)]
         return {"code": 0, "data": data}
     except Exception as e:
