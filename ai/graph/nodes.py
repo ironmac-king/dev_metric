@@ -1380,6 +1380,81 @@ class ConversationNodes:
 
         return suggestions
 
+    def intent_feedback_node(self, state: ConversationState) -> Dict[str, Any]:
+        """
+        意图反馈节点 - 检测用户纠正并记录反馈
+        当用户说"不对"、"不是的"、"应该是XX"时触发
+        """
+        last_message = state.messages[-1].content if state.messages else ""
+
+        # 纠正模式检测
+        correction_patterns = [
+            r"不对", r"不是的", r"应该是", r"不是([^叫]|$)", r"我说的是",
+            r"其实(是|要)", r"错了", r"纠正"
+        ]
+
+        is_correction = any(re.search(p, last_message) for p in correction_patterns)
+
+        if not is_correction:
+            return {"intent_feedback": None}
+
+        print(f"[DEBUG intent_feedback] 检测到用户纠正: {last_message}")
+
+        # 提取用户想要的意图
+        correct_intent = self._extract_intent_from_feedback(last_message)
+
+        if correct_intent:
+            # 调用 Go API 记录反馈
+            self._record_intent_feedback(
+                user_input=last_message,
+                predicted_intent=state.current_intent or "",
+                correct_intent=correct_intent,
+                session_id=state.session_id
+            )
+            print(f"[DEBUG intent_feedback] 记录反馈: predicted={state.current_intent}, correct={correct_intent}")
+
+        # 设置追问，让用户确认正确意图
+        state.needs_clarification = True
+        state.clarification_type = "intent_feedback"
+        state.clarification_message = "抱歉，您是想查询指标值、趋势、还是对比数据呢？"
+
+        return {"intent_feedback": {"correct_intent": correct_intent}}
+
+    def _extract_intent_from_feedback(self, text: str) -> Optional[str]:
+        """从用户纠正文本中提取正确意图"""
+        # 意图关键词映射
+        intent_keywords = {
+            "query_value": ["数值", "值", "多少", "多少数据", "是多少"],
+            "query_trend": ["趋势", "变化", "走向", "走势", "增长", "下降"],
+            "query_comparison": ["对比", "比较", "差异", "哪个高", "哪个好"],
+            "query_metadata": ["口径", "定义", "业务口径", "技术口径", "元数据"],
+        }
+
+        text = text.lower()
+        for intent, keywords in intent_keywords.items():
+            if any(kw in text for kw in keywords):
+                return intent
+
+        return None
+
+    def _record_intent_feedback(self, user_input: str, predicted_intent: str, correct_intent: str, session_id: str):
+        """调用 Go API 记录意图反馈"""
+        try:
+            import httpx
+            api_base = os.getenv("AI_API_BASE", "http://localhost:8080")
+            url = f"{api_base}/api/v1/feedback/intent"
+
+            payload = {
+                "user_input": user_input,
+                "predicted_intent": predicted_intent,
+                "correct_intent": correct_intent,
+                "session_id": session_id,
+            }
+
+            httpx.post(url, json=payload, timeout=5)
+        except Exception as e:
+            print(f"[DEBUG intent_feedback] 记录反馈失败: {e}")
+
 
 # 全局节点实例
 conversation_nodes = ConversationNodes()
