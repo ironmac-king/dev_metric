@@ -1,6 +1,12 @@
 package handler
 
 import (
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
 	"dev_metric/internal/model"
 	"dev_metric/internal/repository/postgres"
 	"dev_metric/pkg/response"
@@ -106,9 +112,10 @@ func SetDefaultLLM(c *gin.Context) {
 // TestLLMConnection 测试连接
 func TestLLMConnection(c *gin.Context) {
 	var req struct {
-		APIURL  string `json:"api_url" binding:"required"`
-		APIKey  string `json:"api_key" binding:"required"`
+		APIURL    string `json:"api_url" binding:"required"`
+		APIKey    string `json:"api_key" binding:"required"`
 		ModelName string `json:"model_name" binding:"required"`
+		Provider  string `json:"provider"` // optional: tencent/openai/anthropic
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -116,10 +123,44 @@ func TestLLMConnection(c *gin.Context) {
 		return
 	}
 
-	// TODO: 实际测试连接
-	// 这里简化处理，实际应该调用 LLM API 测试
-	response.Success(c, gin.H{
-		"status":  "ok",
-		"message": "连接测试成功",
-	})
+	// 实际测试连接 - 调用 /v1/models 验证凭证
+	testURL := strings.TrimSuffix(req.APIURL, "/") + "/v1/models"
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	reqHTTP, _ := http.NewRequest("GET", testURL, nil)
+	reqHTTP.Header.Set("Authorization", "Bearer "+req.APIKey)
+	reqHTTP.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(reqHTTP)
+	if err != nil {
+		response.Success(c, gin.H{
+			"status":  "error",
+			"message": "连接失败: " + err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	// 检查是否有错误标记（腾讯云等可能返回 200 但 body 里是错误）
+	if strings.Contains(string(body), `"error"`) || strings.Contains(string(body), `"Error"`) {
+		response.Success(c, gin.H{
+			"status":  "error",
+			"message": fmt.Sprintf("认证失败: %s", string(body)),
+		})
+		return
+	}
+
+	if resp.StatusCode == 200 {
+		response.Success(c, gin.H{
+			"status":  "ok",
+			"message": "连接测试成功",
+		})
+	} else {
+		response.Success(c, gin.H{
+			"status":  "error",
+			"message": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)),
+		})
+	}
 }

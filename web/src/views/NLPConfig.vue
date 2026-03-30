@@ -347,13 +347,6 @@ import { ref, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { metricAPI } from '../api'
 
-// 切换到反馈标签时加载数据
-watch(activeTab, (tab) => {
-  if (tab === 'feedback' && intentFeedbacks.value.length === 0) {
-    loadFeedback()
-  }
-})
-
 const activeTab = ref('intents')
 const intentTemplates = ref([])
 const sqlTemplates = ref([])
@@ -651,6 +644,13 @@ async function rebuildMetricEmbeddings() {
 
 onMounted(() => {
   loadData()
+})
+
+// 切换到反馈标签时懒加载数据
+watch(activeTab, (tab) => {
+  if (tab === 'feedback' && intentFeedbacks.value.length === 0) {
+    loadFeedback()
+  }
 })
 </script>
 
