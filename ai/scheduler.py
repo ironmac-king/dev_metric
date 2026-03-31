@@ -5,6 +5,12 @@ from threading import Thread
 import time
 from datetime import datetime, timedelta
 import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.scheduler")
 
 
 class DailyScheduler:
@@ -34,8 +40,8 @@ class DailyScheduler:
         now = datetime.now()
         seconds_until_run = (next_run - now).total_seconds()
 
-        print(f"[Scheduler] 下次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"[Scheduler] 距离执行还有 {seconds_until_run:.0f} 秒")
+        logger.info(f"下次执行时间: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"距离执行还有 {seconds_until_run:.0f} 秒")
 
         # 先睡眠到接近执行时间
         if seconds_until_run > 60:
@@ -54,13 +60,13 @@ class DailyScheduler:
             from ai.feedback.rule_optimizer import get_rule_optimizer
             optimizer = get_rule_optimizer()
             suggestions = optimizer.daily_analysis()
-            print(f"[Scheduler] 每日分析完成，发现 {len(suggestions)} 条优化建议")
+            logger.info(f"每日分析完成，发现 {len(suggestions)} 条优化建议")
         except Exception as e:
-            print(f"[Scheduler] 每日分析执行失败: {e}")
+            logger.info(f"每日分析执行失败: {e}")
 
     def _scheduler_loop(self):
         """调度循环"""
-        print(f"[Scheduler] 定时调度器已启动，每天 {self._hour}:{self._minute:02d} 执行")
+        logger.info(f"定时调度器已启动，每天 {self._hour}:{self._minute:02d} 执行")
 
         while self._running:
             try:
@@ -69,26 +75,26 @@ class DailyScheduler:
 
                 # 执行每日分析
                 if self._running:
-                    print(f"[Scheduler] 开始执行每日分析 at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.info(f"开始执行每日分析 at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     self._run_daily_analysis()
 
                     # 执行完后睡眠一段时间，避免重复执行
                     time.sleep(120)  # 等待2分钟
 
             except Exception as e:
-                print(f"[Scheduler] 调度循环出错: {e}")
+                logger.info(f"调度循环出错: {e}")
                 time.sleep(60)  # 出错后等待1分钟再继续
 
     def start(self):
         """启动调度器"""
         if self._running:
-            print("[Scheduler] 调度器已在运行中")
+            logger.warning("[Scheduler] 调度器已在运行中")
             return
 
         self._running = True
         self._thread = Thread(target=self._scheduler_loop, daemon=True)
         self._thread.start()
-        print("[Scheduler] 调度器已启动")
+        logger.info("[Scheduler] 调度器已启动")
 
     def stop(self):
         """停止调度器"""
@@ -98,11 +104,11 @@ class DailyScheduler:
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
-        print("[Scheduler] 调度器已停止")
+        logger.info("[Scheduler] 调度器已停止")
 
     def run_now(self):
         """立即执行一次分析（用于测试）"""
-        print("[Scheduler] 立即执行每日分析...")
+        logger.info("[Scheduler] 立即执行每日分析...")
         self._run_daily_analysis()
 
 

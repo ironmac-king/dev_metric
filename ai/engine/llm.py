@@ -6,6 +6,21 @@ from typing import Optional, Dict, Any
 from openai import OpenAI
 from dotenv import load_dotenv
 from ai.graph.state import IntentResult, SQLGenerationResult, ClarificationDecision
+from ai.config.logging_config import get_logger
+from ai.engine.prompt_manager import get_prompt_manager
+
+# 全局单例
+_llm_engine = None
+
+
+def get_llm_engine() -> "LLMEngine":
+    """获取 LLM 引擎单例"""
+    global _llm_engine
+    if _llm_engine is None:
+        _llm_engine = LLMEngine()
+    return _llm_engine
+
+logger = get_logger("ai.llm")
 
 # 加载 .env
 load_dotenv()
@@ -52,14 +67,14 @@ class LLMEngine:
                         base_url=api_url,
                     )
                     self.model = default_config.get("model_name", "deepseek-3.2")
-                    print(f"[LLMEngine] 已加载 LLM 配置: {default_config.get('name')}")
+                    logger.info(f"[LLMEngine] 已加载 LLM 配置: {default_config.get('name')}")
                     return
 
             # 配置加载失败，使用环境变量作为回退
-            print("[LLMEngine] 使用环境变量配置（LLM 配置未找到）")
+            logger.info("[LLMEngine] 使用环境变量配置（LLM 配置未找到）")
             self._use_env_config()
         except Exception as e:
-            print(f"[LLMEngine] 加载 LLM 配置失败: {e}，使用环境变量")
+            logger.info(f"[LLMEngine] 加载 LLM 配置失败: {e}，使用环境变量")
             self._use_env_config()
 
     def _use_env_config(self):
@@ -106,7 +121,7 @@ class LLMEngine:
                 entities={}
             )
         except Exception as e:
-            print(f"LLM 调用失败: {e}")
+            logger.error(f"LLM 调用失败: {e}")
             return IntentResult(
                 intent="unknown",
                 confidence=0.0,
@@ -121,18 +136,15 @@ class LLMEngine:
             if metric:
                 inherited = f"\n上下文信息：用户正在查询指标「{metric}」，可继承此指标"
 
-        prompt = f"""你是一个业务指标查询助手。请分析用户问题并提取关键信息。
+        # 从 PromptManager 获取 NL2Structure Prompt
+        prompt_manager = get_prompt_manager()
+        base_prompt = prompt_manager.get_nl2structure_prompt()
+
+        prompt = f"""{base_prompt}
 
 用户问题：「{text}」{inherited}
 
-请识别：
-1. 意图（query_value=查数值, query_trend=查趋势, query_comparison=对比, greeting=打招呼, thanks=感谢, bye=告别）
-2. 指标名称（如：访客数、订单量、销售额）
-3. 时间范围（昨天、今天、本周、本月、上月、去年等）
-4. 其他参数
-
-以 JSON 格式返回：
-{{"intent": "意图", "confidence": 0.9, "metric_name": "指标名", "time_range": "时间范围", "entities": {{}}}}"""
+请只输出JSON格式。"""
 
         try:
             response = self.client.chat.completions.create(
@@ -167,7 +179,7 @@ class LLMEngine:
                 return self._parse_intent_fallback(text, inherited_entities)
 
         except Exception as e:
-            print(f"LLM 增强意图识别失败: {e}")
+            logger.error(f"LLM 增强意图识别失败: {e}")
             return IntentResult(
                 intent="query_value",
                 confidence=0.5,
@@ -310,7 +322,7 @@ class LLMEngine:
 
             # 如果纠正了，打印原因
             if not is_valid and correction_reason:
-                print(f"[LLM] 纠正意图: {correction_reason}")
+                logger.info(f"[LLM] 纠正意图: {correction_reason}")
 
             # 如果 LLM 返回了指标名，尝试从指标库中获取更多信息
             metric_name = result.get("metric_name")
@@ -327,19 +339,28 @@ class LLMEngine:
                             metric_name = name
                             break
 
+            # 提取维度信息（LLM 返回在顶层）
+            dimension = result.get("dimension")
+
+            # 构建 entities
+            entities = {
+                "metric_name": metric_name,
+                "metric_code": metric_code,
+                "time_range": result.get("time_range"),
+                **result.get("entities", {})
+            }
+            # 添加维度（如果 LLM 识别到了）
+            if dimension:
+                entities["dimension"] = dimension
+
             return IntentResult(
                 intent=result.get("intent", rule_intent),
                 confidence=result.get("confidence", 0.7),
-                entities={
-                    "metric_name": metric_name,
-                    "metric_code": metric_code,
-                    "time_range": result.get("time_range"),
-                    **result.get("entities", {})
-                }
+                entities=entities
             )
 
         except json.JSONDecodeError as e:
-            print(f"[LLM] 意图审核 JSON 解析失败: {e}")
+            logger.info(f"[LLM] 意图审核 JSON 解析失败: {e}")
             # 解析失败，使用规则引擎结果
             return IntentResult(
                 intent=rule_intent,
@@ -347,7 +368,7 @@ class LLMEngine:
                 entities=rule_entities
             )
         except Exception as e:
-            print(f"[LLM] 意图审核失败: {e}")
+            logger.info(f"[LLM] 意图审核失败: {e}")
             return IntentResult(
                 intent=rule_intent,
                 confidence=0.5,
@@ -443,7 +464,7 @@ class LLMEngine:
                 is_safe=True
             )
         except Exception as e:
-            print(f"LLM SQL 生成失败: {e}")
+            logger.error(f"LLM SQL 生成失败: {e}")
             return None
 
     def generate_response(
@@ -451,13 +472,16 @@ class LLMEngine:
         question: str,
         sql: str,
         result: Any,
-        metric_name: str
+        metric_name: str,
+        unit: str = ""
     ) -> str:
         """生成自然语言回答"""
+        unit_hint = f"单位：{unit}" if unit else ""
         prompt = f"""用户问：{question}
 执行的 SQL：{sql}
 查询结果：{result}
 指标名称：{metric_name}
+{unit_hint}
 
 请用自然语言回答用户问题，简明扼要。如果结果为空或查询失败，请说明。"""
 
@@ -470,8 +494,115 @@ class LLMEngine:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"LLM 响应生成失败: {e}")
+            logger.error(f"LLM 响应生成失败: {e}")
             return f"根据您的问题，{metric_name}的查询结果为：{result}"
+
+    def generate_empty_result_followup(
+        self,
+        question: str,
+        metric_name: str,
+        time_range: str,
+        sql: str,
+        available_metrics: list = None,
+    ) -> Dict[str, Any]:
+        """
+        当查询结果为空时，调用 LLM 生成智能追问和建议。
+        分析可能原因并给出具体建议。
+        """
+        import json
+
+        if available_metrics is None:
+            available_metrics = list(self._get_available_metrics())
+
+        # available_metrics 可能是字符串列表，也可能是字典列表
+        metric_names = []
+        for m in available_metrics[:30]:
+            if isinstance(m, str):
+                metric_names.append(m)
+            elif isinstance(m, dict):
+                metric_names.append(m.get("metric_name", "") or m.get("metric_code", "") or "")
+        metrics_str = ", ".join([n for n in metric_names if n])
+
+        prompt = f"""用户查询数据为空，请分析可能原因并生成智能追问。
+
+## 用户问题
+{question}
+
+## 识别的指标
+{metric_name or "未知"}
+
+## 时间范围
+{time_range or "未指定"}
+
+## 执行的 SQL
+{sql}
+
+## 系统中的可用指标（部分）
+{metrics_str}
+
+请分析并返回 JSON 格式的建议，包含以下字段：
+- analysis: 分析数据为空的可能原因（1-2句话）
+- suggestions: 建议用户采取的行动数组，每个建议包含:
+  - type: "time_range" | "metric_alternative" | "check_definition" | "retry"
+  - text: 具体的建议问题（用户可以直接问的自然语言）
+  - reason: 为什么要这样建议
+
+请返回 JSON，不要包含其他内容。"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你是一个智能数据分析助手。当用户查询的数据为空时，你要分析可能的原因并给出具体、可操作的建议。建议要具体到用户可以直接复制粘贴提问的程度。"
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=800,
+            )
+            content = response.choices[0].message.content.strip()
+
+            # 尝试解析 JSON
+            if content.startswith("```"):
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
+                content = content.strip()
+
+            result = json.loads(content)
+            return {
+                "analysis": result.get("analysis", "暂无数据"),
+                "suggestions": result.get("suggestions", []),
+                "needs_clarification": True,
+            }
+        except Exception as e:
+            logger.error(f"LLM 追问生成失败: {e}")
+            # 降级：返回通用建议
+            return {
+                "analysis": "未能查到数据，可能该指标在指定时间段内没有记录。",
+                "suggestions": [
+                    {"type": "time_range", "text": f"{metric_name}最近有数据吗", "reason": "检查指标是否有近期数据"},
+                    {"type": "check_definition", "text": f"{metric_name}的业务口径是什么", "reason": "确认指标口径是否正确"},
+                ],
+                "needs_clarification": False,
+            }
+
+    def _get_available_metrics(self) -> list:
+        """获取可用指标列表"""
+        try:
+            import httpx
+            response = httpx.get(
+                f"http://localhost:8080/api/v1/metadata/metrics",
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("data", {}).get("metrics", [])
+        except Exception:
+            pass
+        return []
 
     def extract_metric_from_text(self, text: str, available_metrics: list = None) -> Optional[Dict[str, Any]]:
         """
@@ -544,10 +675,10 @@ class LLMEngine:
             return None
 
         except json.JSONDecodeError as e:
-            print(f"LLM 指标提取 JSON 解析失败: {e}")
+            logger.error(f"LLM 指标提取 JSON 解析失败: {e}")
             return None
         except Exception as e:
-            print(f"LLM 指标提取失败: {e}")
+            logger.error(f"LLM 指标提取失败: {e}")
             return None
 
     def _get_available_metrics(self) -> list:
@@ -678,11 +809,11 @@ class LLMEngine:
             )
 
         except json.JSONDecodeError as e:
-            print(f"LLM 追问决策 JSON 解析失败: {e}, content: {content}")
+            logger.error(f"LLM 追问决策 JSON 解析失败: {e}, content: {content}")
             # 降级：使用规则判断
             return self._fallback_clarification(missing_fields, metric_name)
         except Exception as e:
-            print(f"LLM 追问决策失败: {e}")
+            logger.error(f"LLM 追问决策失败: {e}")
             # 降级：使用规则判断
             return self._fallback_clarification(missing_fields, metric_name)
 
@@ -767,7 +898,78 @@ class LLMEngine:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"[LLMEngine] LLM 调用失败: {e}")
+            logger.info(f"[LLMEngine] LLM 调用失败: {e}")
+            return ""
+
+    def generate_prompt_improvement(
+        self,
+        current_prompt: str = "",
+        task_name: str = "自然语言转结构化实体",
+        task_description: str = "意图识别、实体提取、时间解析",
+        mode: str = "improve"  # "improve" or "regenerate"
+    ) -> str:
+        """
+        生成或优化 Prompt
+
+        Args:
+            current_prompt: 当前 Prompt（优化模式需要）
+            task_name: 任务名称
+            task_description: 任务描述
+            mode: "improve" 基于现有优化, "regenerate" 重新生成
+
+        Returns:
+            生成的 Prompt 内容
+        """
+        if mode == "improve" and current_prompt:
+            system_prompt = """你是一个专业的 Prompt 工程师，擅长优化 NL2Structure Prompt。
+
+请分析当前 Prompt 的不足，从以下角度优化：
+1. 意图识别准确性 - 是否覆盖所有常见场景
+2. 时间表达覆盖度 - 是否支持各种时间表达
+3. 业务场景完整性 - 跨境电商、供应链、人力资源
+4. 示例质量 - 示例是否足够多且有代表性
+5. 约束条件 - 是否清晰无歧义
+
+请直接输出优化后的完整 Prompt，不要任何解释。"""
+            user_prompt = f"""=== 当前 Prompt ===
+{current_prompt}
+
+=== 任务信息 ===
+任务名称：{task_name}
+任务描述：{task_description}
+
+请输出优化后的完整 Prompt。"""
+        else:
+            system_prompt = """你是一个专业的 Prompt 工程师，擅长为业务指标查询系统生成 NL2Structure Prompt。
+
+NL2Structure Prompt 用于将用户自然语言转换为结构化数据，输出格式为 JSON。
+
+输出格式要求：
+- intent: 查询意图 (query_value/query_trend/query_comparison/query_metadata/greeting/thanks/bye/unknown)
+- metric_name: 指标名称
+- time_range: 时间范围 {type, start, end, original}
+- dimension: 维度
+- comparison_period: 对比周期
+
+请生成一个完整的 Prompt，覆盖所有常见场景。"""
+            user_prompt = f"""任务名称：{task_name}
+任务描述：{task_description}
+
+请直接输出完整的 Prompt 内容，不要任何解释。"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=4000,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.info(f"[LLMEngine] Prompt 生成失败: {e}")
             return ""
 
 

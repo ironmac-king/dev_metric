@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"dev_metric/pkg/logger"
 )
 
 // SecurityMiddleware 安全中间件
@@ -33,10 +35,22 @@ func TraceMiddleware() gin.HandlerFunc {
 		c.Next()
 		duration := time.Since(start)
 
-		// 记录请求日志
-		gin.DefaultWriter.Write([]byte(
-			`{"time":"` + start.Format(time.RFC3339) + `","level":"INFO","trace_id":"` + traceID + `","method":"` + c.Request.Method + `","path":"` + c.Request.URL.Path + `","duration_ms":` + string(rune(int(duration.Milliseconds()))) + `}` + "\n",
-		))
+		// 获取用户信息（如果已登录）
+		var userID interface{}
+		if uid, exists := c.Get("user_id"); exists {
+			userID = uid
+		}
+
+		// 记录请求日志（使用 zerolog）
+		logger.Log.Info().
+			Str("trace_id", traceID).
+			Str("method", c.Request.Method).
+			Str("path", c.Request.URL.Path).
+			Int64("duration_ms", duration.Milliseconds()).
+			Int("status", c.Writer.Status()).
+			Str("ip", c.ClientIP()).
+			Interface("user_id", userID).
+			Msg("http_request")
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 // DimensionConfig StarRocks 表的维度配置
 type DimensionConfig struct {
     ID              uint      `json:"id" gorm:"primaryKey"`
-    TableName       string    `json:"table_name" gorm:"size:128;index:idx_table_dimension,unique"`
+    StarrocksTable  string    `json:"table_name" gorm:"column:table_name;size:128;index:idx_table_dimension,unique"`
     DimensionName   string    `json:"dimension_name" gorm:"size:64;index:idx_table_dimension,unique"`
     ColumnName      string    `json:"column_name" gorm:"size:64"`
     DimensionValues string    `json:"dimension_values" gorm:"type:text"` // JSON array: ["北京","上海"]

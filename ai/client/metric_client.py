@@ -3,6 +3,9 @@
 """
 import httpx
 from typing import List, Dict, Any, Optional
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.metric_client")
 
 
 class MetricClient:
@@ -122,5 +125,5 @@ class MetricClient:
             scored.sort(key=lambda x: x[0], reverse=True)
             return [m for _, m in scored[:limit]]
         except Exception as e:
-            print(f"[MetricClient] 搜索指标失败: {e}")
+            logger.warning(f"搜索指标失败: {e}")
             return []

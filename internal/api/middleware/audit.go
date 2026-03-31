@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"dev_metric/pkg/logger"
 )
 
 // AuditMiddleware 审计日志中间件
@@ -214,8 +216,26 @@ func getAlertIDFromContext(c *gin.Context) uint {
 	return 0
 }
 
-// logAudit 记录审计日志到标准输出
+// logAudit 记录审计日志到结构化日志
 func logAudit(log map[string]interface{}) {
-	jsonBytes, _ := json.Marshal(log)
-	println("[AUDIT]", string(jsonBytes))
+	// 使用 zerolog 记录审计日志
+	event := logger.Info()
+
+	if userID, ok := log["user_id"]; ok {
+		event = event.Interface("user_id", userID)
+	}
+	if operation, ok := log["operation"]; ok {
+		event = event.Interface("operation", operation)
+	}
+	if traceID, ok := log["trace_id"]; ok {
+		event = event.Interface("trace_id", traceID)
+	}
+	if statusCode, ok := log["status_code"]; ok {
+		event = event.Interface("status_code", statusCode)
+	}
+	if duration, ok := log["duration_ms"]; ok {
+		event = event.Interface("duration_ms", duration)
+	}
+
+	event.Bool("audit", true).Msg("audit_log")
 }

@@ -88,6 +88,24 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.POST("/clear", handler.ClearSession)
 			ask.GET("/suggest", handler.GetAskSuggest)
 			ask.POST("/feedback", handler.SubmitFeedback)
+			ask.POST("/drill_down", handler.DrillDownQuestion)
+
+			// Dashboard 相关
+			ask.GET("/dashboard/stats", handler.GetDashboardStats)
+			ask.GET("/sessions", handler.GetSessions)
+			ask.PUT("/sessions/:id/star", handler.StarSession)
+			ask.GET("/favorites", handler.GetFavorites)
+			ask.POST("/favorites", handler.AddFavorite)
+			ask.DELETE("/favorites/:id", handler.DeleteFavorite)
+			ask.GET("/preferences", handler.GetPreferences)
+			ask.PUT("/preferences", handler.UpdatePreferences)
+			ask.GET("/recent-questions", handler.GetRecentQuestions)
+
+			// 快捷问题管理
+			ask.GET("/shortcuts", handler.GetShortcuts)
+			ask.POST("/shortcuts", handler.CreateShortcut)
+			ask.PUT("/shortcuts/:id", handler.UpdateShortcut)
+			ask.DELETE("/shortcuts/:id", handler.DeleteShortcut)
 		}
 
 		// 指标元数据 API（供 AI 服务调用）
@@ -154,6 +172,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			starrocksRoutes.POST("/config/test", handler.TestStarRocksConnection)
 		}
 
+		// 通用 SQL 查询（供 AI 服务调用）
+		query := v1.Group("/query")
+		{
+			query.POST("/execute", handler.ExecuteQuery)
+		}
+
 		// 维度配置
 		dimension := v1.Group("/dimension-configs")
 		{
@@ -162,6 +186,20 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			dimension.POST("", handler.CreateDimensionConfig)
 			dimension.PUT("/:id", handler.UpdateDimensionConfig)
 			dimension.DELETE("/:id", handler.DeleteDimensionConfig)
+		}
+
+		// Prompt配置
+		prompt := v1.Group("/prompt-configs")
+		{
+			prompt.GET("", handler.ListPromptConfigs)
+			prompt.GET("/active", handler.GetActivePromptConfig)
+			prompt.GET("/:id", handler.GetPromptConfig)
+			prompt.GET("/:id/versions", handler.GetPromptConfigVersions)
+			prompt.POST("", handler.CreatePromptConfig)
+			prompt.PUT("/:id", handler.UpdatePromptConfig)
+			prompt.DELETE("/:id", handler.DeletePromptConfig)
+			prompt.POST("/:id/rollback", handler.RollbackPromptConfig)
+			prompt.POST("/generate", handler.GeneratePromptConfig) // AI 生成 Prompt
 		}
 
 		// 认证

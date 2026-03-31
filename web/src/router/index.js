@@ -35,6 +35,11 @@ const routes = [
         component: () => import('../views/Ask.vue')
       },
       {
+        path: 'ai-assistant',
+        name: 'AIAssistant',
+        component: () => import('../views/components/AskDashboard.vue')
+      },
+      {
         path: 'llm-config',
         name: 'LLMConfig',
         component: () => import('../views/LLMConfig.vue')
@@ -58,6 +63,11 @@ const routes = [
         path: 'dimension-config',
         name: 'DimensionConfig',
         component: () => import('../views/DimensionConfig.vue')
+      },
+      {
+        path: 'prompt-config',
+        name: 'PromptConfig',
+        component: () => import('../views/PromptConfig.vue')
       }
     ]
   }

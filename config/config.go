@@ -9,11 +9,13 @@ import (
 
 type Config struct {
 	Database  DatabaseConfig  `yaml:"database"`
+	Redis     RedisConfig     `yaml:"redis"`
 	StarRocks StarRocksConfig `yaml:"starrocks"`
 	DingTalk  DingTalkConfig  `yaml:"dingtalk"`
 	LLM       LLMConfig       `yaml:"llm"`
 	App       AppConfig       `yaml:"app"`
 	AI        AIConfig        `yaml:"ai"`
+	Logging   LoggingConfig   `yaml:"logging"`
 }
 
 type DatabaseConfig struct {
@@ -27,6 +29,17 @@ type DatabaseConfig struct {
 func (d *DatabaseConfig) DSN() string {
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 		d.Host, d.Port, d.User, d.Password, d.Name)
+}
+
+type RedisConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
+}
+
+func (r *RedisConfig) Addr() string {
+	return fmt.Sprintf("%s:%d", r.Host, r.Port)
 }
 
 type StarRocksConfig struct {
@@ -62,6 +75,15 @@ type AppConfig struct {
 type AIConfig struct {
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"`
+}
+
+type LoggingConfig struct {
+	Level    string `yaml:"level"`    // debug/info/warn/error
+	Format   string `yaml:"format"`   // json/text
+	Output   string `yaml:"output"`   // file/stdout/both
+	MaxSize  int    `yaml:"max_size"` // MB per file
+	MaxAge   int    `yaml:"max_age"`  // days to retain
+	Compress bool   `yaml:"compress"` // compress old logs
 }
 
 var cfg *Config

@@ -5,6 +5,12 @@ from enum import Enum
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 import json
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.auto_fail_detector")
 
 
 class FailReason(Enum):
@@ -116,7 +122,7 @@ class AutoFailDetector:
                     return False  # 找到了
             return True  # 没找到
         except Exception as e:
-            print(f"[AutoFailDetector] 检查指标失败: {e}")
+            logger.warning(f"检查指标失败: {e}")
             return True  # 检查失败时保守返回 True
 
     def _is_sql_error(self, error: str) -> bool:
@@ -178,7 +184,7 @@ class AutoFailDetector:
         # TODO: 写入 PostgreSQL clarification_feedback 表
         # self.db.insert("clarification_feedback", feedback_record)
 
-        print(f"[AutoFailDetector] 记录自动失败反馈: {fail_reason.value}")
+        logger.info(f"记录自动失败反馈: {fail_reason.value}")
         return feedback_record
 
 

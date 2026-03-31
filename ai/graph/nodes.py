@@ -9,6 +9,9 @@ from ai.engine.rule_engine import RuleEngine
 from ai.engine.llm import LLMEngine
 from ai.sql_gen.generator import SQLGenerator
 from ai.client.metric_client import MetricClient
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.nodes")
 
 
 # 延迟导入 Neo4j 相关模块，避免启动时必须连接
@@ -19,7 +22,7 @@ def _get_graph_query():
         return GraphQuery()
     except Exception as e:
         if os.getenv("DEBUG"):
-            print(f"[GraphQuery] Failed to load: {e}")
+            logger.warning(f"GraphQuery 加载失败: {e}")
         return None
 
 
@@ -43,73 +46,122 @@ class ConversationNodes:
 
     def intent_node(self, state: ConversationState) -> Dict[str, Any]:
         """
-        意图识别节点 - 三层架构
-        1. 规则层：关键词精准匹配（打招呼、感谢、告别）
-        2. 语义层：Embedding + pgvector 相似度匹配
-        3. LLM层：规则和语义都匹配不到时兜底
+        意图识别节点 - 纯 LLM 架构
+        直接调用 LLM 进行意图识别和实体提取，不再使用规则/语义/TF-IDF 降级
         """
         last_message = state.messages[-1].content if state.messages else ""
 
-        # ========== Step 0: 复用上下文 ==========
+        # ========== Step 0: 处理对追问/满意确认的回复 ==========
+        # 场景A: 上一轮问了意图选择，用户选"指标值"/"趋势"等
+        # 场景B: 上一轮返回"暂无数据"后，用户回复短词（如"指标值"），表示确认/重试
+        prev_clar_type = getattr(state, '_prev_clarification_type', None)
+        ctx = getattr(state, 'conversation_context', None)
+        is_satisfaction_reply = (
+            prev_clar_type == 'intent' or  # 场景A
+            (len(last_message.strip()) <= 4 and ctx is not None)  # 场景B
+        )
+        logger.debug(f"[intent_node Step0] msg='{last_message}' len={len(last_message.strip())} prev_clar={prev_clar_type} ctx={ctx} is_satis={is_satisfaction_reply}")
+
+        if is_satisfaction_reply:
+            intent_map = {
+                "指标值": "query_value", "数值": "query_value", "值": "query_value",
+                "趋势": "query_trend", "走势": "query_trend",
+                "对比": "query_comparison", "同比": "query_comparison", "环比": "query_comparison",
+                "比较": "query_comparison",
+            }
+            matched_intent = None
+            for keyword, intent in intent_map.items():
+                if keyword in last_message:
+                    matched_intent = intent
+                    break
+
+            # 场景B：用户回复很短但有历史上下文，默认恢复 query_value
+            if not matched_intent and len(last_message.strip()) <= 4:
+                matched_intent = "query_value"
+
+            if matched_intent:
+                state.needs_clarification = False
+                state.clarification_type = None
+                state.clarification_message = None
+                state._prev_clarification_type = None
+                state._prev_clarification_message = None
+                # 标记：Step 0 已确认意图并恢复了上下文，entity_node 不要清除这些字段
+                state._intent_confirmed_from_context = True
+
+                # 从 conversation_context 恢复指标和时间上下文
+                ctx = getattr(state, 'conversation_context', None)
+                restored_entities = {}
+                if ctx:
+                    if ctx.current_metric_name:
+                        restored_entities["metric_name"] = ctx.current_metric_name
+                    if ctx.current_metric_code:
+                        restored_entities["metric_code"] = ctx.current_metric_code
+                    if ctx.current_time_expr:
+                        restored_entities["time_range"] = ctx.current_time_expr
+                    for dim_key, dim_val in (ctx.current_dimensions or {}).items():
+                        if dim_val and dim_key not in restored_entities:
+                            restored_entities[dim_key] = dim_val
+
+                state.entities.update(restored_entities)
+                self._add_thinking_step(state, "意图理解", "completed",
+                    f"用户确认意图：{matched_intent}（{'追问回复' if prev_clar_type == 'intent' else '满意度确认'}）")
+                return {"current_intent": matched_intent, "entities": restored_entities}
+
+        # ========== Step 1: 复用上下文 ==========
         inherited_context = getattr(state, 'conversation_context', None) or ConversationContext()
         inherited_entities = {}
         if inherited_context.current_metric_name:
             inherited_entities = {
                 "inherited_metric": inherited_context.current_metric_name,
-                "inherited_metric_id": inherited_context.current_metric_id,
                 "inherited_metric_name": inherited_context.current_metric_name,
             }
 
-        print(f"[DEBUG intent_node] 输入: {last_message}")
+        logger.debug(f"[intent_node] 输入: {last_message}")
 
-        # ========== Step 1: 规则层匹配 ==========
-        rule_result = self.rule_engine.recognize_intent(last_message)
-        print(f"[DEBUG intent_node] 规则层结果: intent={rule_result.intent}, confidence={rule_result.confidence}")
+        # ========== Step 2: 直接调用 LLM 进行意图识别 ==========
+        # 不再使用规则层 → 语义搜索 → TF-IDF 的降级架构
+        # 直接使用 LLM recognize_intent_enhanced，传入上下文和指标库信息
+        available_metrics_info = self.rule_engine.metric_templates if hasattr(self.rule_engine, 'metric_templates') else {}
 
-        # 如果规则层匹配到确定性意图（打招呼、感谢、告别等），直接返回
-        if rule_result.confidence >= 0.9 and rule_result.intent in ["greeting", "thanks", "bye"]:
-            self._update_context(state, rule_result.entities)
-            return {
-                "current_intent": rule_result.intent,
-                "entities": rule_result.entities,
-            }
+        try:
+            # 调用 LLM recognize_intent_enhanced 进行意图识别
+            intent_result = self.llm_engine.recognize_intent_enhanced(
+                text=last_message,
+                inherited_entities=inherited_entities
+            )
+            logger.debug(f"[intent_node] LLM 识别结果: intent={intent_result.intent}, confidence={intent_result.confidence}, entities={intent_result.entities}")
 
-        # ========== Step 2: 语义层匹配（置信度决策）==========
-        # 使用原始相似度分数进行置信度决策
-        # 阈值：>0.85 直接确认，0.35-0.85 LLM审核，<0.35 追问
-        INTENT_HIGH_THRESHOLD = 0.85
-        INTENT_MEDIUM_THRESHOLD = 0.35
+            # 如果置信度太低，标记为需要追问
+            if intent_result.confidence < 0.4:
+                state.needs_clarification = True
+                state.clarification_type = "intent"
+                state.clarification_message = "抱歉，我没理解您的意思。您是想查询指标值、趋势、还是对比数据呢？"
+                self._add_thinking_step(state, "意图理解", "requires_clarification",
+                    f"LLM 置信度 {intent_result.confidence:.2f} < 0.4，需要追问")
+                return {"current_intent": None, "entities": intent_result.entities}
 
-        # 直接调用 semantic_search.search_intent 获取原始相似度分数
-        semantic_intent_raw, similarity = self.rule_engine.semantic_search_intent(last_message)
-        print(f"[DEBUG intent_node] 语义层结果: intent={semantic_intent_raw}, similarity={similarity:.3f}")
+            # 补充 time_info（LLM 可能只返回 time_range 字符串，没有 time_info 对象）
+            if intent_result.entities.get("time_range") and not intent_result.entities.get("time_info"):
+                time_info = self._extract_time_info(last_message)
+                if time_info:
+                    intent_result.entities["time_info"] = time_info
+                    logger.debug(f"[intent_node] 补充 time_info: {time_info}")
 
-        # 语义层高置信度匹配（>0.85），直接使用
-        if semantic_intent_raw and similarity > INTENT_HIGH_THRESHOLD:
-            self._update_context(state, rule_result.entities)
-            self._add_thinking_step(state, "意图理解", "completed",
-                f"直接确认「{semantic_intent_raw}」，相似度 {similarity:.2f}")
-            return {
-                "current_intent": semantic_intent_raw,
-                "entities": rule_result.entities,
-            }
+            # 补充 top_n 排名信息（检测"前三"、"前十"、"前13"等模式）
+            if not intent_result.entities.get("top_n"):
+                top_n = self._extract_top_n(last_message)
+                if top_n:
+                    intent_result.entities["top_n"] = top_n
+                    logger.debug(f"[intent_node] 检测到 top_n: {top_n}")
 
-        # 语义层中等置信度（0.5-0.85），LLM 审核
-        if semantic_intent_raw and similarity > INTENT_MEDIUM_THRESHOLD:
-            print(f"[DEBUG intent_node] 进入 LLM 审核（相似度 {similarity:.2f}）...")
-            intent_result = self._llm_review_intent(state, semantic_intent_raw, similarity)
-        # 语义层低置信度（<0.5），追问用户
-        elif semantic_intent_raw and similarity <= INTENT_MEDIUM_THRESHOLD:
-            print(f"[DEBUG intent_node] 相似度太低（{similarity:.2f}），追问用户")
-            state.needs_clarification = True
-            state.clarification_type = "intent"
-            state.clarification_message = "抱歉，我没理解您的意思。您是想查询指标值、趋势、还是对比数据呢？"
-            self._add_thinking_step(state, "意图理解", "requires_clarification",
-                f"相似度 {similarity:.2f} < {INTENT_MEDIUM_THRESHOLD}，需要追问")
-            return {"current_intent": None, "entities": {}}
-        # 无语义匹配，使用规则层结果
-        else:
-            intent_result = rule_result
+        except Exception as e:
+            logger.error(f"[intent_node] LLM 意图识别失败: {e}")
+            # LLM 失败时，使用默认值
+            intent_result = IntentResult(
+                intent="query_value",
+                confidence=0.3,
+                entities={}
+            )
 
         # ========== 更新上下文 ==========
         self._update_context(state, intent_result.entities)
@@ -126,7 +178,7 @@ class ConversationNodes:
         }.get(intent_result.intent, intent_result.intent)
 
         self._add_thinking_step(state, "意图理解", "completed",
-            f"识别为「{intent_desc}」，置信度 {intent_result.confidence:.2f}（{match_level}匹配）")
+            f"LLM 识别为「{intent_desc}」，置信度 {intent_result.confidence:.2f}")
 
         return {
             "current_intent": intent_result.intent,
@@ -150,6 +202,20 @@ class ConversationNodes:
             metric_context=None
         )
 
+        # 补充 time_info（validate_and_correct_intent 只返回 time_range 字符串，没有 time_info 对象）
+        if intent_result.entities.get("time_range") and not intent_result.entities.get("time_info"):
+            time_info = self._extract_time_info(last_message)
+            if time_info:
+                intent_result.entities["time_info"] = time_info
+                logger.debug(f"[_llm_review_intent] 补充 time_info: {time_info}")
+
+        # 补充 top_n 排名信息（检测"前三"、"前十"、"前13"等模式）
+        if not intent_result.entities.get("top_n"):
+            top_n = self._extract_top_n(last_message)
+            if top_n:
+                intent_result.entities["top_n"] = top_n
+                logger.debug(f"[_llm_review_intent] 检测到 top_n: {top_n}")
+
         self._update_context(state, intent_result.entities)
         self._add_thinking_step(state, "意图理解", "completed",
             f"LLM审核确认「{intent_result.intent}」，原始相似度 {similarity:.2f}")
@@ -163,8 +229,6 @@ class ConversationNodes:
         # 更新指标信息
         if entities.get("metric_name"):
             ctx.current_metric_name = entities.get("metric_name")
-        if entities.get("metric_id"):
-            ctx.current_metric_id = entities.get("metric_id")
         if entities.get("metric_code"):
             ctx.current_metric_code = entities.get("metric_code")
 
@@ -190,12 +254,11 @@ class ConversationNodes:
         ctx = getattr(state, 'conversation_context', None)
 
         # ========== 继承上轮的指标信息 ==========
-        if ctx and not entities.get("metric_id") and not entities.get("metric_name"):
+        if ctx and not entities.get("metric_code") and not entities.get("metric_name"):
             if ctx.current_metric_name or ctx.current_metric_code:
                 entities.setdefault("metric_name", ctx.current_metric_name)
                 entities.setdefault("metric_code", ctx.current_metric_code)
-                entities.setdefault("metric_id", ctx.current_metric_id)
-                print(f"[DEBUG entity_node] 继承上轮指标: {ctx.current_metric_name}")
+                logger.debug(f"[entity_node] 继承上轮指标: {ctx.current_metric_name}")
 
         # ========== 继承上轮的时间表达式 ==========
         if ctx and not entities.get("time_range") and ctx.current_time_expr:
@@ -204,28 +267,28 @@ class ConversationNodes:
             has_explicit_time = any(kw in last_message for kw in ["昨天", "今日", "本周", "本月", "去年"])
             if not has_explicit_time:
                 entities.setdefault("time_range", ctx.current_time_expr)
-                print(f"[DEBUG entity_node] 继承上轮时间: {ctx.current_time_expr}")
+                logger.debug(f"[entity_node] 继承上轮时间: {ctx.current_time_expr}")
 
         # ========== 继承上轮的维度 ==========
         if ctx:
             for dim_key, dim_value in ctx.current_dimensions.items():
                 if dim_key not in entities and dim_value:
                     entities[dim_key] = dim_value
-                    print(f"[DEBUG entity_node] 继承上轮维度: {dim_key}={dim_value}")
+                    logger.debug(f"[entity_node] 继承上轮维度: {dim_key}={dim_value}")
 
         last_message = state.messages[-1].content if state.messages else ""
 
         # 检查是否是回应上轮的 metric_enum 追问（用户选择指标）
         user_just_selected_metric = False  # 标记用户是否刚选择了指标
-        print(f"[DEBUG entity_node] 检查 metric_enum: clarification_type={getattr(state, 'clarification_type', None)}, matched_metrics存在={getattr(state, 'matched_metrics', None) is not None}")
+        logger.debug(f"[entity_node] 检查 metric_enum: clarification_type={getattr(state, 'clarification_type', None)}, matched_metrics存在={getattr(state, 'matched_metrics', None) is not None}")
         if getattr(state, 'clarification_type', None) == 'metric_enum' and getattr(state, 'matched_metrics', None) is not None:
             # 用户在选择指标
-            print(f"[DEBUG entity_node] matched_metrics内容: {state.matched_metrics[:2] if state.matched_metrics else None}")
+            logger.debug(f"[entity_node] matched_metrics内容: {state.matched_metrics[:2] if state.matched_metrics else None}")
             chosen_metric = self._parse_metric_choice(last_message, state.matched_metrics)
-            print(f"[DEBUG entity_node] _parse_metric_choice结果: {chosen_metric}")
+            logger.debug(f"[entity_node] _parse_metric_choice结果: {chosen_metric}")
             if chosen_metric:
                 entities.update(chosen_metric)
-                print(f"[DEBUG entity_node] 用户选择了指标: {chosen_metric.get('metric_name')}")
+                logger.debug(f"[entity_node] 用户选择了指标: {chosen_metric.get('metric_name')}")
                 state.matched_metrics = None  # 清除选择状态
                 state.needs_clarification = False  # 清除追问状态
                 state.clarification_type = None  # 清除追问类型
@@ -270,14 +333,15 @@ class ConversationNodes:
             # 只有不是 follow-up 且有继承指标时，才考虑清除
             # 但如果用户刚选择了指标（user_just_selected_metric），不能清除刚设置的指标
             # 确认词（如"是的"、"好"等）也不应该清除继承的指标
+            # 来自 Step 0 的意图确认也不清除（Step 0 已从 context 恢复了指标）
             confirmation_words = ["是的", "好", "可以", "对的", "没错", "确定", "行", "ok", "yeah", "yes"]
             is_confirmation = last_message.strip() in confirmation_words or last_message.strip().lower() in ["ok", "yes", "yeah", "y"]
-            if not is_pure_followup and inherited_metric and not user_just_selected_metric and not is_confirmation:
+            intent_confirmed_from_context = getattr(state, '_intent_confirmed_from_context', False)
+            if not is_pure_followup and inherited_metric and not user_just_selected_metric and not is_confirmation and not intent_confirmed_from_context:
                 if contains_metric_reference or (is_short_input and not is_time_word):
                     # 用户说了指标相关词但没匹配到，或者输入很短且不是时间词，清除继承
                     entities["metric_name"] = None
                     entities["metric_code"] = None
-                    entities["metric_id"] = None
                     entities["unit"] = None
                     entities["starrocks_sql"] = None
 
@@ -302,22 +366,32 @@ class ConversationNodes:
                         entities
                     )
                     if term_links:
-                        print(f"[DEBUG entity_node] LLM 识别到指标: {matched_metric}, confidence: {llm_result.get('confidence')}")
+                        logger.debug(f"[entity_node] LLM 识别到指标: {matched_metric}, confidence: {llm_result.get('confidence')}")
 
         entities.update(term_links)
+
+        # 识别"按X查看"模式，设置时间维度（用于 GROUP BY）
+        dim_match = re.search(r"按([日月年天周])查看", last_message)
+        if dim_match:
+            time_dim_char = dim_match.group(1)
+            # 映射到维度配置中的维度名
+            dim_map = {"日": "日", "天": "日", "月": "月", "年": "年", "周": "周"}
+            if time_dim_char in dim_map:
+                entities["dimension"] = dim_map[time_dim_char]
+                logger.debug(f"[entity_node] 识别时间维度: {entities['dimension']}")
 
         # 如果没有匹配到指标但有时间范围，也要提取
         if not term_links and not entities.get("time_range"):
             time_range = self._extract_time_range(last_message)
             if time_range:
                 entities["time_range"] = time_range
-                print(f"[DEBUG entity_node] 提取到时间范围: {time_range}")
+                logger.debug(f"[entity_node] 提取到时间范围: {time_range}")
 
         # 提取完整时间信息（用于追问和SQL组装）
         time_info = self._extract_time_info(last_message)
         if time_info:
             entities["time_info"] = time_info
-            print(f"[DEBUG entity_node] 提取到完整时间信息: {time_info}")
+            logger.debug(f"[entity_node] 提取到完整时间信息: {time_info}")
 
         # 检查是否是业务术语查询（ASIN、SKU等）
         business_term_info = self.rule_engine.recognize_business_term(last_message)
@@ -327,7 +401,7 @@ class ConversationNodes:
             entities["business_term_name"] = business_term_info.get("term")
             entities["business_term_description"] = business_term_info.get("description")
             entities["business_term_intent"] = business_term_info.get("intent")
-            print(f"[DEBUG entity_node] 识别到业务术语查询: {business_term_info.get('term')}")
+            logger.debug(f"[entity_node] 识别到业务术语查询: {business_term_info.get('term')}")
 
         # 如果成功链接到指标，保存到 last_valid_metric（不轻易清除）
         if entities.get("metric_name") or entities.get("metric_code"):
@@ -352,13 +426,13 @@ class ConversationNodes:
                             state.context = state.context or {}
                             state.context["metric_context"] = context
                             if os.getenv("DEBUG"):
-                                print(f"[GraphQuery] Found context for {metric_code}: "
+                                logger.debug(f"[GraphQuery] Found context for {metric_code}: "
                                       f"upstream={len(context.get('upstream', []))}, "
                                       f"downstream={len(context.get('downstream', []))}, "
                                       f"correlated={len(context.get('correlated', []))}")
                     except Exception as e:
                         if os.getenv("DEBUG"):
-                            print(f"[GraphQuery] Query failed: {e}")
+                            logger.warning(f"[GraphQuery] Query failed: {e}")
                 graph_query = None
 
         # 保存当前实体供下一轮使用
@@ -539,7 +613,7 @@ class ConversationNodes:
                 applied_defaults[field] = default_values[field]
 
         if applied_defaults:
-            print(f"[DEBUG clarification] 应用默认值: {applied_defaults}")
+            logger.debug(f"[clarification] 应用默认值: {applied_defaults}")
 
         return {
             "needs_clarification": False,
@@ -554,7 +628,7 @@ class ConversationNodes:
         2. query_metadata -> 查 PostgreSQL 元数据
         3. query_value/trend/comparison -> 查 StarRocks 数值
         """
-        print(f"[DEBUG sql_gen] intent={state.current_intent}, entities={state.entities}")
+        logger.debug(f"[sql_gen] intent={state.current_intent}, entities={state.entities}")
 
         # 非查询意图：跳过 SQL 生成
         non_query_intents = ["greeting", "thanks", "bye", "unknown"]
@@ -572,7 +646,7 @@ class ConversationNodes:
                 if prev and (prev.get("metric_name") or prev.get("metric_code")):
                     state.entities["metric_name"] = prev.get("metric_name")
                     state.entities["metric_code"] = prev.get("metric_code")
-                    print(f"[DEBUG sql_gen] 继承上轮实体: {state.entities}")
+                    logger.debug(f"[sql_gen] 继承上轮实体: {state.entities}")
                 else:
                     # 尝试从 last_valid_metric 获取（用于follow-up但中间有失败的查询）
                     last_metric = getattr(state, 'last_valid_metric', {})
@@ -582,7 +656,7 @@ class ConversationNodes:
                         state.entities["metric_id"] = last_metric.get("metric_id")
                         state.entities["unit"] = last_metric.get("unit")
                         state.entities["starrocks_sql"] = last_metric.get("starrocks_sql")
-                        print(f"[DEBUG sql_gen] 继承last_valid_metric: {state.entities}")
+                        logger.debug(f"[sql_gen] 继承last_valid_metric: {state.entities}")
 
             # 记录思考步骤：SQL 生成
             metric_name = state.entities.get("metric_name")
@@ -610,13 +684,13 @@ class ConversationNodes:
 
         # 提取维度参数
         dimensions = self._extract_sql_dimensions(state.entities)
-        print(f"[DEBUG _build_value_sql] 提取的维度参数: {dimensions}")
+        logger.debug(f"[_build_value_sql] 提取的维度参数: {dimensions}")
 
         # Step 1: 优先使用预置 SQL
         if starrocks_sql:
             # 如果有预置 SQL，应用维度参数调整
             adjusted_sql = self._apply_dimensions_to_sql(starrocks_sql, dimensions, state.entities, time_info)
-            print(f"[DEBUG _build_value_sql] 维度调整后的SQL: {adjusted_sql}")
+            logger.debug(f"[_build_value_sql] 维度调整后的SQL: {adjusted_sql}")
 
             # 如果有预置 SQL，先尝试补充缺失参数
             if not time_range and not time_info:
@@ -694,16 +768,16 @@ class ConversationNodes:
             if contains_time_word and (metric_code or metric_name):
                 # 这是时间限定查询，构建一个基于 metric_code 的查询 SQL
                 # 尝试从 metric_client 获取 starrocks_sql
-                print(f"[DEBUG sql_gen] contains_time_word=True, metric_code={metric_code}, metric_name={metric_name}, metric_id={metric_id}")
+                logger.debug(f"[sql_gen] contains_time_word=True, metric_code={metric_code}, metric_name={metric_name}, metric_id={metric_id}")
                 actual_starrocks_sql = None
                 if metric_id:
                     try:
                         metric_info = self.metric_client.get_metric(metric_id)
-                        print(f"[DEBUG sql_gen] get_metric({metric_id}) returned: starrocks_sql={repr(metric_info.get('starrocks_sql', 'NOT_FOUND')[:100] if metric_info.get('starrocks_sql') else 'EMPTY')}")
+                        logger.debug(f"[sql_gen] get_metric({metric_id}) returned: starrocks_sql={repr(metric_info.get('starrocks_sql', 'NOT_FOUND')[:100] if metric_info.get('starrocks_sql') else 'EMPTY')}")
                         if metric_info and metric_info.get("starrocks_sql"):
                             actual_starrocks_sql = metric_info.get("starrocks_sql")
                     except Exception as e:
-                        print(f"[DEBUG sql_gen] 获取指标详情失败: {e}")
+                        logger.debug(f"[sql_gen] 获取指标详情失败: {e}")
 
                 if actual_starrocks_sql:
                     # 使用指标的实际 SQL 模板
@@ -729,17 +803,17 @@ class ConversationNodes:
                             "intent_is_metadata_query": False,
                         }
                     # 没有 metric_id，触发指标追问
-                    print(f"[DEBUG sql_gen] metric_code={metric_code}, metric_id={metric_id}, metric_name={metric_name}")
+                    logger.debug(f"[sql_gen] metric_code={metric_code}, metric_id={metric_id}, metric_name={metric_name}")
                     # 如果有 metric_code，优先用 metric_code 查询指标详情
                     if metric_code and metric_id:
                         try:
                             metric_info = self.metric_client.get_metric(metric_id)
-                            print(f"[DEBUG sql_gen] get_metric result: {metric_info.get('name') if metric_info else 'None'}")
+                            logger.debug(f"[sql_gen] get_metric result: {metric_info.get('name') if metric_info else 'None'}")
                             if metric_info:
                                 # 用 metric_code 找到了指标，但 starrocks_sql 为空，说明这个指标没有查询SQL
                                 # 搜索相关指标给用户选择
                                 matched_metrics = self.metric_client.search_metrics(metric_name or last_message, limit=8)
-                                print(f"[DEBUG sql_gen] matched_metrics count={len(matched_metrics)}")
+                                logger.debug(f"[sql_gen] matched_metrics count={len(matched_metrics)}")
                                 if matched_metrics and len(matched_metrics) > 0:
                                     metric_list = "\n".join([
                                         f"{i+1}. **{m.get('name')}** ({m.get('metric_code', 'N/A')})"
@@ -755,12 +829,12 @@ class ConversationNodes:
                                         "matched_metrics": matched_metrics,
                                     }
                         except Exception as e:
-                            print(f"[DEBUG sql_gen] get_metric失败: {e}")
+                            logger.debug(f"[sql_gen] get_metric失败: {e}")
 
                     # 降级：用 metric_name 或用户输入搜索
                     search_query = metric_name if metric_name else last_message
                     matched_metrics = self.metric_client.search_metrics(search_query, limit=8)
-                    print(f"[DEBUG sql_gen] fallback search_query={search_query}, matched_metrics count={len(matched_metrics)}")
+                    logger.debug(f"[sql_gen] fallback search_query={search_query}, matched_metrics count={len(matched_metrics)}")
                     if matched_metrics and len(matched_metrics) > 0:
                         metric_list = "\n".join([
                             f"{i+1}. **{m.get('name')}** ({m.get('metric_code', 'N/A')})"
@@ -939,7 +1013,7 @@ class ConversationNodes:
                     }
             self._table_dimensions_cache[table_name] = result
         except Exception as e:
-            print(f"[DEBUG] 获取维度配置失败: {e}")
+            logger.warning(f"获取维度配置失败: {e}")
             self._table_dimensions_cache[table_name] = {}
         return self._table_dimensions_cache[table_name]
 
@@ -981,6 +1055,11 @@ class ConversationNodes:
         if entities.get("device"):
             dimensions["device"] = entities.get("device")
 
+        # 时间维度（日、月、年）- 用于 GROUP BY
+        for dim_key in ["日", "月", "年", "天", "周"]:
+            if entities.get(dim_key):
+                dimensions[dim_key] = entities.get(dim_key)
+
         return dimensions
 
     def _apply_dimensions_to_sql(self, sql: str, dimensions: Dict[str, Any], entities: Dict[str, Any], time_info: Dict = None) -> str:
@@ -1012,30 +1091,78 @@ class ConversationNodes:
             # 如果没有占位符，自动追加到 WHERE
             if table_name and ("{start_date}" not in adjusted_sql and "{end_date}" not in adjusted_sql):
                 if start_date:
-                    time_conditions = [
-                        f"fdate = '{start_date}'",
-                        f"report_month = '{start_date[:7]}'" if len(start_date) >= 7 else None,
-                        f"the_year = '{start_date[:4]}'" if len(start_date) >= 4 else None,
-                    ]
-                    for cond in [c for c in time_conditions if c]:
-                        if "WHERE" in adjusted_sql.upper():
-                            adjusted_sql += f" AND {cond}"
-                        else:
-                            adjusted_sql += f" WHERE {cond}"
+                    # 从维度配置获取时间列名（使用大写列名：FDATE, MONTHS）
+                    dim_configs = self._get_table_dimensions_cached(table_name)
+                    time_type = time_info.get("type", "date_range")
+
+                    # 根据时间类型选择正确的列和条件（只加一个，不三个都加）
+                    if time_type in ("date_range", "relative"):
+                        # 日期范围用 FDATE 列
+                        col = dim_configs.get("日", {}).get("column_name", "FDATE")
+                        time_cond = f"{col} >= '{start_date}' AND {col} <= '{end_date}'"
+                    elif time_type in ("absolute_month", "quarter"):
+                        # 月份/季度用 MONTHS 列
+                        col = dim_configs.get("月", {}).get("column_name", "MONTHS")
+                        time_cond = f"{col} = '{start_date[:7]}'"
+                    else:
+                        # 默认用 FDATE
+                        col = dim_configs.get("日", {}).get("column_name", "FDATE")
+                        time_cond = f"{col} >= '{start_date}' AND {col} <= '{end_date}'"
+
+                    if "WHERE" in adjusted_sql.upper():
+                        adjusted_sql += f" AND {time_cond}"
+                    else:
+                        adjusted_sql += f" WHERE {time_cond}"
 
         # === 2. 处理动态维度 (GROUP BY) ===
         dimension = entities.get("dimension")  # 如 "department"
+        # 时间维度（日、月、年）直接注入 GROUP BY
+        time_dimension_keys = ["日", "月", "年", "day", "month", "year"]
+        if dimension in time_dimension_keys:
+            # 统一为中文键
+            dim_key = "日" if dimension in ["日", "day"] else "月" if dimension in ["月", "month"] else "年" if dimension in ["年", "year"] else dimension
+            # 从配置获取实际的列名（大写：FDATE, MONTHS）
+            if table_name:
+                dim_configs = self._get_table_dimensions_cached(table_name)
+                col = dim_configs.get(dim_key, {}).get("column_name", dim_key.upper())
+            else:
+                col = dim_key.upper()
+            # 注入 GROUP BY（避免重复）
+            if "GROUP BY" not in adjusted_sql.upper():
+                adjusted_sql += f" GROUP BY {col}"
+            return adjusted_sql
+
         if dimension:
             # 有维度，保留 GROUP BY，从配置查列名
             if table_name:
                 dim_configs = self._get_table_dimensions_cached(table_name)
+                # 优先精确匹配
+                matched_dim = None
                 if dimension in dim_configs:
-                    column = dim_configs[dimension].get("column_name", dimension)
+                    matched_dim = dimension
+                else:
+                    # 模糊匹配：用户说"品类"应该匹配"三级品类"
+                    for dim_name in dim_configs:
+                        # 检查任意一方是否包含另一方
+                        if dimension in dim_name or dim_name in dimension:
+                            matched_dim = dim_name
+                            break
+                    # 再次尝试：如果 dim_name 是 dimension 的子串（如"三级品类"包含"品类"）
+                    if not matched_dim:
+                        for dim_name in dim_configs:
+                            if dim_name in dimension:
+                                matched_dim = dim_name
+                                break
+                if matched_dim:
+                    column = dim_configs[matched_dim].get("column_name", matched_dim)
                 else:
                     column = dimension
             else:
                 column = dimension
             adjusted_sql = adjusted_sql.replace("{dimension}", column)
+            # 如果有维度但 SQL 中没有 GROUP BY 占位符，手动添加 GROUP BY
+            if dimension and "GROUP BY" not in adjusted_sql.upper():
+                adjusted_sql = adjusted_sql.rstrip() + f" GROUP BY {column}"
         else:
             # 无维度，去掉 GROUP BY 相关
             adjusted_sql = adjusted_sql.replace("{dimension}", "*")
@@ -1078,6 +1205,29 @@ class ConversationNodes:
         # === 4. 清理未替换的占位符 ===
         adjusted_sql = re.sub(r'\{[^}]+\}', '', adjusted_sql)
 
+        # === 5. 处理 top N 排名 ===
+        top_n = entities.get("top_n")
+        if top_n:
+            # 获取指标列名（用于 ORDER BY）
+            metric_col = "SESSIONS_TOTAL"  # 默认指标列
+            if "sum(" in adjusted_sql.lower() or "avg(" in adjusted_sql.lower():
+                # 从 SELECT 子句中提取指标列
+                col_match = re.search(r'(sum|avg)\s*\(\s*(\w+)\s*\)', adjusted_sql, re.IGNORECASE)
+                if col_match:
+                    metric_col = col_match.group(2)
+            # 获取 GROUP BY 列（如果有的话）
+            group_col = None
+            group_match = re.search(r'GROUP\s+BY\s+(\w+)', adjusted_sql, re.IGNORECASE)
+            if group_match:
+                group_col = group_match.group(1)
+            # 添加 ORDER BY 和 LIMIT
+            if group_col:
+                adjusted_sql = re.sub(r'\s*$', '', adjusted_sql)  # 去掉末尾空白
+                if "ORDER BY" not in adjusted_sql.upper():
+                    adjusted_sql += f" ORDER BY {metric_col} DESC"
+                if "LIMIT" not in adjusted_sql.upper():
+                    adjusted_sql += f" LIMIT {top_n}"
+
         return adjusted_sql
 
     def _extract_time_from_text(self, text: str) -> Optional[str]:
@@ -1099,6 +1249,34 @@ class ConversationNodes:
         parser = TimeParser()
         return parser.parse(text)
 
+    def _extract_top_n(self, text: str) -> Optional[int]:
+        """从文本中提取 top N 排名信息（如"前三"、"前十"、"前13名"、"十三级"等）"""
+        import re
+        # 中文数字映射
+        chinese_nums = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '零': 0}
+        # 匹配"前"+"数字/中文数字"+"名"或"级"等
+        patterns = [
+            r'前(\d+)名',                  # 前10名、前13名
+            r'前(\d+)级',                  # 前10级
+            r'前([一二三四五六七八九十零]+)名',  # 前三名、前十名
+            r'前([一二三四五六七八九十]+)',     # 前三、前十
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                num_str = match.group(1)
+                if num_str.isdigit():
+                    return int(num_str)
+                # 中文数字转换
+                if num_str in chinese_nums:
+                    return chinese_nums[num_str]
+                # 处理"十三"这种复合中文数字（十+数字）
+                if len(num_str) >= 1 and num_str[0] == '十':
+                    result = 10
+                    for c in num_str[1:]:
+                        result += chinese_nums.get(c, 0)
+                    return result if result > 10 else chinese_nums.get(num_str, 0)
+        return None
 
     def _extract_time_range(self, text: str) -> Optional[str]:
         """从文本中提取时间范围（内部格式）"""
@@ -1111,7 +1289,7 @@ class ConversationNodes:
             return starrocks_sql
         return starrocks_sql
 
-    def execute_node(self, state: ConversationState) -> Dict[str, Any]:
+    async def execute_node(self, state: ConversationState) -> Dict[str, Any]:
         """
         执行查询节点
         - skip_sql_generation=True -> 跳过执行（非查询意图）
@@ -1174,7 +1352,7 @@ class ConversationNodes:
         # 数值查询 -> 查 StarRocks（如果配置了 execute 接口）
         if state.generated_sql and state.generated_sql != "METADATA_QUERY":
             try:
-                result = self.sql_generator.execute(
+                result = await self.sql_generator.execute(
                     sql=state.generated_sql,
                     params=state.sql_params
                 )
@@ -1302,11 +1480,33 @@ class ConversationNodes:
                 data = sql_result.get("data", [])
                 message = sql_result.get("message", "")
                 if not data or message and "无数据" in message:
-                    metric_name = state.entities.get("metric_name", "该指标")
+                    metric_name = state.entities.get("metric_name", "")
+                    time_range = state.entities.get("time_range", "") or (state.entities.get("time_info", {}).get("original") if state.entities.get("time_info") else "")
+                    # 调用 LLM 生成智能追问
+                    followup_result = self.llm_engine.generate_empty_result_followup(
+                        question=state.messages[-1].content if state.messages else "",
+                        metric_name=metric_name,
+                        time_range=time_range,
+                        sql=state.generated_sql or "",
+                    )
+                    # 兼容 suggestions 格式：可能是 [{"text": "..."}] 也可能是 ["字符串"]
+                    raw_suggestions = followup_result.get("suggestions", []) if isinstance(followup_result, dict) else []
+                    suggestions = []
+                    for s in raw_suggestions:
+                        if isinstance(s, str):
+                            suggestions.append(s)
+                        elif isinstance(s, dict):
+                            text = s.get("text", "") or s.get("suggestion", "") or s.get("reply", "")
+                            if text:
+                                suggestions.append(text)
+                    analysis = followup_result.get("analysis", "数据为空") if isinstance(followup_result, dict) else "数据为空"
+                    needs_clar = followup_result.get("needs_clarification", False) if isinstance(followup_result, dict) else False
+                    # 保存当前指标/时间到上下文，供下一轮追问恢复
+                    self._update_context(state, state.entities)
                     return {
-                        "answer": f"目前没有查到 {metric_name} 的数据。\n\n您可以：\n1. 查看该指标的业务口径：「业务口径呢」\n2. 查看技术口径：「技术口径呢」\n3. 换一个指标查询",
-                        "suggest_questions": [f"{metric_name}的业务口径", "帮我查其他指标"],
-                        "needs_clarification": False,
+                        "answer": f"抱歉，没有查到 {metric_name or '该指标'} 的数据。\n\n{analysis}\n\n您可以尝试：\n" + "\n".join([f"- {s}" for s in suggestions[:3]]) if suggestions else f"抱歉，没有查到 {metric_name or '该指标'} 的数据。",
+                        "suggest_questions": suggestions[:3] if suggestions else [f"{metric_name}的业务口径" if metric_name else "帮我查其他指标"],
+                        "needs_clarification": needs_clar,
                     }
                 elif data:
                     # 有数据，调用 LLM 生成自然语言回答
@@ -1319,13 +1519,17 @@ class ConversationNodes:
                         metric_name=metric_name,
                         unit=unit,
                     )
+                    # 保存当前指标/时间到上下文
+                    self._update_context(state, state.entities)
                     return {
                         "answer": answer,
                         "suggest_questions": self._generate_suggestions(state),
                         "needs_clarification": False,
+                        "result_data": data,
                     }
 
         # 没有结果
+        self._update_context(state, state.entities)
         return {
             "answer": "抱歉，未能获取到有效数据",
             "suggest_questions": self._generate_suggestions(state),
@@ -1399,7 +1603,7 @@ class ConversationNodes:
         if not is_correction:
             return {"intent_feedback": None}
 
-        print(f"[DEBUG intent_feedback] 检测到用户纠正: {last_message}")
+        logger.debug(f"[intent_feedback] 检测到用户纠正: {last_message}")
 
         # 提取用户想要的意图
         correct_intent = self._extract_intent_from_feedback(last_message)
@@ -1412,7 +1616,7 @@ class ConversationNodes:
                 correct_intent=correct_intent,
                 session_id=state.session_id
             )
-            print(f"[DEBUG intent_feedback] 记录反馈: predicted={state.current_intent}, correct={correct_intent}")
+            logger.debug(f"[intent_feedback] 记录反馈: predicted={state.current_intent}, correct={correct_intent}")
 
         # 设置追问，让用户确认正确意图
         state.needs_clarification = True
@@ -1454,7 +1658,7 @@ class ConversationNodes:
 
             httpx.post(url, json=payload, timeout=5)
         except Exception as e:
-            print(f"[DEBUG intent_feedback] 记录反馈失败: {e}")
+            logger.debug(f"[intent_feedback] 记录反馈失败: {e}")
 
 
 # 全局节点实例

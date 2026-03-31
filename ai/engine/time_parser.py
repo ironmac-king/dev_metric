@@ -14,6 +14,13 @@ from datetime import datetime
 class TimeParser:
     """时间表达式解析器 - 行业标准 TimeML 规范"""
 
+    # 中文数字映射
+    CHINESE_DIGITS = {
+        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+        '零': 0, '两': 2, '半': 0.5,
+    }
+
     def __init__(self, current_year: int = None):
         # 默认使用当前年份
         self.current_year = current_year or datetime.now().year
@@ -55,7 +62,12 @@ class TimeParser:
         if result:
             return result
 
-        # 5. 相对时间（调用原有逻辑）
+        # 5. 半年: "上半年"、"下半年"
+        result = self._parse_half_year(text)
+        if result:
+            return result
+
+        # 6. 相对时间（调用原有逻辑）
         result = self._parse_relative(text)
         if result:
             return result
@@ -130,6 +142,47 @@ class TimeParser:
                 }
         return None
 
+    def _parse_half_year(self, text: str) -> Optional[Dict[str, Any]]:
+        """解析半年: 上半年、下半年"""
+        if "上半年" not in text and "下半年" not in text:
+            return None
+
+        year = self._infer_year(text)
+
+        # 检查是否有"去年"、"今年"等修饰
+        if "去年" in text or "上年" in text:
+            year -= 1
+        elif "明年" in text:
+            year += 1
+
+        if "上半年" in text:
+            from calendar import monthrange
+            _, last_day = monthrange(year, 6)
+            return {
+                "type": "half_year",
+                "start": f"{year}-01-01",
+                "end": f"{year}-06-{last_day}",
+                "original": text,
+                "has_explicit_year": "去年" in text or "今年" in text or "明年" in text or "本年" in text or "上年" in text,
+                "time_key": f"first_half_{year}",
+                "half_year": 1,
+                "year": year
+            }
+        elif "下半年" in text:
+            from calendar import monthrange
+            _, last_day = monthrange(year, 12)
+            return {
+                "type": "half_year",
+                "start": f"{year}-07-01",
+                "end": f"{year}-12-{last_day}",
+                "original": text,
+                "has_explicit_year": "去年" in text or "今年" in text or "明年" in text or "本年" in text or "上年" in text,
+                "time_key": f"second_half_{year}",
+                "half_year": 2,
+                "year": year
+            }
+        return None
+
     def _parse_date_range(self, text: str) -> Optional[Dict[str, Any]]:
         """解析日期范围: 7月1日-7月15日"""
         # 匹配 "7月1日-7月15日" 或 "7月1-15日"
@@ -156,6 +209,53 @@ class TimeParser:
                 "time_key": f"{year}-{start_month:02d}-{start_day:02d}_{year}-{end_month:02d}-{end_day:02d}"
             }
         return None
+
+    def _chinese_to_int(self, s: str) -> Optional[float]:
+        """将中文数字转换为整数或浮点数"""
+        if not s:
+            return None
+        if s in ('零', '两'):
+            return self.CHINESE_DIGITS.get(s, 0)
+
+        # 预处理：数字转为阿拉伯数字，量词保留
+        chars = []
+        for c in s:
+            if c in '十百千万':
+                # 量词（十/百/千/万）直接保留作为标记
+                chars.append(c)
+            elif c in self.CHINESE_DIGITS:
+                digit = self.CHINESE_DIGITS[c]
+                if digit < 1:
+                    # 特殊处理：半(0.5)等小于1的值，直接返回
+                    return digit
+                elif digit < 10:  # 0-9 的数字才转为字符
+                    chars.append(str(digit))
+                # 十(10) 等不转为字符串（已由上面处理）
+            elif c == '零':
+                pass  # 忽略
+            else:
+                return None
+
+        if not chars:
+            return None
+
+        # 解析：遇到十/百/千时，前面的数字乘以对应值
+        result = 0
+        current = 0
+        for i, c in enumerate(chars):
+            if c.isdigit():
+                current = current * 10 + int(c)
+            elif c == '十':
+                result += current * 10
+                current = 0
+            elif c == '百':
+                result += current * 100
+                current = 0
+            elif c == '千':
+                result += current * 1000
+                current = 0
+        result += current
+        return result if result > 0 else None
 
     def _parse_relative(self, text: str) -> Optional[Dict[str, Any]]:
         """解析相对时间（保留原有逻辑）"""
@@ -196,27 +296,61 @@ class TimeParser:
                     "time_key": time_key
                 }
 
-        # 动态时间: 最近N天/周/月/年
+        # 动态时间: 最近N天/周/月/年（支持阿拉伯数字和中文数字）
+        # 中文数字匹配: 一|二|三|四|五|六|七|八|九|十|零|两|半
+        chinese_num = r"[零一二三四五六七八九十两半]"
+
+        # 组合中文数字 (十一, 二十三, 半年等)
+        chinese_num_compound = rf"{chinese_num}{chinese_num}*"
+
+        # 特殊处理"半年"：因为"半年"在语义上=6个月，而不是0.5年
+        # "近半年" = "近" + "半年" + "年"，其中"半年"表示6个月，不是1年
+        # 如果直接让正则匹配"年"模式，会错误地把"半年"解析为1年
+        if re.search(r"近(半|半年)年|过去(半|半年)年", text):
+            from datetime import timedelta
+            today = datetime.now()
+            start = (today - timedelta(days=180)).strftime("%Y-%m-%d")
+            end = today.strftime("%Y-%m-%d")
+            return {
+                "type": "relative",
+                "start": start,
+                "end": end,
+                "original": text,
+                "has_explicit_year": True,
+                "time_key": "last_6_months"
+            }
+
+        # 注意: 天/周/月/年 前可能有"个"字（如"一个月"）
+        # template 用普通字符串配合 .format() 使用 {}
         patterns = [
-            (r"最近(\d+)天", "last_{}_days", "days"),
-            (r"最近(\d+)周", "last_{}_weeks", "weeks"),
-            (r"最近(\d+)月", "last_{}_months", "months"),
-            (r"最近(\d+)年", "last_{}_years", "years"),
-            (r"过去(\d+)天", "past_{}_days", "days"),
-            (r"过去(\d+)周", "past_{}_weeks", "weeks"),
-            (r"过去(\d+)月", "past_{}_months", "months"),
-            (r"过去(\d+)年", "past_{}_years", "years"),
-            (r"近(\d+)天", "last_{}_days", "days"),
-            (r"近(\d+)周", "last_{}_weeks", "weeks"),
-            (r"近(\d+)月", "last_{}_months", "months"),
-            (r"近(\d+)年", "last_{}_years", "years"),
+            (rf"最近(\d+|{chinese_num_compound})个?天", r"last_{}_days", "days"),
+            (rf"最近(\d+|{chinese_num_compound})个?周", r"last_{}_weeks", "weeks"),
+            (rf"最近(\d+|{chinese_num_compound})个?月", r"last_{}_months", "months"),
+            (rf"最近(\d+|{chinese_num_compound})个?年", r"last_{}_years", "years"),
+            (rf"过去(\d+|{chinese_num_compound})个?天", r"past_{}_days", "days"),
+            (rf"过去(\d+|{chinese_num_compound})个?周", r"past_{}_weeks", "weeks"),
+            (rf"过去(\d+|{chinese_num_compound})个?月", r"past_{}_months", "months"),
+            (rf"过去(\d+|{chinese_num_compound})个?年", r"past_{}_years", "years"),
+            (rf"近(\d+|{chinese_num_compound})个?天", r"last_{}_days", "days"),
+            (rf"近(\d+|{chinese_num_compound})个?日", r"last_{}_days", "days"),
+            (rf"近(\d+|{chinese_num_compound})个?周", r"last_{}_weeks", "weeks"),
+            (rf"近(\d+|{chinese_num_compound})个?月", r"last_{}_months", "months"),
+            (rf"近(\d+|{chinese_num_compound})个?年", r"last_{}_years", "years"),
         ]
 
         for pattern, template, unit in patterns:
             match = re.search(pattern, text)
             if match:
-                num = int(match.group(1))
-                time_key = template.format(num)
+                num_str = match.group(1)
+                # 尝试阿拉伯数字，失败则转中文数字
+                try:
+                    num = int(num_str)
+                except ValueError:
+                    num = self._chinese_to_int(num_str)
+                # 处理"半年"等情况：0.5 -> 6个月
+                if num == 0.5:
+                    num = 6
+                time_key = template.format(int(num))
 
                 from datetime import timedelta
                 today = datetime.now()
@@ -311,8 +445,8 @@ class TimeParser:
             if month == 1:
                 return (f"{year-1}-12-01", f"{year-1}-12-31")
             else:
-                _, last_day = monthrange(year, month - 1)
-                return (f"{year}-{month-1:02d}-01", f"{year}-{month-1:02d}-{last_day}")
+                _, last_day = monthrange(year, month)
+                return (f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day}")
         elif time_key == "last_year":
             return (f"{year-1}-01-01", f"{year-1}-12-31")
         elif time_key == "this_year":

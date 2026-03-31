@@ -6,6 +6,12 @@ from collections import Counter
 from dataclasses import dataclass
 import json
 import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.feedback_analyzer")
 
 
 @dataclass
@@ -78,7 +84,7 @@ class FeedbackAnalyzer:
                     database=os.getenv("PG_DATABASE", "dev_metric")
                 )
             except Exception as e:
-                print(f"[FeedbackAnalyzer] 数据库连接失败: {e}")
+                logger.info(f"数据库连接失败: {e}")
                 return None
         return self._db
 
@@ -140,7 +146,7 @@ class FeedbackAnalyzer:
                 silent_rate=(silent / total * 100) if total > 0 else 0
             )
         except Exception as e:
-            print(f"[FeedbackAnalyzer] 查询追问统计失败: {e}")
+            logger.info(f"查询追问统计失败: {e}")
             return ClarificationStats(total=0, success=0, fail=0, silent=0,
                                       success_rate=0, fail_rate=0, silent_rate=0)
 
@@ -178,7 +184,7 @@ class FeedbackAnalyzer:
                 for row in rows
             ]
         except Exception as e:
-            print(f"[FeedbackAnalyzer] 查询失败原因分布失败: {e}")
+            logger.info(f"查询失败原因分布失败: {e}")
             return []
 
     def get_missing_fields_patterns(
@@ -223,7 +229,7 @@ class FeedbackAnalyzer:
                 for row in rows
             ]
         except Exception as e:
-            print(f"[FeedbackAnalyzer] 查询缺失字段模式失败: {e}")
+            logger.info(f"查询缺失字段模式失败: {e}")
             return []
 
     def get_clarification_success_rate_by_type(self) -> Dict[str, float]:
@@ -252,7 +258,7 @@ class FeedbackAnalyzer:
 
             return {row[0]: row[1] for row in rows}
         except Exception as e:
-            print(f"[FeedbackAnalyzer] 查询追问成功率失败: {e}")
+            logger.info(f"查询追问成功率失败: {e}")
             return {}
 
     def get_silent_user_sessions(
@@ -311,7 +317,7 @@ class FeedbackAnalyzer:
         """
         db = self._get_db_connection()
         if not db:
-            print("[FeedbackAnalyzer] 无法连接数据库")
+            logger.warning("[FeedbackAnalyzer] 无法连接数据库")
             return []
 
         try:
@@ -351,7 +357,7 @@ class FeedbackAnalyzer:
                 ))
             return feedbacks
         except Exception as e:
-            print(f"[FeedbackAnalyzer] 查询负反馈失败: {e}")
+            logger.info(f"查询负反馈失败: {e}")
             return []
 
     def analyze_failure_patterns(
@@ -423,7 +429,7 @@ class FeedbackAnalyzer:
         """
         db = self._get_db_connection()
         if not db:
-            print("[FeedbackAnalyzer] 无法连接数据库")
+            logger.warning("[FeedbackAnalyzer] 无法连接数据库")
             return []
 
         try:
@@ -456,7 +462,7 @@ class FeedbackAnalyzer:
                 })
             return suggestions
         except Exception as e:
-            print(f"[FeedbackAnalyzer] 查询优化建议失败: {e}")
+            logger.info(f"查询优化建议失败: {e}")
             return []
 
     def analyze_failure_context(
@@ -508,7 +514,7 @@ class FeedbackAnalyzer:
                 })
             return results
         except Exception as e:
-            print(f"[FeedbackAnalyzer] 查询失败上下文失败: {e}")
+            logger.info(f"查询失败上下文失败: {e}")
             return []
 
     def generate_optimization_suggestions(self) -> List[str]:

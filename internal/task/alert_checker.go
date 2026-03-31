@@ -6,8 +6,9 @@ import (
 	"dev_metric/internal/repository/postgres"
 	"dev_metric/internal/repository/starrocks"
 	"fmt"
-	"log"
 	"time"
+
+	"dev_metric/pkg/logger"
 )
 
 // AlertChecker 告警检测任务
@@ -24,7 +25,7 @@ func NewAlertChecker(interval time.Duration) *AlertChecker {
 }
 
 func (ac *AlertChecker) Start() {
-	log.Println("告警检测任务启动")
+	logger.Info().Msg("告警检测任务启动")
 	ticker := time.NewTicker(ac.interval)
 	defer ticker.Stop()
 
@@ -33,7 +34,7 @@ func (ac *AlertChecker) Start() {
 		case <-ticker.C:
 			ac.check()
 		case <-ac.stopCh:
-			log.Println("告警检测任务停止")
+			logger.Info().Msg("告警检测任务停止")
 			return
 		}
 	}
@@ -55,14 +56,14 @@ func (ac *AlertChecker) check() {
 func (ac *AlertChecker) checkRule(rule model.AlertRule) {
 	var metric model.Metric
 	if err := postgres.Get().First(&metric, rule.MetricID).Error; err != nil {
-		log.Printf("获取指标失败: %v", err)
+		logger.Error().Err(err).Uint("metric_id", rule.MetricID).Msg("获取指标失败")
 		return
 	}
 
 	// 查询最新值
 	data, err := starrocks.Query(metric.StarRocksSQL)
 	if err != nil {
-		log.Printf("查询指标数据失败: %v", err)
+		logger.Error().Err(err).Uint("metric_id", rule.MetricID).Msg("查询指标数据失败")
 		return
 	}
 
@@ -129,7 +130,7 @@ func (ac *AlertChecker) handleAlert(rule model.AlertRule, metric model.Metric, v
 	if rule.DingtalkWebhook != "" {
 		dt := notify.NewDingTalk(rule.DingtalkWebhook, rule.DingtalkSecret)
 		if err := dt.SendMessage("指标告警", record.Message); err != nil {
-			log.Printf("发送钉钉通知失败: %v", err)
+			logger.Error().Err(err).Uint("rule_id", rule.ID).Msg("发送钉钉通知失败")
 		} else {
 			// 更新通知状态
 			now := time.Now()

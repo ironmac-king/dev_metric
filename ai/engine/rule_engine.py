@@ -6,6 +6,9 @@ import re
 import httpx
 from typing import Optional, Dict, Any, List, Tuple
 from ai.graph.state import IntentResult, SQLGenerationResult
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.rule_engine")
 
 
 class RuleEngine:
@@ -51,9 +54,9 @@ class RuleEngine:
                                 "description": t.get("description", ""),
                                 "metric_ids": t.get("metric_ids", []),
                             }
-                    print(f"[RuleEngine] 加载了 {len(self.business_terms)} 个业务术语")
+                    logger.info(f"[RuleEngine] 加载了 {len(self.business_terms)} 个业务术语")
         except Exception as e:
-            print(f"[RuleEngine] 加载业务术语失败: {e}")
+            logger.info(f"[RuleEngine] 加载业务术语失败: {e}")
 
     def _load_dimensions(self):
         """从 Go API 动态加载维度映射，缓存1小时"""
@@ -62,7 +65,7 @@ class RuleEngine:
 
         # 检查缓存是否有效
         if self._dimension_cache and (time.time() - self._dimension_cache_time) < self._dimension_ttl:
-            print(f"[RuleEngine] 维度映射使用缓存 (剩余 {int(self._dimension_ttl - (time.time() - self._dimension_cache_time))}s)")
+            logger.info(f"[RuleEngine] 维度映射使用缓存 (剩余 {int(self._dimension_ttl - (time.time() - self._dimension_cache_time))}s)")
             return
 
         try:
@@ -90,10 +93,10 @@ class RuleEngine:
                                     self._dimension_cache[code] = {}
 
                         self._dimension_cache_time = time.time()
-                        print(f"[RuleEngine] 从API加载了 {len(self._dimension_cache)} 个维度类型: {list(self._dimension_cache.keys())}")
+                        logger.info(f"[RuleEngine] 从API加载了 {len(self._dimension_cache)} 个维度类型: {list(self._dimension_cache.keys())}")
                         return
         except Exception as e:
-            print(f"[RuleEngine] 加载维度映射失败: {e}, 将使用内置默认值")
+            logger.info(f"[RuleEngine] 加载维度映射失败: {e}, 将使用内置默认值")
 
         # API 为空或失败，使用内置默认值
         self._init_fallback_dimensions()
@@ -163,9 +166,9 @@ class RuleEngine:
                         }
                         if name_en:
                             self.metric_templates[name_en.lower()] = self.metric_templates[name]
-                    print(f"已加载 {len(self.metric_templates)} 个指标到规则引擎")
+                    logger.info(f"已加载 {len(self.metric_templates)} 个指标到规则引擎")
         except Exception as e:
-            print(f"加载指标数据失败: {e}, 将使用内置模板")
+            logger.warning(f"加载指标数据失败: {e}, 将使用内置模板")
             self._init_builtin_templates()
 
     def _load_nlp_templates(self):
@@ -202,9 +205,9 @@ class RuleEngine:
                         key = f"{tpl.get('metric_code')}_{tpl.get('intent')}"
                         self.sql_templates[key] = tpl.get("sql_template", "")
 
-                    print(f"已加载 {len(self.intent_patterns)} 个意图模式, {len(self.sql_templates)} 个 SQL 模板")
+                    logger.info(f"已加载 {len(self.intent_patterns)} 个意图模式, {len(self.sql_templates)} 个 SQL 模板")
         except Exception as e:
-            print(f"加载 NLP 模板失败: {e}, 将使用内置模式")
+            logger.warning(f"加载 NLP 模板失败: {e}, 将使用内置模式")
             self._init_builtin_patterns()
             self._init_builtin_sql_templates()
 
@@ -278,9 +281,9 @@ class RuleEngine:
             self.ml_classifier = get_intent_classifier()
             self.ml_extractor = get_entity_extractor()
             self.ml_similarity = get_similar_recommender()
-            print("[RuleEngine] ML模块初始化完成")
+            logger.info("[RuleEngine] ML模块初始化完成")
         except Exception as e:
-            print(f"[RuleEngine] ML模块初始化失败: {e}")
+            logger.info(f"[RuleEngine] ML模块初始化失败: {e}")
             self.use_ml = False
 
     def recognize_intent(self, text: str) -> Optional[IntentResult]:
@@ -307,7 +310,7 @@ class RuleEngine:
                         entities={"intent_pattern": f"[ML]{text[:10]}..."}
                     )
             except Exception as e:
-                print(f"[RuleEngine] ML分类失败: {e}")
+                logger.info(f"[RuleEngine] ML分类失败: {e}")
 
         # 默认查询值
         return IntentResult(
@@ -333,20 +336,20 @@ class RuleEngine:
         result = {}
         text_lower = text.lower()
 
-        print(f"[DEBUG] 实体链接，输入文本: {text}")
-        print(f"[DEBUG] 可用的指标模板数量: {len(self.metric_templates)}")
+        logger.debug(f"实体链接，输入文本: {text}")
+        logger.debug(f"可用的指标模板数量: {len(self.metric_templates)}")
 
         # ========== Step 0: 规则优先提取维度信息 ==========
         # 维度提取不依赖于指标匹配，应该在任何匹配之前进行
         extracted_dimensions = self._extract_dimensions(text)
         if extracted_dimensions:
             result.update(extracted_dimensions)
-            print(f"[DEBUG] 规则提取维度: {extracted_dimensions}")
+            logger.debug(f"规则提取维度: {extracted_dimensions}")
 
         # 先尝试精确匹配
         for term, metric_info in self.metric_templates.items():
             if term.lower() in text_lower:
-                print(f"[DEBUG] 精确匹配成功: {term} -> {metric_info.get('metric_name')}")
+                logger.debug(f"精确匹配成功: {term} -> {metric_info.get('metric_name')}")
                 result.update(metric_info)
                 # 恢复维度信息（不被 metric_info 覆盖）
                 result.update(extracted_dimensions)
@@ -372,7 +375,7 @@ class RuleEngine:
                         best_match = metric_info
 
         if best_match:
-            print(f"[DEBUG] 模糊匹配成功: {best_match.get('metric_name')}")
+            logger.debug(f"模糊匹配成功: {best_match.get('metric_name')}")
             result.update(best_match)
             # 恢复维度信息
             result.update(extracted_dimensions)
@@ -387,7 +390,7 @@ class RuleEngine:
                     for term, metric_info in self.metric_templates.items():
                         if metric_name in term or term in metric_name:
                             result.update(metric_info)
-                            print(f"[DEBUG] ML实体抽取匹配成功: {metric_name} -> {metric_info.get('metric_name')}")
+                            logger.debug(f"ML实体抽取匹配成功: {metric_name} -> {metric_info.get('metric_name')}")
                             break
                 # 提取时间范围（即使没有匹配到指标也提取）
                 time_range = ml_entities.get("time_range")
@@ -397,11 +400,11 @@ class RuleEngine:
                     time_range = self._normalize_time_range(time_range, raw_time)
                     result["time_range"] = time_range
                     result["raw_time"] = raw_time
-                    print(f"[DEBUG] ML时间抽取: {time_range} (原始: {raw_time})")
+                    logger.debug(f"ML时间抽取: {time_range} (原始: {raw_time})")
                 # 恢复维度信息
                 result.update(extracted_dimensions)
             except Exception as e:
-                print(f"[RuleEngine] ML实体抽取失败: {e}")
+                logger.info(f"[RuleEngine] ML实体抽取失败: {e}")
 
         # 继承上下文的指标信息 - 仅当查询是 follow-up 类型时才继承
         # 关键：如果完全没有匹配到任何指标（result为空），不继承上轮指标
@@ -425,7 +428,7 @@ class RuleEngine:
                             result.update(metric_info)
                             break
 
-        print(f"[DEBUG] 实体链接结果: {result}")
+        logger.debug(f"实体链接结果: {result}")
         return result
 
     def _extract_dimensions(self, text: str) -> Dict[str, Any]:
@@ -585,7 +588,7 @@ class RuleEngine:
         # 安全校验：metric_code 只允许字母、数字、连字符、下划线
         import re
         if metric_code and not re.match(r'^[\w-]+$', metric_code):
-            print(f"[WARN] metric_code 包含不安全字符: {metric_code}")
+            logger.warning(f"metric_code 包含不安全字符: {metric_code}")
             return None
 
         # 先查数据库配置的 SQL 模板

@@ -5,6 +5,12 @@ from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import os
 import json
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.rule_optimizer")
 
 
 @dataclass
@@ -43,7 +49,7 @@ class RuleOptimizer:
                     database=os.getenv("PG_DATABASE", "dev_metric")
                 )
             except Exception as e:
-                print(f"[RuleOptimizer] 数据库连接失败: {e}")
+                logger.info(f"数据库连接失败: {e}")
                 return None
         return self._db
 
@@ -54,27 +60,27 @@ class RuleOptimizer:
         Returns:
             List[OptimizationSuggestion]: 生成的优化建议列表
         """
-        print("[RuleOptimizer] 开始每日分析...")
+        logger.info("[RuleOptimizer] 开始每日分析...")
 
         # 1. 获取昨天的负反馈
         feedbacks = self.analyzer.get_negative_feedbacks(days=1)
         if not feedbacks:
-            print("[RuleOptimizer] 昨日无负反馈")
+            logger.info("[RuleOptimizer] 昨日无负反馈")
             return []
 
-        print(f"[RuleOptimizer] 获取到 {len(feedbacks)} 条负反馈")
+        logger.info(f"[RuleOptimizer] 获取到 {len(feedbacks)} 条负反馈")
 
         # 2. 分析失败模式
         patterns = self.analyzer.analyze_failure_patterns(feedbacks)
-        print(f"[RuleOptimizer] 高频失败词: {patterns['high_freq_terms'][:5]}")
-        print(f"[RuleOptimizer] 高频失败意图: {patterns['high_freq_intents'][:5]}")
+        logger.info(f"[RuleOptimizer] 高频失败词: {patterns['high_freq_terms'][:5]}")
+        logger.info(f"[RuleOptimizer] 高频失败意图: {patterns['high_freq_intents'][:5]}")
 
         # 3. 生成优化建议（不自动应用，只存储）
         suggestions = self._generate_suggestions(patterns, feedbacks)
 
         # 4. 存入数据库
         saved_count = self._save_suggestions(suggestions)
-        print(f"[RuleOptimizer] 每日分析完成，生成 {saved_count} 条优化建议")
+        logger.info(f"[RuleOptimizer] 每日分析完成，生成 {saved_count} 条优化建议")
 
         return suggestions
 
@@ -169,7 +175,7 @@ class RuleOptimizer:
             cursor.close()
             return count > 0
         except Exception as e:
-            print(f"[RuleOptimizer] 检查重复建议失败: {e}")
+            logger.info(f"检查重复建议失败: {e}")
             return False
 
     def _find_intent_template_id(self, intent: str) -> Optional[int]:
@@ -190,7 +196,7 @@ class RuleOptimizer:
             cursor.close()
             return result[0] if result else None
         except Exception as e:
-            print(f"[RuleOptimizer] 查找意图模板失败: {e}")
+            logger.info(f"查找意图模板失败: {e}")
             return None
 
     def _extract_actual_terms(
@@ -228,7 +234,7 @@ class RuleOptimizer:
 
         db = self._get_db_connection()
         if not db:
-            print("[RuleOptimizer] 无法连接数据库")
+            logger.info("[RuleOptimizer] 无法连接数据库")
             return 0
 
         saved_count = 0
@@ -256,9 +262,9 @@ class RuleOptimizer:
 
             db.commit()
             cursor.close()
-            print(f"[RuleOptimizer] 已保存 {saved_count} 条建议到数据库")
+            logger.info(f"已保存 {saved_count} 条建议到数据库")
         except Exception as e:
-            print(f"[RuleOptimizer] 保存建议失败: {e}")
+            logger.info(f"保存建议失败: {e}")
             db.rollback()
 
         return saved_count
@@ -288,7 +294,7 @@ class RuleOptimizer:
             )
             suggestion = cursor.fetchone()
             if not suggestion:
-                print(f"[RuleOptimizer] 建议 {suggestion_id} 不存在")
+                logger.info(f"建议 {suggestion_id} 不存在")
                 cursor.close()
                 return False
 
@@ -318,10 +324,10 @@ class RuleOptimizer:
 
             db.commit()
             cursor.close()
-            print(f"[RuleOptimizer] 已应用建议 {suggestion_id}")
+            logger.info(f"已应用建议 {suggestion_id}")
             return True
         except Exception as e:
-            print(f"[RuleOptimizer] 应用建议失败: {e}")
+            logger.info(f"应用建议失败: {e}")
             db.rollback()
             return False
 
@@ -333,7 +339,7 @@ class RuleOptimizer:
             (f"%{pattern}%",)
         )
         if cursor.fetchone():
-            print(f"[RuleOptimizer] 意图模板已存在: {pattern}")
+            logger.info(f"意图模板已存在: {pattern}")
             return
 
         # 插入新模板（默认配置）
@@ -341,7 +347,7 @@ class RuleOptimizer:
             INSERT INTO intent_templates (name, intent, patterns, priority, response, status)
             VALUES (%s, 'query_value', %s, 5, '您好，我来帮您查询', 1)
         """, (f"自动添加_{pattern}", pattern))
-        print(f"[RuleOptimizer] 添加意图模板: {pattern}")
+        logger.info(f"[RuleOptimizer] 添加意图模板: {pattern}")
 
     def _apply_modify_pattern(self, cursor, target_id: int, new_value: str):
         """修改现有意图模板"""
@@ -353,7 +359,7 @@ class RuleOptimizer:
             SET patterns = CONCAT(patterns, ',', %s)
             WHERE id = %s
         """, (new_value, target_id))
-        print(f"[RuleOptimizer] 修改意图模板 {target_id}: 添加模式 {new_value}")
+        logger.info(f"[RuleOptimizer] 修改意图模板 {target_id}: 添加模式 {new_value}")
 
     def _apply_add_synonym(self, cursor, target_table: str, term: str):
         """添加同义词"""
@@ -363,14 +369,14 @@ class RuleOptimizer:
             (term,)
         )
         if cursor.fetchone():
-            print(f"[RuleOptimizer] 业务术语已存在: {term}")
+            logger.info(f"业务术语已存在: {term}")
             return
 
         cursor.execute("""
             INSERT INTO business_terms (term_name, synonyms, status)
             VALUES (%s, %s, 1)
         """, (term, term))  # 同义词默认和术语名相同
-        print(f"[RuleOptimizer] 添加业务术语: {term}")
+        logger.info(f"[RuleOptimizer] 添加业务术语: {term}")
 
     def ignore_suggestion(self, suggestion_id: int) -> bool:
         """
@@ -395,10 +401,10 @@ class RuleOptimizer:
             """, (suggestion_id,))
             db.commit()
             cursor.close()
-            print(f"[RuleOptimizer] 已忽略建议 {suggestion_id}")
+            logger.info(f"已忽略建议 {suggestion_id}")
             return True
         except Exception as e:
-            print(f"[RuleOptimizer] 忽略建议失败: {e}")
+            logger.info(f"忽略建议失败: {e}")
             return False
 
 

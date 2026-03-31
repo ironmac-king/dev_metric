@@ -18,7 +18,7 @@ import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background: linear-gradient(135deg, #F5F7FA 0%, #E8ECF3 100%);
+  background: #F2F3F5;
   min-height: 100vh;
 }
 

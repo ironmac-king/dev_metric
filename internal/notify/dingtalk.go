@@ -75,7 +75,6 @@ func (d *DingTalk) SendTextMessage(content string) error {
 // generateSign 生成签名
 func (d *DingTalk) generateSign() (int64, string) {
 	timestamp := time.Now().UnixMilli()
-	signStr := fmt.Sprintf("%d\n%s", timestamp, d.secret)
 
 	h := hmac.New(sha256.New, []byte(d.secret))
 	h.Write([]byte(fmt.Sprintf("%d\n%s", timestamp, d.secret)))

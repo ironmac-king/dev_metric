@@ -53,6 +53,12 @@ func autoMigrate() error {
 		&model.SQLTemplate{},
 		&model.DimensionConfig{},
 		&model.IntentFeedback{},
+		// 智能问数 Dashboard 相关
+		&model.AskShortcutQuestion{},
+		&model.AskFavorite{},
+		&model.AskSessionSummary{},
+		&model.AskQueryStat{},
+		&model.AskUserPreference{},
 	)
 }
 

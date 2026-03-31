@@ -7,6 +7,12 @@ from dataclasses import dataclass
 import json
 from datetime import datetime
 import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.feedback_collector")
 
 
 class FeedbackType(Enum):
@@ -79,7 +85,7 @@ class FeedbackCollector:
                     database=os.getenv("PG_DATABASE", "dev_metric")
                 )
             except Exception as e:
-                print(f"[FeedbackCollector] 数据库连接失败: {e}")
+                logger.info(f"数据库连接失败: {e}")
                 return None
         return self._db
 
@@ -87,7 +93,7 @@ class FeedbackCollector:
         """写入数据库"""
         db = self._get_db_connection()
         if not db:
-            print("[FeedbackCollector] 无法连接数据库，反馈仅保留在内存")
+            logger.info(f"无法连接数据库，反馈仅保留在内存")
             return False
 
         try:
@@ -116,10 +122,10 @@ class FeedbackCollector:
             ))
             db.commit()
             cursor.close()
-            print(f"[FeedbackCollector] 已写入数据库: session={record.session_id}")
+            logger.info(f"[FeedbackCollector] 已写入数据库: session={record.session_id}")
             return True
         except Exception as e:
-            print(f"[FeedbackCollector] 写入数据库失败: {e}")
+            logger.error(f"[FeedbackCollector] 写入数据库失败: {e}")
             return False
 
     def record_user_feedback(
@@ -168,7 +174,7 @@ class FeedbackCollector:
         self._feedback_cache.append(record)
         self._persist_feedback(record)
 
-        print(f"[FeedbackCollector] 记录用户反馈: session={session_id}, feedback={feedback.name}")
+        logger.info(f"[FeedbackCollector] 记录用户反馈: session={session_id}, feedback={feedback.name}")
         return record
 
     def record_auto_feedback(
@@ -215,7 +221,7 @@ class FeedbackCollector:
         self._feedback_cache.append(record)
         self._persist_feedback(record)
 
-        print(f"[FeedbackCollector] 记录自动失败: session={session_id}, fail_reason={fail_reason}")
+        logger.info(f"[FeedbackCollector] 记录自动失败: session={session_id}, fail_reason={fail_reason}")
         return record
 
     def record_silent_user(
@@ -253,7 +259,7 @@ class FeedbackCollector:
         self._feedback_cache.append(record)
         self._persist_feedback(record)
 
-        print(f"[FeedbackCollector] 记录沉默用户: session={session_id}")
+        logger.info(f"[FeedbackCollector] 记录沉默用户: session={session_id}")
         return record
 
     def get_session_feedback_stats(self, session_id: str) -> Dict[str, Any]:

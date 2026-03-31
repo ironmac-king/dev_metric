@@ -276,3 +276,80 @@ type MetricEmbedding struct {
 func (MetricEmbedding) TableName() string {
 	return "metric_embeddings"
 }
+
+// AskShortcutQuestion 快捷问题配置表
+type AskShortcutQuestion struct {
+	ID           uint      `json:"id" gorm:"primaryKey"`
+	QuestionText string    `json:"question_text" gorm:"size:256"` // 问题文本
+	Icon         string    `json:"icon" gorm:"size:32"`          // 图标
+	SortOrder    int       `json:"sort_order" gorm:"default:0"`  // 排序
+	Status       int16     `json:"status" gorm:"default:1"`      // 0=禁用 1=启用
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (AskShortcutQuestion) TableName() string {
+	return "ask_shortcut_questions"
+}
+
+// AskFavorite 收藏表
+type AskFavorite struct {
+	ID           uint      `json:"id" gorm:"primaryKey"`
+	UserID      string    `json:"user_id" gorm:"size:64;default:'default'"` // 用户ID（预留）
+	SessionID   string    `json:"session_id" gorm:"size:64;index"`          // 关联会话ID
+	QuestionText string    `json:"question_text" gorm:"size:512"`           // 收藏的问题
+	AnswerText   string    `json:"answer_text" gorm:"type:text"`           // 收藏的回答
+	MetricCode   string    `json:"metric_code" gorm:"size:64"`             // 关联指标编号
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (AskFavorite) TableName() string {
+	return "ask_favorites"
+}
+
+// AskSessionSummary 会话摘要表
+type AskSessionSummary struct {
+	ID            uint      `json:"id" gorm:"primaryKey"`
+	SessionID     string    `json:"session_id" gorm:"size:64;uniqueIndex"` // 会话ID
+	Title         string    `json:"title" gorm:"size:128"`                // 会话标题
+	FirstQuestion string    `json:"first_question" gorm:"size:512"`        // 第一个问题
+	MessageCount  int       `json:"message_count" gorm:"default:0"`       // 消息数量
+	Starred       bool      `json:"starred" gorm:"default:false"`        // 是否加星标
+	UserID        string    `json:"user_id" gorm:"size:64;default:'default'"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+func (AskSessionSummary) TableName() string {
+	return "ask_session_summaries"
+}
+
+// AskQueryStat 查询统计表
+type AskQueryStat struct {
+	ID         uint      `json:"id" gorm:"primaryKey"`
+	QueryDate  time.Time `json:"query_date" gorm:"index"`                 // 查询日期
+	MetricCode string    `json:"metric_code" gorm:"size:64;index"`        // 被查询的指标编号
+	MetricName string    `json:"metric_name" gorm:"size:128"`             // 被查询的指标名称
+	QueryCount int       `json:"query_count" gorm:"default:1"`            // 查询次数
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func (AskQueryStat) TableName() string {
+	return "ask_query_stats"
+}
+
+// AskUserPreference 用户偏好表
+type AskUserPreference struct {
+	ID           uint      `json:"id" gorm:"primaryKey"`
+	UserID      string    `json:"user_id" gorm:"size:64;uniqueIndex;default:'default'"` // 用户ID
+	Theme        string    `json:"theme" gorm:"size:16;default:'light'"`                 // light/dark
+	MessageStyle string    `json:"message_style" gorm:"size:16;default:'bubbles'"`       // bubbles/cards
+	FontSize     string    `json:"font_size" gorm:"size:16;default:'medium'"`           // small/medium/large
+	ShowThinking bool      `json:"show_thinking" gorm:"default:true"`                    // 显示思考过程
+	CompactMode  bool      `json:"compact_mode" gorm:"default:false"`                   // 紧凑模式
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (AskUserPreference) TableName() string {
+	return "ask_user_preferences"
+}

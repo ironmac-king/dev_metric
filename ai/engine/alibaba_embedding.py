@@ -11,6 +11,9 @@ class AlibabaEmbedding:
     def __init__(self, api_key: str = None):
         if api_key:
             TextEmbedding.api_key = api_key
+        else:
+            import os
+            TextEmbedding.api_key = os.getenv("DASHSCOPE_API_KEY", "")
         self.model = 'text-embedding-v2'
 
     def embed(self, texts: List[str]) -> List[List[float]]:

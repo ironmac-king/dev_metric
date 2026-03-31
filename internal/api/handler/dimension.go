@@ -4,6 +4,7 @@ import (
 	"dev_metric/internal/model"
 	"dev_metric/internal/repository/postgres"
 	"dev_metric/pkg/response"
+	"log"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,7 @@ func CreateDimensionConfig(c *gin.Context) {
 	}
 
 	if err := postgres.Get().Create(&config).Error; err != nil {
+		log.Printf("CreateDimensionConfig error: %v", err)
 		response.Error(c, response.CodeInternalError, "创建失败")
 		return
 	}

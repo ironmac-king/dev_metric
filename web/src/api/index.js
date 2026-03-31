@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: '/api/v1',
-  timeout: 30000
+  timeout: 120000  // 2 minutes for AI generation
 })
 
 // 请求拦截器
@@ -79,7 +79,23 @@ export const askAPI = {
   getHistory: (sessionId) => api.get('/ask/history', { params: { session_id: sessionId } }),
   clearSession: (sessionId) => api.post('/ask/clear', { session_id: sessionId }),
   getSuggest: () => api.get('/ask/suggest'),
-  sendFeedback: (data) => api.post('/ask/feedback', data)
+  sendFeedback: (data) => api.post('/ask/feedback', data),
+  drillDown: (data) => api.post('/ask/drill_down', data),
+  // Dashboard 相关
+  getDashboardStats: () => api.get('/ask/dashboard/stats'),
+  getSessions: () => api.get('/ask/sessions'),
+  starSession: (id) => api.put(`/ask/sessions/${id}/star`),
+  getFavorites: () => api.get('/ask/favorites'),
+  addFavorite: (data) => api.post('/ask/favorites', data),
+  deleteFavorite: (id) => api.delete(`/ask/favorites/${id}`),
+  getPreferences: () => api.get('/ask/preferences'),
+  updatePreferences: (data) => api.put('/ask/preferences', data),
+  getRecentQuestions: () => api.get('/ask/recent-questions'),
+  // 快捷问题
+  getShortcuts: () => api.get('/ask/shortcuts'),
+  createShortcut: (data) => api.post('/ask/shortcuts', data),
+  updateShortcut: (id, data) => api.put(`/ask/shortcuts/${id}`, data),
+  deleteShortcut: (id) => api.delete(`/ask/shortcuts/${id}`)
 }
 
 // LLM 配置 API
@@ -106,6 +122,19 @@ export const authAPI = {
   login: (data) => api.post('/auth/login', data),
   refresh: (data) => api.post('/auth/refresh', data),
   logout: () => api.post('/auth/logout')
+}
+
+// Prompt 配置 API
+export const promptConfigAPI = {
+  list: () => api.get('/prompt-configs'),
+  get: (id) => api.get(`/prompt-configs/${id}`),
+  getActive: (name) => api.get('/prompt-configs/active', { params: { name } }),
+  getVersions: (id) => api.get(`/prompt-configs/${id}/versions`),
+  create: (data) => api.post('/prompt-configs', data),
+  update: (id, data) => api.put(`/prompt-configs/${id}`, data),
+  delete: (id) => api.delete(`/prompt-configs/${id}`),
+  rollback: (id, data) => api.post(`/prompt-configs/${id}/rollback`, data),
+  generate: (data) => api.post('/prompt-configs/generate', data)
 }
 
 export default api

@@ -43,11 +43,20 @@
 
         <div class="nav-section">
           <span class="nav-section-label">智能分析</span>
-          <router-link to="/ask" class="nav-item" :class="{ active: $route.path === '/ask' }">
+          <router-link to="/ai-assistant" class="nav-item" :class="{ active: $route.path === '/ai-assistant' }">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
               <circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M6.5 7.5C6.5 6.7 7.2 6 8 6H10C10.8 6 11.5 6.7 11.5 7.5C11.5 8.3 10.8 9 10 9H9.5V10C9.5 10.5 9.2 11 8.5 11C7.8 11 7.5 10.5 7.5 10V7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              <circle cx="9" cy="13" r="0.5" fill="currentColor"/>
+              <circle cx="9" cy="6" r="1.5" fill="currentColor"/>
+              <path d="M6.5 10.5C6.5 10.5 7.5 13 9 13C10.5 13 11.5 10.5 11.5 10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <span>AI 问数</span>
+          </router-link>
+          <router-link to="/ask" class="nav-item" :class="{ active: $route.path === '/ask' }">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M3 6C3 4.3 4.3 3 6 3H12C13.7 3 15 4.3 15 6V10C15 11.7 13.7 13 12 13H9L6 16V13H6C4.3 13 3 11.7 3 10V6Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="6" cy="7.5" r="0.75" fill="currentColor"/>
+              <circle cx="8" cy="7.5" r="0.75" fill="currentColor"/>
+              <circle cx="10" cy="7.5" r="0.75" fill="currentColor"/>
             </svg>
             <span>智能问数</span>
           </router-link>
@@ -87,6 +96,13 @@
               <rect x="10" y="10" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
             </svg>
             <span>维度配置</span>
+          </router-link>
+          <router-link to="/prompt-config" class="nav-item" :class="{ active: $route.path === '/prompt-config' }">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M3 3h12v12H3V3z" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M6 7h6M6 10h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <span>Prompt配置</span>
           </router-link>
         </div>
       </nav>

@@ -17,6 +17,8 @@ func AskQuestion(c *gin.Context) {
 	var req struct {
 		Question  string `json:"question" binding:"required"`
 		SessionID string `json:"session_id"`
+		Page      int    `json:"page"`
+		PageSize  int    `json:"page_size"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -24,12 +26,22 @@ func AskQuestion(c *gin.Context) {
 		return
 	}
 
+	// 设置默认值
+	if req.Page <= 0 {
+		req.Page = 1
+	}
+	if req.PageSize <= 0 {
+		req.PageSize = 10
+	}
+
 	// 调用 Python AI 服务
 	aiURL := fmt.Sprintf("http://localhost:8081/api/v1/ask")
 
-	payload := map[string]string{
+	payload := map[string]interface{}{
 		"question":   req.Question,
 		"session_id": req.SessionID,
+		"page":      req.Page,
+		"page_size": req.PageSize,
 	}
 	jsonData, _ := json.Marshal(payload)
 
@@ -49,11 +61,17 @@ func AskQuestion(c *gin.Context) {
 	json.Unmarshal(body, &aiResp)
 
 	response.Success(c, gin.H{
-		"session_id":     aiResp["session_id"],
-		"answer":        aiResp["answer"],
-		"suggest":       aiResp["suggest"],
-		"sql":           aiResp["sql"],
-		"thinking_steps": aiResp["thinking_steps"],
+		"session_id":      aiResp["session_id"],
+		"answer":         aiResp["answer"],
+		"suggest":        aiResp["suggest"],
+		"sql":            aiResp["sql"],
+		"thinking_steps":  aiResp["thinking_steps"],
+		"drill_down_dims": aiResp["drill_down_dims"],
+		"breadcrumbs":    aiResp["breadcrumbs"],
+		"result_data":    aiResp["result_data"],
+		"total":          aiResp["total"],
+		"page":           aiResp["page"],
+		"page_size":      aiResp["page_size"],
 	})
 }
 
@@ -94,10 +112,13 @@ func ClearSession(c *gin.Context) {
 		return
 	}
 
-	// 调用 Python AI 服务
-	payload := map[string]string{"session_id": req.SessionID}
-	jsonData, _ := json.Marshal(payload)
-	http.Post("http://localhost:8081/api/v1/ask/clear", "application/json", bytes.NewBuffer(jsonData))
+	// 调用 Python AI 服务（session_id 作为 query parameter）
+	resp, err := http.Get(fmt.Sprintf("http://localhost:8081/api/v1/ask/clear?session_id=%s", req.SessionID))
+	if err != nil {
+		response.Error(c, response.CodeInternalError, "AI 服务调用失败")
+		return
+	}
+	defer resp.Body.Close()
 
 	response.SuccessWithMessage(c, "会话已清除", nil)
 }
@@ -183,4 +204,66 @@ func ensureConfigLoaded() {
 	if config.Get() == nil {
 		config.Load("config.yaml")
 	}
+}
+
+// DrillDownQuestion 下钻维度查询
+func DrillDownQuestion(c *gin.Context) {
+	var req struct {
+		SessionID      string   `json:"session_id" binding:"required"`
+		DimensionNames []string `json:"dimension_names" binding:"required"`
+		MetricCode     string   `json:"metric_code" binding:"required"`
+		CurrentSQL     string   `json:"current_sql" binding:"required"`
+		CurrentGroupBy string   `json:"current_group_by"`
+		Page           int      `json:"page"`
+		PageSize       int      `json:"page_size"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	// 设置默认值
+	if req.Page <= 0 {
+		req.Page = 1
+	}
+	if req.PageSize <= 0 {
+		req.PageSize = 10
+	}
+
+	// 调用 Python AI 服务的下钻接口
+	aiURL := "http://localhost:8081/api/v1/ask/drill_down"
+	payload := map[string]interface{}{
+		"session_id":       req.SessionID,
+		"dimension_names":   req.DimensionNames,
+		"metric_code":      req.MetricCode,
+		"current_sql":      req.CurrentSQL,
+		"current_group_by":  req.CurrentGroupBy,
+		"page":            req.Page,
+		"page_size":       req.PageSize,
+	}
+	jsonData, _ := json.Marshal(payload)
+
+	resp, err := http.Post(aiURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		response.Error(c, response.CodeInternalError, "下钻服务调用失败: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var aiResp map[string]interface{}
+	json.Unmarshal(body, &aiResp)
+
+	response.Success(c, gin.H{
+		"session_id":     aiResp["session_id"],
+		"answer":        aiResp["answer"],
+		"sql":           aiResp["sql"],
+		"drill_down_dims": aiResp["drill_down_dims"],
+		"breadcrumbs":   aiResp["breadcrumbs"],
+		"result_data":   aiResp["result_data"],
+		"total":        aiResp["total"],
+		"page":         aiResp["page"],
+		"page_size":    aiResp["page_size"],
+	})
 }

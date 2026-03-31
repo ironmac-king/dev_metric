@@ -73,7 +73,6 @@ class IntentResult(BaseModel):
 
 class ConversationContext(BaseModel):
     """多轮对话上下文 - 用于继承上轮对话的关键信息"""
-    current_metric_id: Optional[int] = None
     current_metric_code: Optional[str] = None
     current_metric_name: Optional[str] = None
     current_time_expr: Optional[str] = None
@@ -83,7 +82,6 @@ class ConversationContext(BaseModel):
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "current_metric_id": self.current_metric_id,
             "current_metric_code": self.current_metric_code,
             "current_metric_name": self.current_metric_name,
             "current_time_expr": self.current_time_expr,

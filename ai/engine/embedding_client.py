@@ -4,6 +4,9 @@
 import os
 import httpx
 from typing import List, Optional
+from ai.config.logging_config import get_logger
+
+logger = get_logger("ai.embedding_client")
 
 
 class EmbeddingClient:
@@ -46,13 +49,13 @@ class EmbeddingClient:
             vectors = self._alibaba_client.embed(texts)
             return vectors
         except Exception as e:
-            print(f"[EmbeddingClient] 阿里 embedding 失败: {e}")
+            logger.info(f"阿里 embedding 失败: {e}")
             return [[] for _ in texts]
 
     def _embed_deepseek(self, texts: List[str]) -> List[List[float]]:
         """使用 DeepSeek embedding"""
         if not self.api_key:
-            print("[EmbeddingClient] 警告：DEEPSEEK_API_KEY 未设置")
+            logger.warning("[EmbeddingClient] DEEPSEEK_API_KEY 未设置")
             return [[] for _ in texts]
 
         headers = {
@@ -79,10 +82,10 @@ class EmbeddingClient:
             return [item.get("embedding", []) for item in data]
 
         except httpx.HTTPStatusError as e:
-            print(f"[EmbeddingClient] HTTP 错误: {e.response.status_code}")
+            logger.info(f"HTTP 错误: {e.response.status_code}")
             return [[] for _ in texts]
         except Exception as e:
-            print(f"[EmbeddingClient] 调用失败: {e}")
+            logger.info(f"调用失败: {e}")
             return [[] for _ in texts]
 
     def embed_single(self, text: str) -> Optional[List[float]]:

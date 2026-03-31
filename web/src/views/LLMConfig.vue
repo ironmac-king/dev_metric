@@ -1,10 +1,32 @@
 <template>
   <div class="llm-config-page">
+    <!-- Page Header -->
     <div class="page-header">
-      <h2>大模型配置</h2>
-      <el-button type="primary" @click="handleCreate">新增配置</el-button>
+      <div class="header-left">
+        <div class="page-icon">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+            <circle cx="5" cy="11" r="2.5" fill="currentColor"/>
+            <circle cx="11" cy="5" r="2.5" fill="currentColor" opacity="0.7"/>
+            <circle cx="11" cy="17" r="2.5" fill="currentColor" opacity="0.7"/>
+            <circle cx="17" cy="11" r="2.5" fill="currentColor" opacity="0.5"/>
+          </svg>
+        </div>
+        <div class="header-text">
+          <h1>LLM 配置</h1>
+          <p>管理大模型连接配置</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <el-button type="primary" class="btn-primary" @click="handleCreate">
+          <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+            <path d="M7.5 3V12M3 7.5H12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          新增配置
+        </el-button>
+      </div>
     </div>
 
+    <!-- Config Grid -->
     <div class="config-grid">
       <div
         v-for="config in configs"
@@ -13,61 +35,50 @@
         :class="{ 'is-default': config.is_default === 1 }"
       >
         <div class="card-header">
-          <span class="provider-icon">{{ getProviderIcon(config.provider) }}</span>
-          <div class="card-title">
-            <h4>{{ config.name }}</h4>
-            <el-tag size="small" :type="config.status === 1 ? 'success' : 'info'">
-              {{ config.status === 1 ? '启用' : '禁用' }}
-            </el-tag>
+          <div class="provider-info">
+            <span class="provider-icon">{{ getProviderIcon(config.provider) }}</span>
+            <div class="card-title">
+              <h4>{{ config.name }}</h4>
+              <span class="status-tag" :class="config.status === 1 ? 'active' : 'inactive'">
+                {{ config.status === 1 ? '启用' : '禁用' }}
+              </span>
+            </div>
           </div>
-          <el-tag v-if="config.is_default === 1" type="warning" size="small">
-            默认
-          </el-tag>
+          <span v-if="config.is_default === 1" class="default-badge">默认</span>
         </div>
 
         <div class="card-body">
           <div class="info-item">
-            <span class="label">Provider:</span>
-            <span class="value">{{ config.provider }}</span>
+            <span class="info-label">Provider</span>
+            <span class="info-value">{{ config.provider }}</span>
           </div>
           <div class="info-item">
-            <span class="label">模型:</span>
-            <span class="value">{{ config.model_name }}</span>
+            <span class="info-label">模型</span>
+            <span class="info-value mono">{{ config.model_name }}</span>
           </div>
-          <div class="info-item">
-            <span class="label">API地址:</span>
-            <span class="value url">{{ config.api_url }}</span>
+          <div class="info-item full">
+            <span class="info-label">API地址</span>
+            <span class="info-value url">{{ config.api_url }}</span>
           </div>
         </div>
 
         <div class="card-footer">
-          <el-button link type="primary" @click="handleEdit(config)">编辑</el-button>
-          <el-button link type="success" @click="handleTest(config)">测试</el-button>
-          <el-button
-            link
-            type="warning"
-            v-if="config.is_default !== 1"
-            @click="handleSetDefault(config)"
-          >
-            设为默认
-          </el-button>
-          <el-button link type="danger" @click="handleDelete(config)">删除</el-button>
+          <el-button link class="action-btn" @click="handleEdit(config)">编辑</el-button>
+          <el-button link class="action-btn test" @click="handleTest(config)">测试</el-button>
+          <el-button link class="action-btn" v-if="config.is_default !== 1" @click="handleSetDefault(config)">设为默认</el-button>
+          <el-button link class="action-btn delete" @click="handleDelete(config)">删除</el-button>
         </div>
       </div>
     </div>
 
-    <!-- 新增/编辑弹窗 -->
-    <el-dialog
-      v-model="dialogVisible"
-      :title="dialogTitle"
-      width="500px"
-    >
-      <el-form :model="form" label-width="100px">
+    <!-- Dialog -->
+    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="500px" class="config-dialog">
+      <el-form :model="form" label-width="90px" class="config-form">
         <el-form-item label="配置名称">
           <el-input v-model="form.name" placeholder="如：腾讯云 DeepSeek" />
         </el-form-item>
         <el-form-item label="Provider">
-          <el-select v-model="form.provider" placeholder="选择提供商">
+          <el-select v-model="form.provider" placeholder="选择提供商" style="width: 100%">
             <el-option label="腾讯云" value="tencent" />
             <el-option label="OpenAI" value="openai" />
             <el-option label="Anthropic" value="anthropic" />
@@ -87,8 +98,8 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleSave">保存</el-button>
+        <el-button size="large" @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" size="large" @click="handleSave" class="btn-primary">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -122,7 +133,6 @@ async function loadConfigs() {
       configs.value = res.data
     }
   } catch (e) {
-    // 示例数据
     configs.value = [
       {
         id: 1,
@@ -213,11 +223,14 @@ async function handleDelete(config) {
 
 <style scoped>
 .llm-config-page {
-  padding: 20px;
-  max-width: 1400px;
+  padding: 28px 32px;
+  max-width: 1440px;
   margin: 0 auto;
+  background: var(--bg-primary);
+  min-height: 100vh;
 }
 
+/* Header */
 .page-header {
   display: flex;
   justify-content: space-between;
@@ -225,54 +238,137 @@ async function handleDelete(config) {
   margin-bottom: 24px;
 }
 
-.page-header h2 {
-  font-size: 20px;
-  font-weight: 600;
-  color: #303133;
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
+.page-icon {
+  width: 44px;
+  height: 44px;
+  background: var(--primary-glow);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+}
+
+.header-text h1 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 4px 0;
+  letter-spacing: -0.3px;
+}
+
+.header-text p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.header-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--primary);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-lg);
+  font-weight: 600;
+  font-size: 14px;
+  padding: 12px 24px;
+  transition: all 0.25s ease;
+  box-shadow: var(--shadow-card);
+}
+
+.btn-primary:hover {
+  background: var(--primary-dark);
+  transform: translateY(-2px) scale(1.01);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* Config Grid */
 .config-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
 }
 
 .config-card {
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: 16px;
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
   padding: 20px;
-  transition: all 0.3s ease;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.2s ease;
+  border: 1px solid transparent;
 }
 
 .config-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-md);
 }
 
 .config-card.is-default {
-  border: 2px solid #409EFF;
+  border-color: var(--primary);
 }
 
 .card-header {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
   margin-bottom: 16px;
 }
 
-.provider-icon {
-  font-size: 32px;
+.provider-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.card-title {
-  flex: 1;
+.provider-icon {
+  font-size: 28px;
 }
 
 .card-title h4 {
-  font-size: 16px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 4px 0;
+}
+
+.status-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
   font-weight: 600;
-  color: #303133;
-  margin-bottom: 4px;
+}
+
+.status-tag.active {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.status-tag.inactive {
+  background: #f4f4f5;
+  color: var(--text-secondary);
+}
+
+.default-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  background: var(--primary-glow);
+  color: var(--primary);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .card-body {
@@ -281,30 +377,93 @@ async function handleDelete(config) {
 
 .info-item {
   display: flex;
-  margin-bottom: 8px;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.info-item.full {
+  margin-bottom: 0;
+}
+
+.info-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.info-value {
   font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
 }
 
-.info-item .label {
-  color: #909399;
-  width: 60px;
-  flex-shrink: 0;
+.info-value.mono {
+  font-family: 'SF Mono', Monaco, monospace;
 }
 
-.info-item .value {
-  color: #606266;
-  word-break: break-all;
-}
-
-.info-item .value.url {
+.info-value.url {
   font-size: 12px;
-  color: #909399;
+  color: var(--text-secondary);
+  word-break: break-all;
 }
 
 .card-footer {
   display: flex;
-  gap: 12px;
-  border-top: 1px solid #f0f0f0;
-  padding-top: 16px;
+  gap: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.action-btn {
+  padding: 6px 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: 4px;
+}
+
+.action-btn:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.action-btn.test:hover {
+  color: var(--primary);
+}
+
+.action-btn.delete:hover {
+  color: #ef4444;
+  background: #fef2f2;
+}
+
+/* Dialog */
+.config-dialog :deep(.el-dialog__header) {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-dialog :deep(.el-dialog__title) {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.config-form :deep(.el-form-item__label) {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.config-form :deep(.el-input__wrapper),
+.config-form :deep(.el-textarea__inner) {
+  border-radius: var(--radius-sm);
+  box-shadow: none !important;
+  border: 1px solid var(--border);
+}
+
+.config-form :deep(.el-input__wrapper:hover),
+.config-form :deep(.el-input__wrapper.is-focus) {
+  border-color: var(--primary);
 }
 </style>

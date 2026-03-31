@@ -5,6 +5,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,6 +21,11 @@ from ai.feedback.auto_detector import get_auto_fail_detector, FailReason
 from ai.feedback.collector import get_feedback_collector, FeedbackType
 from ai.feedback.analyzer import get_feedback_analyzer
 from ai.feedback.rule_optimizer import get_rule_optimizer
+from ai.config.logging_config import setup_logging, get_logger
+
+# 初始化日志
+setup_logging()
+logger = get_logger("ai")
 
 app = FastAPI(title="智能问数服务")
 
@@ -39,6 +47,8 @@ session_metadata = {}
 class AskRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
+    page: int = 1
+    page_size: int = 10
 
 
 class ThinkingStepResponse(BaseModel):
@@ -60,6 +70,83 @@ class AskResponse(BaseModel):
     clarification_message: Optional[str] = None
     clarification_type: Optional[str] = None
     matched_metrics: Optional[List[Dict[str, Any]]] = None
+    drill_down_dims: Optional[List[Dict[str, str]]] = None
+    breadcrumbs: Optional[List[Dict[str, str]]] = None
+    result_data: Optional[List[Dict[str, Any]]] = None  # SQL 查询结果
+    total: Optional[int] = None  # 总记录数
+    page: Optional[int] = None  # 当前页
+    page_size: Optional[int] = None  # 每页条数
+
+
+def _extract_result_data(sql_result) -> Optional[List[Dict[str, Any]]]:
+    """从 SQL 执行结果中提取数据列表"""
+    if sql_result is None:
+        return None
+    if isinstance(sql_result, list):
+        return sql_result
+    if isinstance(sql_result, dict):
+        # Go 返回格式: {"data": [...], "count": N}
+        data = sql_result.get("data", {})
+        if isinstance(data, list):
+            return data
+        # 嵌套格式: {"data": {"data": [...], "count": N}}
+        if isinstance(data, dict):
+            return data.get("data")
+    return None
+
+
+def _extract_result_total(sql_result) -> Optional[int]:
+    """从 SQL 执行结果中提取总数"""
+    if sql_result is None:
+        return None
+    if isinstance(sql_result, dict):
+        # Go 返回格式: {"data": [...], "count": N}
+        if "count" in sql_result:
+            return sql_result.get("count")
+        # 嵌套格式: {"data": {"data": [...], "count": N}}
+        data = sql_result.get("data", {})
+        if isinstance(data, dict):
+            return data.get("count")
+    return None
+
+
+def _get_drill_down_dims(state) -> List[Dict[str, str]]:
+    """获取可下钻的维度列表"""
+    try:
+        import re
+        from ai.client.metric_client import MetricClient
+
+        # 从 state.entities 获取 starrocks_sql
+        starrocks_sql = state.entities.get("starrocks_sql", "")
+        if not starrocks_sql:
+            return []
+
+        # 从 SQL 提取表名
+        match = re.search(r'FROM\s+([^\s;]+)', starrocks_sql, re.IGNORECASE)
+        if not match:
+            return []
+
+        table_name = match.group(1)
+
+        # 获取维度配置
+        metric_client = MetricClient()
+        dim_configs = metric_client.get_dimension_configs(table_name)
+
+        # 返回可用维度（排除时间维度）
+        result = []
+        time_dims = ["日", "月", "年", "day", "month", "year", "时间"]
+        for cfg in dim_configs:
+            if cfg.get("status") == 1 and cfg.get("dimension_name") not in time_dims:
+                result.append({
+                    "dimension_name": cfg["dimension_name"],
+                    "column_name": cfg["column_name"]
+                })
+
+        return result
+
+    except Exception as e:
+        logger.error(f"获取下钻维度失败: {e}")
+        return []
 
 
 @app.post("/api/v1/ask", response_model=AskResponse)
@@ -80,13 +167,25 @@ async def ask_question(req: AskRequest):
     state = sessions[session_id]
 
     # 清除上一轮的错误状态，开始新一轮查询
+    # 保存上轮追问类型，用于识别对追问的回复
+    prev_clarification_type = getattr(state, 'clarification_type', None)
+    prev_clarification_message = getattr(state, 'clarification_message', None)
     state.needs_clarification = False
     state.clarification_message = None
     state.clarification_type = None
     state.matched_metrics = None
     state.error = None
+    # 暂存上轮追问信息，供 intent_node 判断用户回复
+    state._prev_clarification_type = prev_clarification_type
+    state._prev_clarification_message = prev_clarification_message
     # 清除 dimension，避免残留上一轮的维度信息干扰当前查询
     state.entities.pop("dimension", None)
+    # 清除 Step 0 意图确认标记（如果存在）
+    if hasattr(state, '_intent_confirmed_from_context'):
+        try:
+            delattr(state, '_intent_confirmed_from_context')
+        except (ValueError, AttributeError):
+            pass
     # 清空思考步骤
     state.thinking_steps = []
 
@@ -108,7 +207,7 @@ async def ask_question(req: AskRequest):
         # 使用解包合并而不是update，这样可以处理字段清除的情况
         # 如果entity_node返回的entities中有值为None的字段，表示需要清除
         new_entities = entity_updates.get("entities", {})
-        for key in ["metric_name", "metric_code", "metric_id", "unit", "starrocks_sql"]:
+        for key in ["metric_name", "metric_code", "unit", "starrocks_sql"]:
             if key in new_entities and new_entities[key] is None:
                 # 字段被清除
                 state.entities.pop(key, None)
@@ -132,7 +231,23 @@ async def ask_question(req: AskRequest):
             state.matched_metrics = sql_updates.get("matched_metrics")
 
         # 执行查询
-        execute_updates = conversation_nodes.execute_node(state)
+        import re
+        # 添加分页 LIMIT（最大1000条）
+        page_size = min(req.page_size, 1000)
+        offset = (req.page - 1) * page_size
+        if state.generated_sql and state.generated_sql not in ["METADATA_QUERY", "NONE"]:
+            sql = state.generated_sql
+            # 移除所有 LIMIT 和 OFFSET
+            sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', sql, flags=re.IGNORECASE)
+            sql = re.sub(r'\s+OFFSET\s+\d+', '', sql, flags=re.IGNORECASE)
+            # 清理可能产生的连续空格和尾部空白
+            sql = re.sub(r'\s+', ' ', sql).strip()
+            # 追加 LIMIT 和 OFFSET 到 SQL 末尾
+            sql = f"{sql} LIMIT {page_size} OFFSET {offset}"
+            state.generated_sql = sql
+            logger.info(f"分页查询: page={req.page}, page_size={page_size}, offset={offset}")
+
+        execute_updates = await conversation_nodes.execute_node(state)
 
         # 生成回答
         response_updates = conversation_nodes.response_node(state)
@@ -193,7 +308,13 @@ async def ask_question(req: AskRequest):
             needs_clarification=state.needs_clarification if hasattr(state, 'needs_clarification') else None,
             clarification_message=state.clarification_message if hasattr(state, 'clarification_message') else None,
             clarification_type=state.clarification_type if hasattr(state, 'clarification_type') else None,
-            matched_metrics=state.matched_metrics if hasattr(state, 'matched_metrics') else None
+            matched_metrics=state.matched_metrics if hasattr(state, 'matched_metrics') else None,
+            drill_down_dims=_get_drill_down_dims(state),
+            breadcrumbs=[],
+            result_data=_extract_result_data(state.sql_result),
+            total=_extract_result_total(state.sql_result),
+            page=req.page,
+            page_size=page_size
         )
 
     except Exception as e:
@@ -304,6 +425,204 @@ async def submit_feedback(req: FeedbackRequest):
     )
 
 
+class DrillDownRequest(BaseModel):
+    """下钻请求"""
+    session_id: str
+    dimension_names: List[str]
+    metric_code: str
+    current_sql: str
+    current_group_by: Optional[str] = None
+    page: int = 1
+    page_size: int = 10
+
+
+@app.post("/api/v1/ask/drill_down")
+async def drill_down_question(req: DrillDownRequest):
+    """下钻维度查询"""
+    from ai.sql_gen.generator import SQLGenerator
+    from ai.client.metric_client import MetricClient
+    import re
+    import json
+
+    try:
+        # 1. 从 current_sql 提取 table_name
+        sql = req.current_sql
+        match = re.search(r'FROM\s+([^\s;]+)', sql, re.IGNORECASE)
+        if not match:
+            return {"session_id": req.session_id, "answer": "无法解析 SQL 中的表名", "sql": None}
+        table_name = match.group(1)
+
+        # 2. 获取维度配置
+        metric_client = MetricClient()
+        dim_configs = metric_client.get_dimension_configs(table_name)
+
+        # 3. 找到选中维度的 column_name
+        dim_map = {}
+        for cfg in dim_configs:
+            if cfg.get("status") == 1 and cfg.get("dimension_name") in req.dimension_names:
+                dim_map[cfg["dimension_name"]] = cfg["column_name"]
+
+        # 4. 改造 SQL
+        # 使用更可靠的方式：先找到 FROM 位置，然后找到 GROUP BY 位置（如果有）
+        # 这样可以正确处理 GROUP BY 后面有多个列的情况
+
+        # 找到 FROM 位置
+        from_match = re.search(r'\s+FROM\s+', sql, re.IGNORECASE)
+        if not from_match:
+            return {"session_id": req.session_id, "answer": "无法解析 SQL 中的 FROM", "sql": None}
+        from_pos = from_match.start()
+
+        # 找到 GROUP BY 位置（在 FROM 之后）
+        group_by_pos = -1
+        remaining_sql = sql[from_pos:]
+        group_by_match = re.search(r'\s+GROUP\s+BY\s+', remaining_sql, re.IGNORECASE)
+        if group_by_match:
+            group_by_pos = from_pos + group_by_match.start()
+
+        # 提取各部分
+        select_and_from = sql[:from_pos]  # SELECT ... FROM
+        after_from = sql[from_match.end():]  # 表名和之后的内容
+
+        if group_by_pos >= 0:
+            # 有 GROUP BY：提取表名+WHERE 和 GROUP BY 部分
+            table_and_where = sql[from_match.end():group_by_pos]
+            group_by_clause = sql[group_by_pos:]
+        else:
+            # 没有 GROUP BY
+            table_and_where = after_from
+            group_by_clause = ""
+
+        # 清理 table_and_where 中的 LIMIT/OFFSET（如果有的话）
+        table_and_where = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', table_and_where, flags=re.IGNORECASE).strip()
+        table_and_where = re.sub(r'\s+OFFSET\s+\d+', '', table_and_where, flags=re.IGNORECASE).strip()
+
+        # 构建新的维度列（去重）
+        new_dim_columns = []
+        for dim_name in req.dimension_names:
+            if dim_name in dim_map:
+                col = dim_map[dim_name]
+                if col not in new_dim_columns:
+                    new_dim_columns.append(col)
+
+        if not new_dim_columns:
+            return {"session_id": req.session_id, "answer": "未找到有效的维度列", "sql": None}
+
+        # 分析 SELECT 部分，提取列名
+        select_match = re.match(r'SELECT\s+(.+)', select_and_from, re.IGNORECASE)
+        if not select_match:
+            return {"session_id": req.session_id, "answer": "无法解析 SELECT", "sql": None}
+        select_content = select_match.group(1).strip()
+
+        # 判断是否有聚合函数
+        has_aggregate = any(kw in select_content.upper() for kw in ['SUM(', 'COUNT(', 'AVG(', 'MAX(', 'MIN('])
+
+        # 检查原 SELECT 中是否已包含这些维度列
+        existing_cols = [c.strip().split()[0] for c in select_content.split(',')]  # 去掉 AS 别名
+        cols_to_add = [col for col in new_dim_columns if col not in existing_cols]
+
+        # 构建新的 SELECT
+        if has_aggregate:
+            if cols_to_add:
+                new_select = f"SELECT {', '.join(cols_to_add)}, {select_content}"
+            else:
+                new_select = f"SELECT {select_content}"
+        else:
+            if cols_to_add:
+                new_select = f"SELECT {', '.join(cols_to_add)}, {select_content}"
+            else:
+                new_select = f"SELECT {select_content}"
+
+        # 构建新的 GROUP BY（使用所有维度列，不只是新增的）
+        agg_funcs = ['SUM(', 'COUNT(', 'AVG(', 'MAX(', 'MIN(']
+        group_by_cols = []
+        for col in select_content.split(','):
+            col_stripped = col.strip()
+            col_upper = col_stripped.upper()
+            if any(agg in col_upper for agg in agg_funcs):
+                continue
+            col_name = col_stripped.split()[0]  # 去掉 AS 别名
+            if col_name.upper() not in ['FROM', 'WHERE', 'GROUP', 'ORDER', 'LIMIT', '']:
+                if col_name not in group_by_cols:
+                    group_by_cols.append(col_name)
+        for col in cols_to_add:
+            if col not in group_by_cols:
+                group_by_cols.append(col)
+
+        # 组合新的 SQL
+        new_sql = f"{new_select} FROM {table_and_where}"
+        if group_by_cols:
+            new_sql = f"{new_sql} GROUP BY {', '.join(group_by_cols)}"
+
+        # 添加分页 LIMIT（最大1000条）
+        page_size = min(req.page_size, 1000)
+        offset = (req.page - 1) * page_size
+        new_sql = f"{new_sql} LIMIT {page_size} OFFSET {offset}"
+
+        # 5. 执行查询
+        sql_generator = SQLGenerator()
+        result = await sql_generator.execute(new_sql, {})
+
+        # 6. 生成回答 - 提取实际数据列表
+        data_list = []
+        if isinstance(result, dict):
+            data_list = result.get("data", {}).get("data", []) if isinstance(result.get("data"), dict) else []
+        elif isinstance(result, list):
+            data_list = result
+
+        if data_list and len(data_list) > 0:
+            # 构建答案文本
+            lines = []
+            for row in data_list[:10]:  # 最多显示10条
+                row_str = " | ".join([f"{k}: {v}" for k, v in row.items()])
+                lines.append(row_str)
+
+            answer = "按维度汇总结果：\n" + "\n".join(lines)
+            if len(data_list) > 10:
+                answer += f"\n... 还有 {len(data_list) - 10} 条数据"
+        else:
+            answer = "暂无数据"
+            data_list = []
+
+        # 7. 获取剩余可下钻维度（排除已选的）
+        remaining_dims = [
+            {"dimension_name": cfg["dimension_name"], "column_name": cfg["column_name"]}
+            for cfg in dim_configs
+            if cfg.get("status") == 1 and cfg["dimension_name"] not in req.dimension_names
+        ]
+
+        # 8. 构建面包屑
+        breadcrumbs = [
+            {"name": name, "value": col}
+            for name, col in zip(req.dimension_names, new_dim_columns)
+        ]
+
+        # 提取总数
+        total = _extract_result_total(result)
+
+        return {
+            "session_id": req.session_id,
+            "answer": answer,
+            "sql": new_sql,
+            "drill_down_dims": remaining_dims,
+            "breadcrumbs": breadcrumbs,
+            "result_data": data_list[:20] if data_list else None,
+            "total": total,
+            "page": req.page,
+            "page_size": page_size
+        }
+
+    except Exception as e:
+        logger.error(f"下钻处理失败: {e}")
+        return {
+            "session_id": req.session_id,
+            "answer": f"下钻处理出错: {str(e)}",
+            "sql": None,
+            "drill_down_dims": [],
+            "breadcrumbs": [],
+            "result_data": None
+        }
+
+
 # ============ 优化建议管理 API ============
 
 class SuggestionResponse(BaseModel):
@@ -396,6 +715,31 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post("/api/v1/prompt/generate")
+async def generate_prompt(request: Request):
+    """AI 生成或优化 Prompt"""
+    from ai.engine.llm import get_llm_engine
+
+    body = await request.json()
+    current_prompt = body.get("current_prompt", "")
+    task_name = body.get("task_name", "自然语言转结构化实体")
+    task_description = body.get("task_description", "意图识别、实体提取、时间解析")
+    mode = body.get("mode", "improve")  # "improve" or "regenerate"
+
+    llm_engine = get_llm_engine()
+    result = llm_engine.generate_prompt_improvement(
+        current_prompt=current_prompt,
+        task_name=task_name,
+        task_description=task_description,
+        mode=mode
+    )
+
+    if result:
+        return {"code": 0, "data": {"prompt": result}}
+    else:
+        return {"code": 500, "message": "Prompt 生成失败"}, 500
+
+
 @app.post("/internal/generate-embeddings")
 async def generate_embeddings(request: Request):
     """内部接口：接收文本列表，返回阿里 embedding 向量"""
@@ -419,9 +763,9 @@ async def generate_embeddings(request: Request):
 def load_semantic_vectors():
     """启动时加载语义向量"""
     from ai.engine.semantic_search import semantic_search
-    print("[启动] 正在加载语义向量...")
+    logger.info("正在加载语义向量")
     semantic_search.ensure_loaded()
-    print("[启动] 语义向量加载完成")
+    logger.info("语义向量加载完成")
 
 
 if __name__ == "__main__":
@@ -431,5 +775,5 @@ if __name__ == "__main__":
     start_daily_scheduler()
     # 加载语义向量
     load_semantic_vectors()
-    print("[启动] AI 服务已启动，调度器运行中...")
+    logger.info("AI 服务已启动，调度器运行中")
     uvicorn.run(app, host="0.0.0.0", port=8081)
