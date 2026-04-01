@@ -3,11 +3,14 @@ package handler
 import (
 	"bytes"
 	"dev_metric/config"
+	"dev_metric/internal/model"
+	"dev_metric/internal/repository/postgres"
 	"dev_metric/pkg/response"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -59,6 +62,20 @@ func AskQuestion(c *gin.Context) {
 	body, _ := io.ReadAll(resp.Body)
 	var aiResp map[string]interface{}
 	json.Unmarshal(body, &aiResp)
+
+	// 从 Python 响应获取 session_id，同步到 Go 数据库
+	if sessionID, ok := aiResp["session_id"].(string); ok && sessionID != "" {
+		now := time.Now()
+		summary := model.AskSessionSummary{
+			SessionID:     sessionID,
+			Title:        aiResp["answer"].(string),
+			FirstQuestion: req.Question,
+			MessageCount: 1,
+			UpdatedAt:    now,
+		}
+		// Upsert: 存在则更新，不存在则创建
+		postgres.Get().Where("session_id = ?", sessionID).Assign(summary).FirstOrCreate(&model.AskSessionSummary{})
+	}
 
 	response.Success(c, gin.H{
 		"session_id":             aiResp["session_id"],
