@@ -3,6 +3,8 @@ package model
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // Metric 指标定义表（完整对齐 Excel 的 24 个字段）
@@ -116,11 +118,12 @@ func (Dimension) TableName() string {
 
 // BusinessTerm 业务术语映射表
 type BusinessTerm struct {
-	ID        uint      `json:"id" gorm:"primaryKey"`
-	Term      string    `json:"term" gorm:"size:128;uniqueIndex"`
-	MetricIDs []int     `json:"metric_ids" gorm:"type:integer[]"`
-	Description string   `json:"description" gorm:"type:text"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	Term      string         `json:"term" gorm:"size:128;uniqueIndex"`
+	MetricIDs pq.Int64Array  `json:"metric_ids" gorm:"type:integer[]"`
+	Synonyms  pq.StringArray `json:"synonyms" gorm:"type:text[]"`  // 同义词列表，如 ["PV", "访问量"]
+	Description string       `json:"description" gorm:"type:text"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 func (BusinessTerm) TableName() string {

@@ -53,6 +53,7 @@ class RuleEngine:
                                 "term": term,
                                 "description": t.get("description", ""),
                                 "metric_ids": t.get("metric_ids", []),
+                                "synonyms": t.get("synonyms", []),  # 加载同义词
                             }
                     logger.info(f"[RuleEngine] 加载了 {len(self.business_terms)} 个业务术语")
         except Exception as e:
@@ -316,6 +317,39 @@ class RuleEngine:
 
         return result
 
+    def _match_by_synonyms(self, text: str) -> Optional[str]:
+        """通过同义词匹配找到标准术语
+
+        匹配策略：分词整词匹配为主 + 短词子串兜底
+        - 缩写类（DAU、UV）用子串匹配，避免分词破坏
+        - 完整词类用分词后整词匹配，避免误匹配
+        """
+        import jieba
+
+        tokens = jieba.lcut(text)  # 分词
+        text_lower = text.lower()
+
+        for term, info in self.business_terms.items():
+            synonyms = info.get("synonyms", [])
+            if not synonyms:
+                continue
+            for syn in synonyms:
+                if not syn:
+                    continue
+                syn_lower = syn.lower()
+                # 短词（<=3字符）用子串匹配，兼容缩写类
+                if len(syn) <= 3:
+                    if syn_lower in text_lower:
+                        logger.debug(f"同义词匹配成功: '{syn}' -> 标准术语 '{info.get('term')}'")
+                        return info.get("term")
+                else:
+                    # 长词用分词后整词匹配
+                    token_lowers = [t.lower() for t in tokens]
+                    if syn_lower in token_lowers:
+                        logger.debug(f"同义词匹配成功: '{syn}' -> 标准术语 '{info.get('term')}'")
+                        return info.get("term")
+        return None
+
     def link_business_terms_enhanced(self, text: str, current_entities: dict = None) -> Dict[str, Any]:
         """增强的实体链接 - 支持模糊匹配、维度提取和上下文继承"""
         result = {}
@@ -390,6 +424,18 @@ class RuleEngine:
                 result.update(extracted_dimensions)
             except Exception as e:
                 logger.info(f"[RuleEngine] ML实体抽取失败: {e}")
+
+        # ========== Step 5: 同义词匹配（规则+ML失败后兜底）==========
+        if not result:
+            matched_term = self._match_by_synonyms(text)
+            if matched_term:
+                # 用匹配到的标准术语再次匹配指标
+                for term, metric_info in self.metric_templates.items():
+                    if term.lower() == matched_term.lower():
+                        result.update(metric_info)
+                        logger.debug(f"同义词标准术语匹配成功: '{matched_term}' -> {metric_info.get('metric_name')}")
+                        result.update(extracted_dimensions)
+                        break
 
         # 继承上下文的指标信息 - 仅当查询是 follow-up 类型时才继承
         # 关键：如果完全没有匹配到任何指标（result为空），不继承上轮指标

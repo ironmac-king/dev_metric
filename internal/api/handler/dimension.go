@@ -82,3 +82,13 @@ func DeleteDimensionConfig(c *gin.Context) {
 	}
 	response.SuccessWithMessage(c, "删除成功", nil)
 }
+
+// DeleteDimensionTable 删除表及其所有维度配置
+func DeleteDimensionTable(c *gin.Context) {
+	tableName := c.Param("table_name")
+	if err := postgres.Get().Where("table_name = ?", tableName).Delete(&model.DimensionConfig{}).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "删除失败")
+		return
+	}
+	response.SuccessWithMessage(c, "删除成功", nil)
+}

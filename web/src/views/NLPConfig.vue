@@ -165,6 +165,7 @@
                 <thead>
                   <tr>
                     <th>术语</th>
+                    <th>同义词</th>
                     <th>描述</th>
                     <th>操作</th>
                   </tr>
@@ -172,7 +173,13 @@
                 <tbody>
                   <tr v-for="term in businessTerms" :key="term.id">
                     <td class="name-cell">{{ term.term }}</td>
-                    <td class="desc-cell">{{ term.description }}</td>
+                    <td>
+                      <div class="synonym-tags">
+                        <el-tag v-for="syn in (term.synonyms || [])" :key="syn" size="small" type="info" style="margin: 2px">{{ syn }}</el-tag>
+                        <span v-if="!term.synonyms || term.synonyms.length === 0" class="no-synonym">暂无</span>
+                      </div>
+                    </td>
+                    <td class="desc-cell">{{ term.description || '-' }}</td>
                     <td>
                       <div class="action-group">
                         <el-button link class="action-btn" @click="showTermDialog('edit', term)">编辑</el-button>
@@ -325,13 +332,31 @@
     </el-dialog>
 
     <!-- Term Dialog -->
-    <el-dialog v-model="termDialogVisible" :title="termDialogTitle" width="450px" class="config-dialog">
+    <el-dialog v-model="termDialogVisible" :title="termDialogTitle" width="500px" class="config-dialog">
       <el-form :model="termForm" label-width="80px" class="config-form">
         <el-form-item label="术语">
           <el-input v-model="termForm.term" placeholder="如：访客数" />
         </el-form-item>
+        <el-form-item label="同义词">
+          <el-select
+            v-model="termForm.synonyms"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            placeholder="输入后按回车添加"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="syn in termForm.synonyms"
+              :key="syn"
+              :label="syn"
+              :value="syn"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="termForm.description" type="textarea" :rows="3" />
+          <el-input v-model="termForm.description" type="textarea" :rows="2" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -386,6 +411,7 @@ const termDialogVisible = ref(false)
 const termDialogTitle = ref('添加术语映射')
 const termForm = ref({
   term: '',
+  synonyms: [],
   description: ''
 })
 const editingTermId = ref(null)
@@ -538,11 +564,11 @@ async function deleteSQL(id) {
 function showTermDialog(mode, term = null) {
   if (mode === 'create') {
     termDialogTitle.value = '添加术语映射'
-    termForm.value = { term: '', description: '' }
+    termForm.value = { term: '', synonyms: [], description: '' }
     editingTermId.value = null
   } else {
     termDialogTitle.value = '编辑术语映射'
-    termForm.value = { term: term.term, description: term.description }
+    termForm.value = { term: term.term, synonyms: term.synonyms || [], description: term.description }
     editingTermId.value = term.id
   }
   termDialogVisible.value = true
@@ -904,6 +930,19 @@ watch(activeTab, (tab) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.synonym-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 280px;
+}
+
+.no-synonym {
+  font-size: 12px;
+  color: var(--text-secondary);
+  opacity: 0.6;
 }
 
 .action-group {

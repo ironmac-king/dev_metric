@@ -189,6 +189,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			dimension.POST("", handler.CreateDimensionConfig)
 			dimension.PUT("/:id", handler.UpdateDimensionConfig)
 			dimension.DELETE("/:id", handler.DeleteDimensionConfig)
+			dimension.DELETE("/tables/:table_name", handler.DeleteDimensionTable)
 		}
 
 		// Prompt配置

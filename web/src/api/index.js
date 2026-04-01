@@ -54,7 +54,8 @@ export const dimensionConfigAPI = {
   getTables: () => api.get('/dimension-configs/tables'),
   create: (data) => api.post('/dimension-configs', data),
   update: (id, data) => api.put(`/dimension-configs/${id}`, data),
-  delete: (id) => api.delete(`/dimension-configs/${id}`)
+  delete: (id) => api.delete(`/dimension-configs/${id}`),
+  deleteTable: (tableName) => api.delete(`/dimension-configs/tables/${tableName}`)
 }
 
 // 告警 API
