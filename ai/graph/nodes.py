@@ -147,6 +147,20 @@ class ConversationNodes:
                     intent_result.entities["time_info"] = time_info
                     logger.debug(f"[intent_node] 补充 time_info: {time_info}")
 
+            # 检查用户输入是否真的包含时间词（防止 LLM 错误推断）
+            has_explicit_time = bool(re.search(
+                r'昨天|今日|明日|昨日|本周|本月|上周|上月|去年|今年|明年|上个月|'
+                r'近几|最近|过去|前几|天前|月前|周前|年前|'
+                r'\d+月|\d+天|\d+周',
+                last_message
+            ))
+            if intent_result.entities.get("time_range") and not has_explicit_time:
+                # 用户没说时间，LLM 不应该推断，清除并触发追问
+                logger.debug(f"[intent_node] 用户未明确时间，清除 LLM 推断的 time_range")
+                intent_result.entities.pop("time_range", None)
+                intent_result.entities.pop("time_info", None)
+                intent_result.entities.pop("time_key", None)
+
             # 补充 top_n 排名信息（检测"前三"、"前十"、"前13"等模式）
             if not intent_result.entities.get("top_n"):
                 top_n = self._extract_top_n(last_message)
