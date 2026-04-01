@@ -59,6 +59,7 @@ func autoMigrate() error {
 		&model.AskSessionSummary{},
 		&model.AskQueryStat{},
 		&model.AskUserPreference{},
+		&model.AskMessage{},
 	)
 }
 

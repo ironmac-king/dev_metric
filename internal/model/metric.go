@@ -324,6 +324,20 @@ func (AskSessionSummary) TableName() string {
 	return "ask_session_summaries"
 }
 
+// AskMessage 会话消息表
+type AskMessage struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	SessionID string    `json:"session_id" gorm:"size:64;index"`
+	Role      string    `json:"role" gorm:"size:16"`    // user / assistant
+	Content   string    `json:"content" gorm:"type:text"`
+	SQL       string    `json:"sql" gorm:"type:text"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (AskMessage) TableName() string {
+	return "ask_messages"
+}
+
 // AskQueryStat 查询统计表
 type AskQueryStat struct {
 	ID         uint      `json:"id" gorm:"primaryKey"`

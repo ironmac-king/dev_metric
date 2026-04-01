@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
+import httpx
 
 from ai.graph.state import ConversationState, ConversationMessage
 from ai.graph.nodes import conversation_nodes
@@ -26,6 +27,23 @@ from ai.config.logging_config import setup_logging, get_logger
 # 初始化日志
 setup_logging()
 logger = get_logger("ai")
+
+# Go 后端地址
+GO_API_BASE = "http://localhost:8080"
+
+def save_message_to_go(session_id: str, role: str, content: str, sql: str = None):
+    """保存消息到 Go 后端（Redis + PostgreSQL）"""
+    try:
+        payload = {
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "sql": sql or ""
+        }
+        with httpx.Client(timeout=5) as client:
+            client.post(f"{GO_API_BASE}/api/v1/ask/messages", json=payload)
+    except Exception as e:
+        logger.warning(f"保存消息到 Go 失败: {e}")
 
 app = FastAPI(title="智能问数服务")
 
@@ -195,6 +213,9 @@ async def ask_question(req: AskRequest):
         content=req.question
     ))
 
+    # 保存用户消息到 Go 后端
+    save_message_to_go(session_id, "user", req.question)
+
     # 执行对话流程
     try:
         # 意图识别
@@ -278,11 +299,15 @@ async def ask_question(req: AskRequest):
         current_sql = state.generated_sql if state.generated_sql and state.generated_sql != "METADATA_QUERY" else None
 
         # 添加助手消息
+        assistant_content = response_updates.get("answer", "抱歉，我无法回答这个问题。")
         state.messages.append(ConversationMessage(
             role="assistant",
-            content=response_updates.get("answer", "抱歉，我无法回答这个问题。"),
+            content=assistant_content,
             sql=current_sql
         ))
+
+        # 保存助手消息到 Go 后端
+        save_message_to_go(session_id, "assistant", assistant_content, current_sql)
 
         # 更新会话元数据
         if session_id in session_metadata:

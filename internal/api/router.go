@@ -89,6 +89,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.GET("/suggest", handler.GetAskSuggest)
 			ask.POST("/feedback", handler.SubmitFeedback)
 			ask.POST("/drill_down", handler.DrillDownQuestion)
+			ask.POST("/messages", handler.SaveMessage)
+			ask.GET("/messages", handler.GetMessages)
+			ask.DELETE("/messages", handler.DeleteMessages)
 
 			// Dashboard 相关
 			ask.GET("/dashboard/stats", handler.GetDashboardStats)

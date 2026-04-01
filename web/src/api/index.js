@@ -81,6 +81,9 @@ export const askAPI = {
   getSuggest: () => api.get('/ask/suggest'),
   sendFeedback: (data) => api.post('/ask/feedback', data),
   drillDown: (data) => api.post('/ask/drill_down', data),
+  // 消息持久化
+  getMessages: (sessionId) => api.get('/ask/messages', { params: { session_id: sessionId } }),
+  deleteMessages: (sessionId) => api.delete('/ask/messages', { params: { session_id: sessionId } }),
   // Dashboard 相关
   getDashboardStats: () => api.get('/ask/dashboard/stats'),
   getSessions: () => api.get('/ask/sessions'),

@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"dev_metric/config"
+	"dev_metric/internal/cache"
 	"dev_metric/internal/model"
 	"dev_metric/internal/repository/postgres"
 	"dev_metric/pkg/response"
@@ -294,4 +296,95 @@ func DrillDownQuestion(c *gin.Context) {
 		"clarification_type":     aiResp["clarification_type"],
 		"matched_metrics":       aiResp["matched_metrics"],
 	})
+}
+
+// SaveMessage 保存会话消息（Redis 缓存 + 异步落库 PostgreSQL）
+func SaveMessage(c *gin.Context) {
+	var req struct {
+		SessionID string `json:"session_id" binding:"required"`
+		Role     string `json:"role" binding:"required"` // user / assistant
+		Content  string `json:"content" binding:"required"`
+		SQL      string `json:"sql"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+
+	// 构造消息
+	msg := model.AskMessage{
+		SessionID: req.SessionID,
+		Role:     req.Role,
+		Content:  req.Content,
+		SQL:      req.SQL,
+	}
+
+	// 同步写 Redis（7天过期）
+ctx := context.Background()
+	cacheKey := fmt.Sprintf("ask:messages:%s", req.SessionID)
+	var existing []model.AskMessage
+	if err := cache.GetJSON(ctx, cacheKey, &existing); err != nil {
+		existing = []model.AskMessage{}
+	}
+	existing = append(existing, msg)
+	cache.SetJSON(ctx, cacheKey, existing, 7*24*time.Hour)
+
+	// 异步写 PostgreSQL
+	go func() {
+		postgres.Get().Create(&msg)
+	}()
+
+	response.Success(c, gin.H{"saved": true})
+}
+
+// GetMessages 获取会话消息（优先 Redis，没有则读 PostgreSQL）
+func GetMessages(c *gin.Context) {
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		response.Error(c, response.CodeBadRequest, "session_id 不能为空")
+		return
+	}
+
+	// 优先从 Redis 读
+	ctx := context.Background()
+	cacheKey := fmt.Sprintf("ask:messages:%s", sessionID)
+	var messages []model.AskMessage
+	if err := cache.GetJSON(ctx, cacheKey, &messages); err == nil && len(messages) > 0 {
+		response.Success(c, gin.H{"messages": messages, "source": "redis"})
+		return
+	}
+
+	// Redis 没有，从 PostgreSQL 读
+	postgres.Get().Where("session_id = ?", sessionID).Order("created_at ASC").Find(&messages)
+
+	// 回填 Redis
+	if len(messages) > 0 {
+		go func() {
+			cache.SetJSON(ctx, cacheKey, messages, 7*24*time.Hour)
+		}()
+	}
+
+	response.Success(c, gin.H{"messages": messages, "source": "db"})
+}
+
+// DeleteMessages 删除会话消息（Redis + PostgreSQL）
+func DeleteMessages(c *gin.Context) {
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		response.Error(c, response.CodeBadRequest, "session_id 不能为空")
+		return
+	}
+
+	// 删除 Redis
+	ctx := context.Background()
+	cacheKey := fmt.Sprintf("ask:messages:%s", sessionID)
+	cache.Delete(ctx, cacheKey)
+
+	// 删除 PostgreSQL
+	go func() {
+		postgres.Get().Delete(&model.AskMessage{}, "session_id = ?", sessionID)
+	}()
+
+	response.SuccessWithMessage(c, "删除成功", nil)
 }

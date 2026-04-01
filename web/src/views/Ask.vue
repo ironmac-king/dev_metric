@@ -604,7 +604,7 @@ async function toggleStarSession(session) {
 
 async function loadSession(id) {
   try {
-    const res = await askAPI.getHistory(id)
+    const res = await askAPI.getMessages(id)
     if (res.data?.messages && res.data.messages.length > 0) {
       sessionId.value = id
       localStorage.setItem('ask_session_id', id)
@@ -618,13 +618,14 @@ async function loadSession(id) {
       }))
       await scrollToBottom()
     } else {
-      // 会话已过期（Python 重启后消息丢失）
-      ElMessage.warning('该会话已过期，请开始新会话')
-      // 删除失效的会话记录
-      await askAPI.clearSession(id)
-      sessionHistory.value = sessionHistory.value.filter(s => (s.id || s.session_id) !== id)
+      // 会话消息为空（可能是新会话或过期）
+      sessionId.value = id
+      localStorage.setItem('ask_session_id', id)
+      messages.value = []
     }
-  } catch (e) {}
+  } catch (e) {
+    ElMessage.error('加载会话失败')
+  }
 }
 
 async function createNewSession() {
@@ -1012,14 +1013,19 @@ async function handleClearContext() {
       cancelButtonText: '取消',
       type: 'warning'
     })
-    await askAPI.clearSession(sessionId.value)
+    const sid = sessionId.value
+    await askAPI.clearSession(sid)
+    // 删除 Go 后端的消息（Redis + PostgreSQL）
+    if (sid) {
+      askAPI.deleteMessages(sid)
+    }
     messages.value = []
     currentMetricCode.value = ''
     currentSQL.value = ''
     currentGroupBy.value = ''
     selectedDims.value = {}
     // 从侧边栏历史中移除当前会话
-    sessionHistory.value = sessionHistory.value.filter(s => (s.id || s.session_id) !== sessionId.value)
+    sessionHistory.value = sessionHistory.value.filter(s => (s.id || s.session_id) !== sid)
     // 重置会话ID，创建新会话
     sessionId.value = ''
     localStorage.removeItem('ask_session_id')
