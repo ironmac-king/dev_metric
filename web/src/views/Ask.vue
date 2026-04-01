@@ -1012,6 +1012,11 @@ async function handleClearContext() {
     currentSQL.value = ''
     currentGroupBy.value = ''
     selectedDims.value = {}
+    // 从侧边栏历史中移除当前会话
+    sessionHistory.value = sessionHistory.value.filter(s => (s.id || s.session_id) !== sessionId.value)
+    // 重置会话ID，创建新会话
+    sessionId.value = ''
+    localStorage.removeItem('ask_session_id')
     ElMessage.success('上下文已清空')
   } catch (e) {}
 }

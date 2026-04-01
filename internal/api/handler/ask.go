@@ -124,6 +124,9 @@ func ClearSession(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
+	// 同时删除 Go 后端的会话摘要记录
+	postgres.Get().Delete(&model.AskSessionSummary{}, "session_id = ?", req.SessionID)
+
 	response.SuccessWithMessage(c, "会话已清除", nil)
 }
 
