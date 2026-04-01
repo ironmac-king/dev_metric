@@ -225,7 +225,7 @@
                 </div>
               </div>
 
-              <div class="message-content" v-if="!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0" v-html="formatMessage(msg.content)"></div>
+              <div class="message-content" v-if="(!msg.result_data || msg.result_data.length === 0) && (!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0)" v-html="formatMessage(msg.content)"></div>
 
               <!-- 指标候选选择 -->
               <div v-if="msg.needs_clarification && msg.matched_metrics && msg.matched_metrics.length > 0" class="metric-candidates">
