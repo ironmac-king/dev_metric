@@ -225,7 +225,24 @@
                 </div>
               </div>
 
-              <div class="message-content" v-html="formatMessage(msg.content)"></div>
+              <div class="message-content" v-if="!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0" v-html="formatMessage(msg.content)"></div>
+
+              <!-- 指标候选选择 -->
+              <div v-if="msg.needs_clarification && msg.matched_metrics && msg.matched_metrics.length > 0" class="metric-candidates">
+                <div class="candidates-header">请选择要查询的指标：</div>
+                <div class="candidates-list">
+                  <div
+                    v-for="(metric, idx) in msg.matched_metrics"
+                    :key="idx"
+                    class="candidate-item"
+                    :class="{ selected: selectedCandidateIdx === idx }"
+                    @click="selectMetricCandidate(idx, metric)"
+                  >
+                    <span class="candidate-name">{{ metric.name || metric.metric_name }}</span>
+                    <span class="candidate-code">{{ metric.metric_code }}</span>
+                  </div>
+                </div>
+              </div>
 
               <!-- 查询结果表格 -->
               <div v-if="msg.result_data && msg.result_data.length > 0" class="result-table">
@@ -432,6 +449,7 @@ const sessionHistory = ref([])
 const sidebarCollapsed = ref(false)
 const messagesContainer = ref(null)
 const showPreferencesPanel = ref(false) // 偏好设置面板
+const selectedCandidateIdx = ref(null) // 当前选中的候选指标索引
 
 // 下钻相关
 const selectedDims = ref({})  // { messageIndex: ['维度1', '维度2'] }
@@ -683,7 +701,11 @@ async function handleSend() {
         breadcrumbs: res.data.breadcrumbs || [],
         created_at: new Date().toISOString(),
         thinking_expanded: false,
-        thinking_steps: res.data.thinking_steps || []
+        thinking_steps: res.data.thinking_steps || [],
+        needs_clarification: res.data.needs_clarification || false,
+        clarification_message: res.data.clarification_message || null,
+        clarification_type: res.data.clarification_type || null,
+        matched_metrics: res.data.matched_metrics || []
       })
     }
   } catch (e) {
@@ -717,6 +739,15 @@ function extractMetricCode(data) {
 
 function handleSuggest(text) {
   inputText.value = text
+  handleSend()
+}
+
+// 选择指标候选
+function selectMetricCandidate(idx, metric) {
+  selectedCandidateIdx.value = idx
+  // 用「指标名（编号）」作为新问题发送
+  const question = `${metric.name || metric.metric_name}（${metric.metric_code}）`
+  inputText.value = question
   handleSend()
 }
 
@@ -1885,6 +1916,54 @@ async function handleClearContext() {
   justify-content: center;
   padding: 8px;
   border-top: 1px solid var(--border);
+}
+
+/* 指标候选选择 */
+.metric-candidates {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.candidates-header {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.candidates-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.candidate-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.candidate-item:hover {
+  border-color: var(--color-primary);
+  background: var(--bg-primary);
+}
+.candidate-item.selected {
+  border-color: var(--color-primary);
+  background: var(--bg-primary-light);
+}
+.candidate-name {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.candidate-code {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: monospace;
 }
 
 /* 下钻维度 */

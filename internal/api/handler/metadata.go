@@ -56,9 +56,25 @@ func GetMetricMetadata(c *gin.Context) {
 		Where("metric_dimensions.metric_id = ?", id).
 		Find(&dimensions)
 
+	// 返回扁平结构，与 GetAllMetrics 保持一致
 	response.Success(c, gin.H{
-		"metric":     metric,
-		"dimensions": dimensions,
+		"id":                  metric.ID,
+		"metric_code":         metric.MetricCode,
+		"name":                metric.Name,
+		"name_en":             metric.NameEn,
+		"domain":              metric.Domain,
+		"category_1":          metric.Category1,
+		"category_2":          metric.Category2,
+		"category_3":          metric.Category3,
+		"metric_type":         metric.MetricType,
+		"business_definition":   metric.BusinessDefinition,
+		"business_rule":        metric.BusinessRule,
+		"unit":                metric.Unit,
+		"common_dimensions":    metric.CommonDimensions,
+		"frequency":           metric.Frequency,
+		"technical_rule":      metric.TechnicalRule,
+		"starrocks_sql":       metric.StarRocksSQL,
+		"dimensions":          dimensions,
 	})
 }
 

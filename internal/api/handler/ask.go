@@ -61,17 +61,21 @@ func AskQuestion(c *gin.Context) {
 	json.Unmarshal(body, &aiResp)
 
 	response.Success(c, gin.H{
-		"session_id":      aiResp["session_id"],
-		"answer":         aiResp["answer"],
-		"suggest":        aiResp["suggest"],
-		"sql":            aiResp["sql"],
-		"thinking_steps":  aiResp["thinking_steps"],
-		"drill_down_dims": aiResp["drill_down_dims"],
-		"breadcrumbs":    aiResp["breadcrumbs"],
-		"result_data":    aiResp["result_data"],
-		"total":          aiResp["total"],
-		"page":           aiResp["page"],
-		"page_size":      aiResp["page_size"],
+		"session_id":             aiResp["session_id"],
+		"answer":                aiResp["answer"],
+		"suggest":               aiResp["suggest"],
+		"sql":                   aiResp["sql"],
+		"thinking_steps":         aiResp["thinking_steps"],
+		"drill_down_dims":        aiResp["drill_down_dims"],
+		"breadcrumbs":           aiResp["breadcrumbs"],
+		"result_data":           aiResp["result_data"],
+		"total":                 aiResp["total"],
+		"page":                  aiResp["page"],
+		"page_size":             aiResp["page_size"],
+		"needs_clarification":    aiResp["needs_clarification"],
+		"clarification_message":  aiResp["clarification_message"],
+		"clarification_type":     aiResp["clarification_type"],
+		"matched_metrics":       aiResp["matched_metrics"],
 	})
 }
 
@@ -256,14 +260,18 @@ func DrillDownQuestion(c *gin.Context) {
 	json.Unmarshal(body, &aiResp)
 
 	response.Success(c, gin.H{
-		"session_id":     aiResp["session_id"],
-		"answer":        aiResp["answer"],
-		"sql":           aiResp["sql"],
-		"drill_down_dims": aiResp["drill_down_dims"],
-		"breadcrumbs":   aiResp["breadcrumbs"],
-		"result_data":   aiResp["result_data"],
-		"total":        aiResp["total"],
-		"page":         aiResp["page"],
-		"page_size":    aiResp["page_size"],
+		"session_id":             aiResp["session_id"],
+		"answer":                aiResp["answer"],
+		"sql":                   aiResp["sql"],
+		"drill_down_dims":        aiResp["drill_down_dims"],
+		"breadcrumbs":           aiResp["breadcrumbs"],
+		"result_data":           aiResp["result_data"],
+		"total":                 aiResp["total"],
+		"page":                  aiResp["page"],
+		"page_size":             aiResp["page_size"],
+		"needs_clarification":    aiResp["needs_clarification"],
+		"clarification_message":  aiResp["clarification_message"],
+		"clarification_type":     aiResp["clarification_type"],
+		"matched_metrics":       aiResp["matched_metrics"],
 	})
 }
