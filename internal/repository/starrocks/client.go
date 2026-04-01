@@ -246,7 +246,21 @@ func QueryRawWithRetry(sqlStr string, attempt int) ([]map[string]interface{}, er
 	mu.RLock()
 	if db == nil {
 		mu.RUnlock()
-		return nil, fmt.Errorf("StarRocks 未连接")
+		// 连接未初始化，尝试重连
+		if err := reconnectIfNeeded(); err != nil {
+			return nil, fmt.Errorf("StarRocks 未连接: %w", err)
+		}
+		return QueryRawWithRetry(sqlStr, attempt)
+	}
+
+	// 先 ping 检查连接是否可用
+	if err := db.Ping(); err != nil {
+		mu.RUnlock()
+		// 连接已断开，尝试重连
+		if err := reconnectIfNeeded(); err != nil {
+			return nil, fmt.Errorf("StarRocks 连接已断开: %w", err)
+		}
+		return QueryRawWithRetry(sqlStr, attempt)
 	}
 
 	rows, err := db.Query(sqlStr)
