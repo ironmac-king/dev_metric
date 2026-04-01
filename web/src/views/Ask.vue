@@ -605,7 +605,7 @@ async function toggleStarSession(session) {
 async function loadSession(id) {
   try {
     const res = await askAPI.getHistory(id)
-    if (res.data?.messages) {
+    if (res.data?.messages && res.data.messages.length > 0) {
       sessionId.value = id
       localStorage.setItem('ask_session_id', id)
       messages.value = res.data.messages.map(m => ({
@@ -617,6 +617,12 @@ async function loadSession(id) {
         thinking_steps: []
       }))
       await scrollToBottom()
+    } else {
+      // 会话已过期（Python 重启后消息丢失）
+      ElMessage.warning('该会话已过期，请开始新会话')
+      // 删除失效的会话记录
+      await askAPI.clearSession(id)
+      sessionHistory.value = sessionHistory.value.filter(s => (s.id || s.session_id) !== id)
     }
   } catch (e) {}
 }
