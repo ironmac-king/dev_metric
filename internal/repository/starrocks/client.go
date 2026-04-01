@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	db       *sql.DB
-	mu       sync.RWMutex
-	queryTTL = 5 * time.Minute // 查询缓存 TTL
+	db            *sql.DB
+	mu            sync.RWMutex
+	srConfig      *config.StarRocksConfig // 存储配置用于重连
+	queryTTL      = 5 * time.Minute       // 查询缓存 TTL
 )
 
 // Init 初始化 StarRocks 连接
@@ -24,6 +25,7 @@ func Init(cfg *config.StarRocksConfig) error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	srConfig = cfg // 保存配置用于重连
 	var err error
 	db, err = newConnection(cfg)
 	if err != nil {
@@ -236,15 +238,30 @@ func QueryAlertRule(ctx context.Context, sqlStr string, ruleID uint) (*QueryResu
 
 // QueryRaw 执行查询（不走缓存，用于测试连接等）
 func QueryRaw(sqlStr string) ([]map[string]interface{}, error) {
-	mu.RLock()
-	defer mu.RUnlock()
+	return QueryRawWithRetry(sqlStr, 1)
+}
 
+// QueryRawWithRetry 执行查询，失败时自动重连重试
+func QueryRawWithRetry(sqlStr string, attempt int) ([]map[string]interface{}, error) {
+	mu.RLock()
 	if db == nil {
+		mu.RUnlock()
 		return nil, fmt.Errorf("StarRocks 未连接")
 	}
 
 	rows, err := db.Query(sqlStr)
+	mu.RUnlock()
+
 	if err != nil {
+		// 连接失效，检查是否是 invalid connection 错误
+		if attempt == 1 && isConnectionError(err) {
+			// 尝试重连一次
+			fmt.Printf("StarRocks 连接失效，尝试重连 (attempt %d/2)\n", attempt)
+			if reErr := reconnectIfNeeded(); reErr == nil {
+				// 重连成功后重试
+				return QueryRawWithRetry(sqlStr, attempt+1)
+			}
+		}
 		return nil, fmt.Errorf("StarRocks 查询失败: %w", err)
 	}
 	defer rows.Close()
@@ -279,6 +296,56 @@ func QueryRaw(sqlStr string) ([]map[string]interface{}, error) {
 	}
 
 	return results, nil
+}
+
+// isConnectionError 判断是否是连接失效错误
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return contains(errStr, "invalid connection") ||
+		contains(errStr, "connection refused") ||
+		contains(errStr, "Broken pipe") ||
+		contains(errStr, "connection reset") ||
+		contains(errStr, "gone away") ||
+		contains(errStr, "Lost connection")
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// reconnectIfNeeded 重新连接（使用已保存的配置）
+func reconnectIfNeeded() error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if srConfig == nil {
+		return fmt.Errorf("StarRocks 配置为空，无法重连")
+	}
+
+	if db != nil {
+		db.Close()
+	}
+
+	var err error
+	db, err = newConnection(srConfig)
+	if err != nil {
+		return fmt.Errorf("StarRocks 重连失败: %w", err)
+	}
+
+	fmt.Printf("StarRocks 重连成功\n")
+	return nil
 }
 
 // InvalidateCache 删除指标缓存
