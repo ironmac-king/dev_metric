@@ -460,7 +460,11 @@ class ConversationNodes:
         content_parts = []
         if entities.get("metric_name"):
             content_parts.append(f"指标：{entities.get('metric_name')}")
-        if entities.get("time_range"):
+        # 优先使用 time_info（完整时间信息），否则用 time_range
+        time_info = entities.get("time_info")
+        if time_info:
+            content_parts.append(f"时间：{time_info.get('original', time_info.get('start', ''))}")
+        elif entities.get("time_range"):
             content_parts.append(f"时间：{entities.get('time_range')}")
         if entities.get("dimension"):
             content_parts.append(f"维度：{entities.get('dimension')}")
@@ -696,9 +700,24 @@ class ConversationNodes:
         time_range = state.entities.get("time_range")
         time_info = state.entities.get("time_info")  # 来自 TimeParser 的完整时间信息
 
+        logger.info(f"[_build_value_sql] 开始构建SQL: metric={metric_name}({metric_code}), starrocks_sql={repr(starrocks_sql)[:100] if starrocks_sql else 'None'}")
+        logger.info(f"[_build_value_sql] time_info: {time_info}, time_range: {time_range}")
+
         # 提取维度参数
         dimensions = self._extract_sql_dimensions(state.entities)
         logger.debug(f"[_build_value_sql] 提取的维度参数: {dimensions}")
+
+        # 校验维度是否在 dimensions 表配置中
+        dims_valid, error_msg = self._validate_extracted_dimensions(state)
+        if not dims_valid:
+            state.needs_clarification = True
+            state.clarification_type = "invalid_dimension"
+            state.clarification_message = error_msg
+            return {
+                "needs_clarification": True,
+                "clarification_message": error_msg,
+                "clarification_type": "invalid_dimension",
+            }
 
         # Step 1: 优先使用预置 SQL
         if starrocks_sql:
@@ -1076,6 +1095,33 @@ class ConversationNodes:
 
         return dimensions
 
+    def _validate_extracted_dimensions(self, state: ConversationState) -> tuple:
+        """
+        校验提取的维度是否在 dimensions 表配置中
+        失败时返回错误消息，触发用户追问
+        返回: (is_valid, error_message)
+        """
+        dimensions = self._extract_sql_dimensions(state.entities)
+        if not dimensions:
+            return True, None
+
+        invalid_dims = []
+        for dim_key, dim_value in dimensions.items():
+            # 跳过非维度参数（如时间维度）
+            if dim_key in ["日", "月", "年", "天", "周"]:
+                continue
+            if not self._is_dimension_registered(dim_key, dim_value):
+                invalid_dims.append(f"{dim_key}={dim_value}")
+
+        if invalid_dims:
+            return False, f"抱歉，暂时没有配置这些维度：{', '.join(invalid_dims)}"
+        return True, None
+
+    def _is_dimension_registered(self, dim_type: str, dim_value: str) -> bool:
+        """检查维度值是否在 dimensions 表配置中注册"""
+        dim_map = self.rule_engine._get_dimension_mapping(dim_type)
+        return dim_value in dim_map.values() or dim_value in dim_map.keys()
+
     def _apply_dimensions_to_sql(self, sql: str, dimensions: Dict[str, Any], entities: Dict[str, Any], time_info: Dict = None) -> str:
         """
         将维度参数应用到 SQL 模板中
@@ -1090,6 +1136,8 @@ class ConversationNodes:
 
         adjusted_sql = sql
 
+        logger.info(f"[_apply_dimensions_to_sql] time_info={time_info}, SQL原始={repr(sql)[:150]}")
+
         # 从 SQL 提取表名
         table_name = self._extract_table_name(sql)
 
@@ -1097,6 +1145,7 @@ class ConversationNodes:
         if time_info:
             start_date = time_info.get("start")
             end_date = time_info.get("end")
+            logger.info(f"[_apply_dimensions_to_sql] start_date={start_date}, end_date={end_date}")
             # 先替换占位符
             if start_date:
                 adjusted_sql = adjusted_sql.replace("{start_date}", f"'{start_date}'")
@@ -1127,6 +1176,15 @@ class ConversationNodes:
                         adjusted_sql += f" AND {time_cond}"
                     else:
                         adjusted_sql += f" WHERE {time_cond}"
+
+        # === 1.5 处理 SKU 占位符 ===
+        # 如果没有指定 SKU，移除 SKU 相关的过滤条件
+        sku_value = entities.get("sku")
+        if not sku_value:
+            # 移除 sku = '${SKU}' 或 sku = '{SKU}' 等条件
+            adjusted_sql = re.sub(r'\s*AND\s+sku\s*=\s*[\'"]?\{?SKU\}?[\'"]?', '', adjusted_sql, flags=re.IGNORECASE)
+            adjusted_sql = re.sub(r'\s*AND\s+sku\s*=\s*\$\{SKU\}', '', adjusted_sql, flags=re.IGNORECASE)
+            adjusted_sql = adjusted_sql.rstrip()
 
         # === 2. 处理动态维度 (GROUP BY) ===
         dimension = entities.get("dimension")  # 如 "department"

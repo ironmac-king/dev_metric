@@ -103,7 +103,11 @@ class RuleEngine:
         self._dimension_cache_time = time.time()
 
     def _init_fallback_dimensions(self):
-        """内置默认维度映射（API 不可用时 fallback）"""
+        """
+        内置默认维度映射（API 不可用时 fallback）
+        重要：fallback 不用于模糊匹配，只作为最后保险
+        移除容易误匹配的 department，避免"销量"匹配到"销售"等问题
+        """
         self._dimension_cache = {
             "platform": {
                 "亚马逊": "amazon", "天猫": "tmall", "京东": "jd",
@@ -116,29 +120,10 @@ class RuleEngine:
                 "美国": "usa", "英国": "uk", "欧洲": "europe",
                 "东南亚": "seasia", "北美": "north_america",
             },
-            "department": {
-                "销售部": "sales", "销售": "sales",
-                "市场部": "marketing", "市场": "marketing",
-                "运营部": "operations", "运营": "operations",
-                "客服部": "customer_service", "客服": "customer_service",
-                "财务部": "finance", "财务": "finance",
-                "人事部": "hr", "人事": "hr",
-            },
-            "site": {
-                "旗舰店": "flagship", "专卖店": "specialty",
-                "直营店": "direct", "加盟店": "franchise",
-            },
-            "category": {
-                "美妆": "beauty", "服装": "apparel", "食品": "food",
-                "数码": "digital", "家电": "appliance", "母婴": "baby",
-                "图书": "books", "家居": "home",
-            },
-            "device": {
-                "PC": "pc", "电脑端": "pc", "网页": "web",
-                "移动": "mobile", "手机": "mobile", "APP": "app",
-                "小程序": "miniprogram", "H5": "h5",
-            },
+            # department 已移除，避免"销量"等词被错误匹配到"销售"
+            # 如需启用，请确保 dimensions 表中有对应配置
         }
+        logger.warning("[RuleEngine] 使用 fallback 维度映射，API 配置未加载或加载失败")
 
     def _get_dimension_mapping(self, dim_type: str) -> Dict[str, str]:
         """获取指定维度类型的映射表"""
@@ -436,9 +421,15 @@ class RuleEngine:
         规则优先提取维度信息（平台、地区、部门、站点等）
         从数据库动态加载维度映射，支持运行时更新
         返回: {"platform": "amazon", "region": "east_china", ...}
+
+        使用分词精确匹配：按标点和空格分词后检查，避免"销量"匹配到"销售"等问题
         """
         import re
         dimensions = {}
+
+        # 分词：按标点和空格切分，"上月销量是多少，亚马逊" → ["上月销量是多少", "亚马逊"]
+        words = re.split(r'[,，、\s]+', text)
+        words = [w.strip() for w in words if w.strip()]
 
         # 获取动态维度映射
         platform_map = self._get_dimension_mapping("platform")
@@ -448,23 +439,22 @@ class RuleEngine:
         category_map = self._get_dimension_mapping("category")
         device_map = self._get_dimension_mapping("device")
 
-        # 平台维度
+        # 平台维度 - 分词精确匹配
         for name, code in platform_map.items():
-            if name in text:
+            if name in words:
                 dimensions["platform"] = code
                 dimensions["platform_name"] = name
                 break
 
-        # 地区维度（优先精确匹配）
+        # 地区维度 - 分词精确匹配
         for name, code in region_map.items():
-            if name in text:
+            if name in words:
                 dimensions["region"] = code
                 dimensions["region_name"] = name
                 break
 
-        # 如果没有精确匹配，尝试"华东区"、"华北区"等变体
+        # 如果没有精确匹配，尝试"华东区"、"华北区"等变体（区域+后缀）
         if "region" not in dimensions:
-            # 提取所有地区关键词进行匹配
             region_keywords = list(region_map.keys())
             region_match = re.search(f"({'|'.join(region_keywords)})(区|地区)?", text)
             if region_match:
@@ -473,35 +463,52 @@ class RuleEngine:
                     dimensions["region"] = region_map[name]
                     dimensions["region_name"] = name
 
-        # 部门维度
+        # 部门维度 - 分词精确匹配
         for name, code in department_map.items():
-            if name in text:
+            if name in words:
                 dimensions["department"] = code
                 dimensions["department_name"] = name
                 break
 
         # 站点维度（店铺站点）
         for name, code in site_map.items():
-            if name in text:
+            if name in words:
                 dimensions["site"] = code
                 dimensions["site_name"] = name
                 break
 
         # 品类维度
         for name, code in category_map.items():
-            if name in text:
+            if name in words:
                 dimensions["category"] = code
                 dimensions["category_name"] = name
                 break
 
         # 设备维度
         for name, code in device_map.items():
-            if name in text:
+            if name in words:
                 dimensions["device"] = code
                 dimensions["device_name"] = name
                 break
 
         return dimensions
+
+    def _validate_all_dimensions(self, dimensions: Dict[str, Any]) -> tuple:
+        """
+        校验所有提取到的维度，只保留 dimensions 表中配置过的值
+        返回: (valid_dimensions, invalid_dimensions)
+        """
+        from typing import Tuple, List, Any
+        valid = {}
+        invalid = []
+        for dim_type, dim_value in dimensions.items():
+            dim_map = self._get_dimension_mapping(dim_type)
+            # 检查 dim_value 是否在配置的映射表中（支持 code 或 name 两种方式）
+            if dim_value in dim_map.values() or dim_value in dim_map.keys():
+                valid[dim_type] = dim_value
+            else:
+                invalid.append(f"{dim_type}={dim_value}")
+        return valid, invalid
 
     def _normalize_time_range(self, time_type: str, raw_time: str = None) -> str:
         """

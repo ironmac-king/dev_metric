@@ -18,10 +18,10 @@
       <div class="session-list" v-if="!sidebarCollapsed">
         <AskSessionCard
           v-for="session in sessionHistory"
-          :key="session.id || session.session_id"
+          :key="session.session_id || session.id"
           :session="session"
-          :is-active="sessionId === (session.id || session.session_id)"
-          @click="loadSession(session.id || session.session_id)"
+          :is-active="sessionId === (session.session_id || session.id)"
+          @click="loadSession(session.session_id || session.id)"
           @star="toggleStarSession(session)"
         />
 
@@ -225,7 +225,7 @@
                 </div>
               </div>
 
-              <div class="message-content" v-if="(!msg.result_data || msg.result_data.length === 0) && (!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0)" v-html="formatMessage(msg.content)"></div>
+              <div class="message-content" v-if="editingMessageIndex !== index && (!msg.result_data || msg.result_data.length === 0) && (!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0)" v-html="formatMessage(msg.content)"></div>
 
               <!-- 指标候选选择 -->
               <div v-if="msg.needs_clarification && msg.matched_metrics && msg.matched_metrics.length > 0" class="metric-candidates">
@@ -278,7 +278,7 @@
               </div>
 
               <!-- 下钻维度标签 -->
-              <div v-if="msg.drill_down_dims && msg.drill_down_dims.length > 0" class="drill-down-section">
+              <div v-if="msg.result_data && msg.result_data.length > 0 && msg.drill_down_dims && msg.drill_down_dims.length > 0" class="drill-down-section">
                 <div class="drill-down-label">
                   <svg class="label-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
                     <path d="M7 1L8.5 5H13L9.5 7.5L11 12L7 9L3 12L4.5 7.5L1 5H5.5L7 1Z" fill="currentColor"/>
@@ -349,6 +349,41 @@
                   </svg>
                 </button>
               </div>
+            </div>
+
+            <!-- 用户消息编辑按钮 - 放在消息下方 -->
+            <div v-if="msg.role === 'user'" class="message-edit-area">
+              <!-- 编辑状态 -->
+              <div v-if="editingMessageIndex === index" class="edit-area">
+                <textarea
+                  v-model="editingContent"
+                  class="edit-textarea"
+                  rows="3"
+                  @keydown.enter.ctrl="resendMessage"
+                  @keydown.esc="cancelEdit"
+                  placeholder="输入修改内容..."
+                ></textarea>
+                <div class="edit-actions">
+                  <button class="btn-send" @click="resendMessage" :disabled="!editingContent.trim()">
+                    发送
+                  </button>
+                  <button class="btn-cancel" @click="cancelEdit">
+                    取消
+                  </button>
+                </div>
+              </div>
+              <!-- 非编辑状态显示编辑按钮 -->
+              <button
+                v-else
+                class="edit-btn"
+                @click="startEdit(index)"
+                title="编辑消息"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M10.5 2.5L11.5 3.5L4 11H3V10L10.5 2.5Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span>编辑</span>
+              </button>
             </div>
           </div>
         </transition-group>
@@ -450,6 +485,10 @@ const sidebarCollapsed = ref(false)
 const messagesContainer = ref(null)
 const showPreferencesPanel = ref(false) // 偏好设置面板
 const selectedCandidateIdx = ref(null) // 当前选中的候选指标索引
+
+// 编辑消息相关
+const editingMessageIndex = ref(-1)
+const editingContent = ref('')
 
 // 下钻相关
 const selectedDims = ref({})  // { messageIndex: ['维度1', '维度2'] }
@@ -625,6 +664,83 @@ async function loadSession(id) {
     }
   } catch (e) {
     ElMessage.error('加载会话失败')
+  }
+}
+
+// 编辑消息相关
+function startEdit(index) {
+  editingMessageIndex.value = index
+  editingContent.value = messages.value[index].content
+}
+
+function cancelEdit() {
+  editingMessageIndex.value = -1
+  editingContent.value = ''
+}
+
+async function resendMessage() {
+  const index = editingMessageIndex.value
+  if (index === -1) return
+  const newContent = editingContent.value.trim()
+  if (!newContent) return
+
+  // 更新消息内容
+  messages.value[index].content = newContent
+  editingMessageIndex.value = -1
+  editingContent.value = ''
+
+  // 删除后续消息（保留编辑的消息，删除后面的 AI 回复）
+  messages.value = messages.value.slice(0, index + 1)
+
+  // 重新发送 - 直接调用 API，不走 handleSend（避免重复 push 用户消息）
+  await scrollToBottom()
+  loading.value = true
+
+  try {
+    const res = await askAPI.ask({
+      question: newContent,
+      session_id: sessionId.value || undefined
+    })
+
+    if (res.data) {
+      if (!sessionId.value && res.data.session_id) {
+        sessionId.value = res.data.session_id
+        localStorage.setItem('ask_session_id', sessionId.value)
+        await loadSessionHistory()
+      }
+
+      const metricCode = extractMetricCode(res.data)
+      const sql = res.data.sql || ''
+      if (metricCode) currentMetricCode.value = metricCode
+      if (sql) currentSQL.value = sql
+
+      messages.value.push({
+        role: 'assistant',
+        content: res.data.answer,
+        sql: res.data.sql,
+        result_data: res.data.result_data || null,
+        drill_down_dims: res.data.drill_down_dims || [],
+        breadcrumbs: res.data.breadcrumbs || [],
+        created_at: new Date().toISOString(),
+        thinking_expanded: false,
+        thinking_steps: res.data.thinking_steps || [],
+        needs_clarification: res.data.needs_clarification || false,
+        clarification_message: res.data.clarification_message || null,
+        clarification_type: res.data.clarification_type || null,
+        matched_metrics: res.data.matched_metrics || []
+      })
+    }
+  } catch (e) {
+    messages.value.push({
+      role: 'assistant',
+      content: '抱歉，服务暂时不可用，请稍后再试。',
+      created_at: new Date().toISOString(),
+      thinking_expanded: false,
+      thinking_steps: []
+    })
+  } finally {
+    loading.value = false
+    await scrollToBottom()
   }
 }
 
@@ -1057,6 +1173,7 @@ async function handleClearContext() {
 /* 侧边栏 */
 .session-sidebar {
   width: 220px;
+  min-width: 220px;
   background: var(--bg-card);
   display: flex;
   flex-direction: column;
@@ -1064,6 +1181,7 @@ async function handleClearContext() {
   position: relative;
   z-index: 10;
   border-right: 1px solid var(--border);
+  overflow: hidden;
 }
 
 .session-sidebar.collapsed {
@@ -1108,6 +1226,9 @@ async function handleClearContext() {
   flex: 1;
   overflow-y: auto;
   padding: 8px;
+  overflow-x: hidden;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .session-item {
@@ -2080,5 +2201,114 @@ async function handleClearContext() {
   font-size: 12px;
   padding: 5px 14px;
   border-radius: 8px;
+}
+
+/* 用户消息编辑区域 - 放在消息下方 */
+.message-edit-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  min-height: 28px;
+}
+
+/* 编辑按钮 - 类似点赞点踩风格 */
+.edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  transition: all 0.15s;
+  opacity: 0;
+}
+
+.message.user:hover .edit-btn {
+  opacity: 1;
+}
+
+.edit-btn:hover {
+  background: var(--bg-primary);
+  color: var(--primary);
+}
+
+/* 编辑区域 */
+.edit-area {
+  flex: 1;
+  margin-top: 8px;
+}
+
+.edit-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.edit-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  justify-content: flex-end;
+}
+
+.btn-send {
+  padding: 7px 18px;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+}
+
+.btn-send:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
+}
+
+.btn-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-cancel {
+  padding: 7px 18px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-cancel:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
 }
 </style>
