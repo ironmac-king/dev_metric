@@ -1048,9 +1048,18 @@ async function handleDrillDown(msg, comparisonType = null) {
     return
   }
 
-  // 如果没有指定对比类型，但当前消息有对比结果，继承对比类型
-  if (!comparisonType && msg.comparison_result) {
-    comparisonType = msg.comparison_result.comparison_type
+  // 如果没有指定对比类型，根据用户消息内容判断
+  if (!comparisonType) {
+    // 先检查当前消息内容是否包含环比/同比关键词
+    const msgContent = msg.content || ''
+    if (msgContent.includes('环比')) {
+      comparisonType = '环比'
+    } else if (msgContent.includes('同比')) {
+      comparisonType = '同比'
+    } else if (msg.comparison_result) {
+      // 都没有则继承旧的对比类型
+      comparisonType = msg.comparison_result.comparison_type
+    }
   }
 
   // 保存当前上下文到历史（用于返回）
