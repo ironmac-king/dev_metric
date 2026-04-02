@@ -280,6 +280,9 @@ async def ask_question(req: AskRequest):
     state.clarification_type = None
     state.matched_metrics = None
     state.error = None
+    # 清除上轮对比结果和SQL结果，避免残留
+    state.comparison_result = None
+    state.sql_result = None
     # 暂存上轮追问信息，供 intent_node 判断用户回复
     state._prev_clarification_type = prev_clarification_type
     state._prev_clarification_message = prev_clarification_message
