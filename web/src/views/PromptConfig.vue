@@ -10,7 +10,12 @@
       <el-col :span="6">
         <el-card shadow="hover">
           <template #header>
-            <span>Prompt 列表</span>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span>Prompt 列表</span>
+              <el-button type="primary" size="small" @click="openCreateDialog">
+                <el-icon style="margin-right:4px"><Plus /></el-icon>新增
+              </el-button>
+            </div>
           </template>
           <el-scrollbar height="calc(100vh - 280px)">
             <el-menu :default-active="selectedConfigId" @select="handleSelectConfig">
@@ -123,6 +128,82 @@
         <el-button type="primary" @click="executeAIWrite">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 新增 Prompt 配置弹窗 -->
+    <el-dialog
+      v-model="createDialogVisible"
+      title="新增 Prompt 配置"
+      width="600px"
+      :close-on-click-modal="false"
+      @closed="createDialogClosed"
+    >
+      <el-form
+        ref="createFormRef"
+        :model="createForm"
+        :rules="createFormRules"
+        label-width="100px"
+        label-position="left"
+      >
+        <el-form-item label="名称" prop="name">
+          <el-input
+            v-model="createForm.name"
+            placeholder="如：nl2structure"
+            maxlength="64"
+            show-word-limit
+            clearable
+          />
+        </el-form-item>
+        <el-form-item label="说明" prop="description">
+          <el-input
+            v-model="createForm.description"
+            type="textarea"
+            :rows="2"
+            placeholder="简要描述此 Prompt 的用途"
+            maxlength="256"
+          />
+        </el-form-item>
+        <el-form-item label="变量定义" prop="variables">
+          <el-input
+            v-model="createForm.variables"
+            placeholder='JSON数组格式，如 ["intent", "metric_name"]'
+          />
+          <div style="color:#909399;font-size:12px;margin-top:4px">
+            请确保是合法的 JSON 数组格式
+          </div>
+        </el-form-item>
+        <el-form-item label="Prompt 内容" prop="prompt_text">
+          <el-input
+            v-model="createForm.prompt_text"
+            type="textarea"
+            :rows="12"
+            :autosize="{ minRows: 12, maxRows: 30 }"
+            placeholder="输入 Prompt 模板内容，使用 {变量名} 占位"
+            font-family="monospace"
+          />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-switch
+            v-model="createForm.status"
+            :active-value="1"
+            :inactive-value="0"
+            active-text="启用"
+            inactive-text="禁用"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div style="display:flex;justify-content:flex-end;gap:12px">
+          <el-button @click="createDialogVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="creating"
+            @click="handleCreate"
+          >
+            {{ creating ? '创建中...' : '创建' }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -130,7 +211,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { promptConfigAPI } from '@/api'
-import { MagicStick, Clock } from '@element-plus/icons-vue'
+import { MagicStick, Clock, Plus } from '@element-plus/icons-vue'
 
 const configs = ref([])
 const selectedConfigId = ref('')
@@ -143,6 +224,16 @@ const aiSuggestedPrompt = ref('')
 const aiWriteMode = ref('improve')
 const aiTargetConfig = ref('')
 const versions = ref([])
+const createDialogVisible = ref(false)
+const createFormRef = ref(null)
+const creating = ref(false)
+const createForm = ref({
+  name: '',
+  description: '',
+  prompt_text: '',
+  variables: '[]',
+  status: 1
+})
 const editForm = ref({
   name: '',
   description: '',
@@ -150,6 +241,78 @@ const editForm = ref({
   variables: '[]',
   status: 1
 })
+
+// 表单校验规则
+const createFormRules = {
+  name: [
+    { required: true, message: '名称不能为空', trigger: 'blur' },
+    { min: 2, max: 64, message: '长度在 2 到 64 个字符', trigger: 'blur' }
+  ],
+  variables: [
+    { validator: validateVariables, trigger: 'blur' }
+  ],
+  prompt_text: [
+    { required: true, message: 'Prompt 内容不能为空', trigger: 'blur' }
+  ]
+}
+
+// JSON 变量格式校验
+function validateVariables(rule, value, callback) {
+  if (!value) {
+    callback()
+    return
+  }
+  try {
+    const parsed = JSON.parse(value)
+    if (!Array.isArray(parsed)) {
+      callback(new Error('必须是 JSON 数组格式'))
+    } else {
+      callback()
+    }
+  } catch {
+    callback(new Error('JSON 格式不正确'))
+  }
+}
+
+function openCreateDialog() {
+  createForm.value = {
+    name: '',
+    description: '',
+    prompt_text: '',
+    variables: '[]',
+    status: 1
+  }
+  createDialogVisible.value = true
+}
+
+function createDialogClosed() {
+  createFormRef.value?.resetFields()
+}
+
+async function handleCreate() {
+  // 表单校验
+  try {
+    await createFormRef.value?.validate()
+  } catch {
+    return
+  }
+
+  creating.value = true
+  try {
+    const res = await promptConfigAPI.create(createForm.value)
+    ElMessage.success('创建成功')
+    createDialogVisible.value = false
+    await loadConfigs()
+    // 自动选中新创建的配置
+    if (res.data?.id) {
+      handleSelectConfig(String(res.data.id))
+    }
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e.message || '未知错误'))
+  } finally {
+    creating.value = false
+  }
+}
 
 async function loadConfigs() {
   try {
