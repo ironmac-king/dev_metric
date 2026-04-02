@@ -203,6 +203,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			prompt.PUT("/:id", handler.UpdatePromptConfig)
 			prompt.DELETE("/:id", handler.DeletePromptConfig)
 			prompt.POST("/:id/rollback", handler.RollbackPromptConfig)
+			prompt.DELETE("/:id/version", handler.DeletePromptConfigVersion)
 			prompt.POST("/generate", handler.GeneratePromptConfig) // AI 生成 Prompt
 		}
 

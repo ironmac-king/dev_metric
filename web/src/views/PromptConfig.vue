@@ -91,9 +91,18 @@
             {{ formatTime(row.created_at) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="100" fixed="right">
+        <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="handleRollback(row)">回滚</el-button>
+            <el-button
+              type="danger"
+              link
+              size="small"
+              @click="handleDeleteVersion(row)"
+              :disabled="currentConfig?.version === row.version"
+            >
+              删除
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -474,6 +483,24 @@ async function handleRollback(version) {
   } catch (e) {
     if (e !== 'cancel') {
       ElMessage.error('回滚失败')
+    }
+  }
+}
+
+async function handleDeleteVersion(version) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除版本 ${version.version} 吗？此操作不可恢复。`,
+      '确认删除',
+      { type: 'warning' }
+    )
+    await promptConfigAPI.deleteVersion(selectedConfigId.value, version.version)
+    ElMessage.success('删除成功')
+    await openHistoryDialog()
+    await loadConfigs()
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error('删除失败')
     }
   }
 }

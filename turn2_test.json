@@ -1,0 +1,13 @@
+{
+  "turn1": {
+    "session_id": "9a0e5183-2a59-4bcc-80c2-dc5c1b7872e6",
+    "needs_clarification": false,
+    "clarification_type": null,
+    "answer_len": 192
+  },
+  "turn2": {
+    "needs_clarification": true,
+    "clarification_type": "scope_too_broad",
+    "answer_len": 21
+  }
+}

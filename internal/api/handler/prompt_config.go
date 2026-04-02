@@ -153,6 +153,31 @@ func GetPromptConfigVersions(c *gin.Context) {
 	response.Success(c, versions)
 }
 
+// DeletePromptConfigVersion 删除指定版本
+func DeletePromptConfigVersion(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	version, _ := strconv.Atoi(c.Query("version"))
+
+	// 不允许删除当前版本
+	var config model.PromptConfig
+	if err := postgres.Get().First(&config, id).Error; err != nil {
+		response.Error(c, response.CodeNotFound, "配置不存在")
+		return
+	}
+	if config.Version == version {
+		response.Error(c, response.CodeBadRequest, "不能删除当前版本")
+		return
+	}
+
+	// 删除版本记录
+	if err := postgres.Get().Where("config_id = ? AND version = ?", id, version).Delete(&model.PromptConfigVersion{}).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "删除版本失败")
+		return
+	}
+
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
 // RollbackPromptConfig 回滚Prompt配置到指定版本
 func RollbackPromptConfig(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))

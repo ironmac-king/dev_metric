@@ -138,6 +138,7 @@ export const promptConfigAPI = {
   update: (id, data) => api.put(`/prompt-configs/${id}`, data),
   delete: (id) => api.delete(`/prompt-configs/${id}`),
   rollback: (id, data) => api.post(`/prompt-configs/${id}/rollback`, data),
+  deleteVersion: (id, version) => api.delete(`/prompt-configs/${id}/version`, { params: { version } }),
   generate: (data) => api.post('/prompt-configs/generate', data)
 }
 

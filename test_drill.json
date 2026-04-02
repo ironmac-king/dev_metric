@@ -1,0 +1,1 @@
+{"session_id": "be7aca49-c6f2-4aef-a525-c39f87f13dd0", "dimension_names": ["一级品类"], "metric_code": "MKI-02-0003", "current_sql": "SELECT sum(SESSIONS_TOTAL) as `SESSIONS_TOTAL` FROM dws.DWS_IMC_BUSINESSREPORT WHERE 1=1 AND FDATE >= '2026-03-26' AND FDATE <= '2026-04-02' LIMIT 10 OFFSET 0", "current_group_by": ""}
