@@ -255,11 +255,20 @@
                     <thead>
                       <tr>
                         <th v-for="(value, key) in msg.result_data[0]" :key="key">{{ key }}</th>
+                        <th v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">{{ msg.comparison_result.comparison_type === '同比' ? '去年同期' : '上月同期' }}</th>
+                        <th v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">变化率</th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-for="(row, rowIdx) in msg.result_data" :key="rowIdx">
-                        <td v-for="(value, key) in row" :key="key">{{ value }}</td>
+                        <td v-for="(value, key) in row" :key="key">{{ formatCellValue(value) }}</td>
+                        <td v-if="msg.comparison_result && msg.comparison_result.comparison_value !== undefined && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">{{ formatComparisonValue(msg.comparison_result.comparison_value) }}</td>
+                        <td v-if="msg.comparison_result && msg.comparison_result.change_rate !== undefined && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">
+                          <span :class="msg.comparison_result.change_rate >= 0 ? 'text-success' : 'text-danger'">
+                            {{ msg.comparison_result.change_rate >= 0 ? '↑' : '↓' }}
+                            {{ Math.abs(msg.comparison_result.change_rate).toFixed(2) }}%
+                          </span>
+                        </td>
                       </tr>
                     </tbody>
                   </table>
@@ -719,6 +728,7 @@ async function resendMessage() {
         content: res.data.answer,
         sql: res.data.sql,
         result_data: res.data.result_data || null,
+        comparison_result: res.data.comparison_result || null,
         drill_down_dims: res.data.drill_down_dims || [],
         breadcrumbs: res.data.breadcrumbs || [],
         created_at: new Date().toISOString(),
@@ -820,6 +830,7 @@ async function handleSend() {
         content: res.data.answer,
         sql: res.data.sql,
         result_data: res.data.result_data || null,
+        comparison_result: res.data.comparison_result || null,
         drill_down_dims: res.data.drill_down_dims || [],
         breadcrumbs: res.data.breadcrumbs || [],
         created_at: new Date().toISOString(),
@@ -927,6 +938,46 @@ function formatMessage(content) {
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
 }
 
+function formatCellValue(value) {
+  if (value === null || value === undefined) return '-'
+  if (typeof value === 'string') {
+    const num = parseFloat(value)
+    if (!isNaN(num)) {
+      if (num === Math.floor(num)) {
+        return new Intl.NumberFormat('zh-CN').format(num)
+      }
+      return new Intl.NumberFormat('zh-CN', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2
+      }).format(num)
+    }
+  }
+  if (typeof value === 'number') {
+    if (value === Math.floor(value)) {
+      return new Intl.NumberFormat('zh-CN').format(value)
+    }
+    return new Intl.NumberFormat('zh-CN', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2
+    }).format(value)
+  }
+  return value
+}
+
+function formatComparisonValue(value) {
+  if (value === null || value === undefined) return '-'
+  if (typeof value === 'string') {
+    const num = parseFloat(value)
+    if (!isNaN(num)) {
+      return new Intl.NumberFormat('zh-CN').format(num)
+    }
+  }
+  if (typeof value === 'number') {
+    return new Intl.NumberFormat('zh-CN').format(value)
+  }
+  return value
+}
+
 async function handleFeedback(index, feedback) {
   const msg = messages.value[index]
   if (msg.feedback) {
@@ -981,12 +1032,17 @@ function clearDimSelection(msg) {
   selectedDims.value[index] = []
 }
 
-async function handleDrillDown(msg) {
+async function handleDrillDown(msg, comparisonType = null) {
   const index = messages.value.indexOf(msg)
   const selected = selectedDims.value[index] || []
   if (selected.length === 0) {
     ElMessage.warning('请选择至少一个维度')
     return
+  }
+
+  // 如果没有指定对比类型，但当前消息有对比结果，继承对比类型
+  if (!comparisonType && msg.comparison_result) {
+    comparisonType = msg.comparison_result.comparison_type
   }
 
   // 保存当前上下文到历史（用于返回）
@@ -996,7 +1052,8 @@ async function handleDrillDown(msg) {
     breadcrumbs: JSON.parse(JSON.stringify(msg.breadcrumbs || [])),
     result_data: msg.result_data,
     drill_down_dims: msg.drill_down_dims,
-    content: msg.content
+    content: msg.content,
+    comparison_result: msg.comparison_result
   })
 
   loading.value = true
@@ -1006,7 +1063,8 @@ async function handleDrillDown(msg) {
       dimension_names: selected,
       metric_code: currentMetricCode.value,
       current_sql: currentSQL.value,
-      current_group_by: currentGroupBy.value
+      current_group_by: currentGroupBy.value,
+      comparison_type: comparisonType
     })
 
     if (res.data) {
@@ -1021,6 +1079,7 @@ async function handleDrillDown(msg) {
       msg.result_data = res.data.result_data || null
       msg.drill_down_dims = res.data.drill_down_dims || []
       msg.breadcrumbs = res.data.breadcrumbs || []
+      msg.comparison_result = res.data.comparison_result || null
       msg.thinking_expanded = false
       await scrollToBottom()
     }

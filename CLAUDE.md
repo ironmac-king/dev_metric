@@ -9,6 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working in this
 ## 常用命令
 
 ```bash
+# Redis (port 6379) - Go 后端缓存依赖
+redis-server
+
 # Go 后端 (port 8080)
 cd C:/Users/4014/Desktop/dev_metric/dev_metric
 go run ./cmd/server

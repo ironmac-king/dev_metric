@@ -94,6 +94,8 @@ class AskResponse(BaseModel):
     total: Optional[int] = None  # 总记录数
     page: Optional[int] = None  # 当前页
     page_size: Optional[int] = None  # 每页条数
+    comparison_result: Optional[Dict[str, Any]] = None  # 同比环比结果
+    metric_code: Optional[str] = None  # 当前指标代码
 
 
 def _extract_result_data(sql_result) -> Optional[List[Dict[str, Any]]]:
@@ -126,6 +128,82 @@ def _extract_result_total(sql_result) -> Optional[int]:
         if isinstance(data, dict):
             return data.get("count")
     return None
+
+
+def _get_metric_name_for_result(state: ConversationState, metric_client: MetricClient) -> Dict[str, str]:
+    """获取指标字段名到中文名称的映射，用于结果列名替换"""
+    field_name_map = {}
+
+    # 获取所有指标
+    try:
+        all_metrics = metric_client.get_all_metrics()
+    except:
+        return field_name_map
+
+    # 确定要查找的指标代码
+    target_metric_code = None
+
+    # 优先从 conversation_context 获取
+    ctx = getattr(state, 'conversation_context', None)
+    if ctx:
+        target_metric_code = getattr(ctx, 'current_metric_code', None)
+
+    # 如果没有，从 state.entities 获取
+    if not target_metric_code:
+        target_metric_code = state.entities.get("metric_code")
+
+    # 如果还是没有，从 state.metric_id 获取
+    if not target_metric_code and hasattr(state, 'metric_id') and state.metric_id:
+        for m in all_metrics:
+            if str(m.get("id")) == str(state.metric_id):
+                target_metric_code = m.get("metric_code")
+                break
+
+    # 找到对应的指标
+    target_metric = None
+    if target_metric_code:
+        for m in all_metrics:
+            if m.get("metric_code") == target_metric_code:
+                target_metric = m
+                break
+
+    if target_metric:
+        # 从 starrocks_sql 中提取字段名
+        starrocks_sql = target_metric.get("starrocks_sql", "") or ""
+        import re
+        # 匹配 sum(XXX) 或 XXX as YYY 等模式
+        field_matches = re.findall(r'(?:sum\()?\s*([\w]+)\s*\)?\s*(?:as\s*`?([\w]+)`?)?', starrocks_sql, re.IGNORECASE)
+        # 如果有别名对，提取别名；否则提取字段名
+        if any(m[1] for m in field_matches):
+            field_matches = [m[1] if m[1] else m[0] for m in field_matches]
+        metric_name = target_metric.get("name", target_metric_code)
+        for field in field_matches:
+            field_upper = field.upper()
+            if field_upper not in field_name_map:
+                field_name_map[field_upper] = metric_name
+
+    return field_name_map
+
+
+def _rename_result_columns(result_data: Optional[List[Dict[str, Any]]], metric_name_map: Dict[str, str]) -> Optional[List[Dict[str, Any]]]:
+    """替换结果中的指标列名为中文名称"""
+    if not result_data or not metric_name_map:
+        return result_data
+
+    renamed_data = []
+    for row in result_data:
+        new_row = {}
+        for k, v in row.items():
+            # 跳过对比相关字段
+            if k in ('comparison_value', 'change_rate'):
+                new_row[k] = v
+            # 替换指标列名
+            elif k in metric_name_map:
+                new_row[metric_name_map[k]] = v
+            else:
+                new_row[k] = v
+        renamed_data.append(new_row)
+    return renamed_data
 
 
 def _get_drill_down_dims(state) -> List[Dict[str, str]]:
@@ -270,6 +348,9 @@ async def ask_question(req: AskRequest):
 
         execute_updates = await conversation_nodes.execute_node(state)
 
+        # 对比计算（同比/环比）
+        comparison_updates = await conversation_nodes.comparison_node(state)
+
         # 生成回答
         response_updates = conversation_nodes.response_node(state)
 
@@ -336,10 +417,12 @@ async def ask_question(req: AskRequest):
             matched_metrics=state.matched_metrics if hasattr(state, 'matched_metrics') else None,
             drill_down_dims=_get_drill_down_dims(state),
             breadcrumbs=[],
-            result_data=_extract_result_data(state.sql_result),
+            result_data=_rename_result_columns(_extract_result_data(state.sql_result), _get_metric_name_for_result(state, conversation_nodes.metric_client)),
             total=_extract_result_total(state.sql_result),
             page=req.page,
-            page_size=page_size
+            page_size=page_size,
+            comparison_result=getattr(state, 'comparison_result', None),
+            metric_code=state.entities.get("metric_code") or getattr(state, 'current_metric_code', None)
         )
 
     except Exception as e:
@@ -459,6 +542,7 @@ class DrillDownRequest(BaseModel):
     current_group_by: Optional[str] = None
     page: int = 1
     page_size: int = 10
+    comparison_type: Optional[str] = None  # 环比: "环比", 同比: "同比"
 
 
 @app.post("/api/v1/ask/drill_down")
@@ -480,6 +564,38 @@ async def drill_down_question(req: DrillDownRequest):
         # 2. 获取维度配置
         metric_client = MetricClient()
         dim_configs = metric_client.get_dimension_configs(table_name)
+
+        # 获取指标中文名称 - 通过 starrocks_sql 建立字段名到指标名的映射
+        metric_name_map = {}
+        try:
+            all_metrics = metric_client.get_all_metrics()
+            target_metric = None
+            # 找到当前指标
+            if req.metric_code:
+                for m in all_metrics:
+                    if m.get("metric_code") == req.metric_code:
+                        target_metric = m
+                        break
+            # 从 starrocks_sql 提取字段名并建立映射
+            if target_metric:
+                starrocks_sql = target_metric.get("starrocks_sql", "") or ""
+                field_matches = re.findall(r'(?:sum\()?\s*([\w]+)\s*\)?\s*(?:as\s*`?([\w]+)`?)?', starrocks_sql, re.IGNORECASE)
+                # 如果有别名对，提取别名；否则提取字段名
+                if any(m[1] for m in field_matches):
+                    field_matches = [m[1] if m[1] else m[0] for m in field_matches]
+                metric_name = target_metric.get("name", req.metric_code)
+                for field in field_matches:
+                    field_upper = field.upper()
+                    if field_upper:
+                        metric_name_map[field_upper] = metric_name
+        except Exception as e:
+            logger.warning(f"获取指标名称失败: {e}")
+
+        # 构建列名到中文维度名的映射（用于结果列名替换）
+        col_to_dim_name = {}
+        for cfg in dim_configs:
+            if cfg.get("status") == 1:
+                col_to_dim_name[cfg["column_name"]] = cfg["dimension_name"]
 
         # 3. 找到选中维度的 column_name
         dim_map = {}
@@ -608,6 +724,174 @@ async def drill_down_question(req: DrillDownRequest):
             answer = "暂无数据"
             data_list = []
 
+        # 6.5 对比计算（环比上月/同比去年）- T+1数据逻辑
+        comparison_result_data = None
+        # 如果没有传入 comparison_type，但从 SQL 中能提取到时间，推断对比类型
+        # 如果时间是3月（本月是4月），推断为同比去年3月
+        if not req.comparison_type and data_list:
+            date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", sql)
+            if date_match:
+                current_month = int(date_match.group(2))
+                if current_month in [1, 2, 3]:  # 1-3月，推断为同比（因为去年同期数据可能更完整）
+                    req.comparison_type = "同比"
+                    logger.info(f"[drill_down] 自动推断 comparison_type: {req.comparison_type} (当前月份 {current_month})")
+
+        if req.comparison_type and data_list:
+            logger.info(f"[drill_down] 开始对比计算: comparison_type={req.comparison_type}, data_list长度={len(data_list)}")
+            # 从当前SQL中提取时间条件，确定当前周期
+            # T+1: 今天是4月2号，能查到的数据是4月1号的
+            # 环比上月: 3月1号 (上月第一天)
+            # 同比去年: 去年4月1号 (去年同月第一天)
+            from datetime import datetime, timedelta
+            import calendar
+
+            # 从SQL中提取日期
+            date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", sql)
+            if date_match:
+                current_year, current_month, current_day = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
+                # T+1: 当前数据实际是昨天
+                current_date = datetime(current_year, current_month, current_day) - timedelta(days=1)
+                logger.info(f"[drill_down] 提取的日期: {current_year}-{current_month:02d}-{current_day:02d}, 减去T+1后天: {current_date}")
+            else:
+                # 默认为昨天
+                current_date = datetime.now() - timedelta(days=1)
+                logger.info(f"[drill_down] 无法提取日期，使用默认: {current_date}")
+
+            # 计算对比周期
+            if req.comparison_type == "环比":
+                # 环比上月: 取上月第一天
+                if current_date.month == 1:
+                    comp_year = current_date.year - 1
+                    comp_month = 12
+                else:
+                    comp_year = current_date.year
+                    comp_month = current_date.month - 1
+                comp_day = 1  # 月份第一天
+            else:
+                # 同比去年: 取去年同月第一天
+                comp_year = current_date.year - 1
+                comp_month = current_date.month
+                comp_day = 1  # 月份第一天
+
+            comparison_date = f"{comp_year}-{comp_month:02d}-{comp_day:02d}"
+
+            # 构建对比SQL: 把时间条件改为对比周期第一天
+            # 查找时间条件 (FDATE >= 'xxx' AND FDATE <= 'xxx')
+            comparison_sql = re.sub(
+                r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+                f"\\1 >= '{comparison_date}'",
+                new_sql,
+                flags=re.IGNORECASE
+            )
+            comparison_sql = re.sub(
+                r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+                f"\\1 <= '{comparison_date}'",
+                comparison_sql,
+                flags=re.IGNORECASE
+            )
+            # 移除 LIMIT/OFFSET（保留完整的对比周期数据，不要 LIMIT 1）
+            comparison_sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', comparison_sql, flags=re.IGNORECASE)
+            comparison_sql = re.sub(r'\s+OFFSET\s+\d+', '', comparison_sql, flags=re.IGNORECASE)
+
+            logger.info(f"[drill_down] 对比SQL: {comparison_sql}")
+
+            # 执行对比查询
+            try:
+                comp_result = await sql_generator.execute(comparison_sql, {})
+                logger.info(f"[drill_down] 对比查询结果: {comp_result}")
+                comp_data_list = []
+                if isinstance(comp_result, dict):
+                    comp_data_list = comp_result.get("data", {}).get("data", []) if isinstance(comp_result.get("data"), dict) else []
+                    logger.info(f"[drill_down] 提取的comp_data_list长度: {len(comp_data_list)}")
+                elif isinstance(comp_result, list):
+                    comp_data_list = comp_result
+                    logger.info(f"[drill_down] comp_result是list，长度: {len(comp_data_list)}")
+
+                if comp_data_list:
+                    # 用维度列作为key，建立对比数据的索引
+                    comp_index = {}
+                    for row in comp_data_list:
+                        # 构建维度key
+                        dim_key_parts = []
+                        for dim_name in req.dimension_names:
+                            if dim_name in dim_map and dim_map[dim_name] in row:
+                                dim_key_parts.append(f"{dim_map[dim_name]}:{row.get(dim_map[dim_name])}")
+                        if dim_key_parts:
+                            dim_key = "|".join(dim_key_parts)
+                            comp_index[dim_key] = row
+
+                    # 为每个当前行匹配对比数据
+                    for row in data_list:
+                        dim_key_parts = []
+                        for dim_name in req.dimension_names:
+                            if dim_name in dim_map and dim_map[dim_name] in row:
+                                dim_key_parts.append(f"{dim_map[dim_name]}:{row.get(dim_map[dim_name])}")
+                        if dim_key_parts:
+                            dim_key = "|".join(dim_key_parts)
+                            if dim_key in comp_index:
+                                comp_row = comp_index[dim_key]
+                                # 提取指标值
+                                for metric_col in metric_name_map.keys():
+                                    if metric_col in row and metric_col in comp_row:
+                                        current_val = row.get(metric_col)
+                                        comp_val = comp_row.get(metric_col)
+                                        if current_val is not None and comp_val is not None:
+                                            try:
+                                                current_num = float(str(current_val).replace(",", ""))
+                                                comp_num = float(str(comp_val).replace(",", ""))
+                                                if comp_num != 0:
+                                                    change_rate = (current_num - comp_num) / comp_num * 100
+                                                    # 使用中文列名，根据 comparison_type 决定前缀
+                                                    if req.comparison_type == "同比":
+                                                        row["去年同期"] = comp_val
+                                                        row["同比变化率"] = round(change_rate, 2)
+                                                    else:
+                                                        row["上月同期"] = comp_val
+                                                        row["环比变化率"] = round(change_rate, 2)
+                                            except (ValueError, TypeError):
+                                                pass
+                                        break
+
+                    # 计算总体对比
+                    total_current = 0
+                    total_comp = 0
+                    metric_col_found = None
+                    for row in data_list:
+                        for metric_col in metric_name_map.keys():
+                            if metric_col in row:
+                                try:
+                                    total_current += float(str(row.get(metric_col, 0)).replace(",", ""))
+                                    metric_col_found = metric_col
+                                except (ValueError, TypeError):
+                                    pass
+                                break
+                        if metric_col_found:
+                            break
+
+                    for row in comp_data_list:
+                        for metric_col in metric_name_map.keys():
+                            if metric_col in row:
+                                try:
+                                    total_comp += float(str(row.get(metric_col, 0)).replace(",", ""))
+                                except (ValueError, TypeError):
+                                    pass
+                                break
+                        if metric_col_found:
+                            break
+
+                    comparison_result_data = {
+                        "comparison_type": req.comparison_type,
+                        "comparison_date": comparison_date,
+                        "current_total": total_current,
+                        "comparison_total": total_comp,
+                    }
+                    if total_comp != 0:
+                        total_change_rate = (total_current - total_comp) / total_comp * 100
+                        comparison_result_data["total_change_rate"] = round(total_change_rate, 2)
+                    logger.info(f"[drill_down] 对比结果: {comparison_result_data}")
+            except Exception as e:
+                logger.error(f"[drill_down] 对比计算失败: {e}")
+
         # 7. 获取剩余可下钻维度（排除已选的）
         remaining_dims = [
             {"dimension_name": cfg["dimension_name"], "column_name": cfg["column_name"]}
@@ -624,7 +908,28 @@ async def drill_down_question(req: DrillDownRequest):
         # 提取总数
         total = _extract_result_total(result)
 
-        return {
+        # 替换 result_data 中的列名为中文名称（维度名或指标名）
+        if data_list:
+            renamed_data_list = []
+            for row in data_list:
+                new_row = {}
+                for k, v in row.items():
+                    # 跳过对比相关字段（稍后单独处理）
+                    if k.endswith('_comparison_value') or k.endswith('_change_rate'):
+                        new_row[k] = v
+                    # 替换维度列名为中文维度名
+                    elif k in col_to_dim_name:
+                        new_row[col_to_dim_name[k]] = v
+                    # 替换指标列名为中文指标名
+                    elif k in metric_name_map:
+                        new_row[metric_name_map[k]] = v
+                    else:
+                        new_row[k] = v
+                renamed_data_list.append(new_row)
+            data_list = renamed_data_list
+
+        # 构建返回
+        response = {
             "session_id": req.session_id,
             "answer": answer,
             "sql": new_sql,
@@ -633,8 +938,14 @@ async def drill_down_question(req: DrillDownRequest):
             "result_data": data_list[:20] if data_list else None,
             "total": total,
             "page": req.page,
-            "page_size": page_size
+            "page_size": page_size,
+            "metric_code": req.metric_code
         }
+
+        if comparison_result_data:
+            response["comparison_result"] = comparison_result_data
+
+        return response
 
     except Exception as e:
         logger.error(f"下钻处理失败: {e}")

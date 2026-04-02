@@ -1443,6 +1443,224 @@ class ConversationNodes:
         # 没有 SQL 生成
         return {"skip_execution": True}
 
+    async def comparison_node(self, state: ConversationState) -> Dict[str, Any]:
+        """
+        对比计算节点 - 处理同比环比计算
+
+        当意图为 query_comparison 时：
+        1. 获取当前查询结果（当前周期值）
+        2. 根据对比类型和时间范围计算对比周期
+        3. 查询对比周期的值
+        4. 计算涨跌幅
+        """
+        # 只有 query_comparison 意图才需要对比计算
+        if state.current_intent != "query_comparison":
+            logger.info("[comparison] 非query_comparison意图，跳过")
+            return {"skip_comparison": True}
+
+        # 没有查询结果，跳过
+        if not state.sql_result or not state.sql_result.get("data"):
+            logger.info("[comparison] 无查询结果，跳过")
+            return {"skip_comparison": True}
+
+        # 获取当前查询结果的数值
+        current_value = self._extract_metric_value(state.sql_result)
+        logger.info(f"[comparison] current_value={current_value}")
+        if current_value is None:
+            logger.info("[comparison] 无法提取当前值，跳过")
+            return {"skip_comparison": True}
+
+        # 从用户消息中判断是对比类型
+        last_message = state.messages[-1].content if state.messages else ""
+        comparison_type = "环比" if "环比" in last_message else "同比"
+
+        # 从 time_info 中提取时间范围
+        time_info = state.entities.get("time_info", {})
+        time_range = state.entities.get("time_range", {})
+
+        # 优先用 time_info 的 start/end
+        if time_info:
+            start_date = time_info.get("start")
+            end_date = time_info.get("end")
+        elif time_range:
+            start_date = time_range.get("start")
+            end_date = time_range.get("end")
+        else:
+            start_date = None
+            end_date = None
+
+        logger.info(f"[comparison] time_info={time_info}, start_date={start_date}, end_date={end_date}")
+
+        if not start_date or not end_date:
+            logger.warning("[comparison] 无法从 time_info 提取时间范围，跳过对比计算")
+            result = {"skip_comparison": True, "reason": "无法提取时间范围"}
+            logger.info(f"[comparison] 返回: {result}")
+            return result
+
+        # 计算对比周期
+        import re
+        from datetime import datetime
+        try:
+            # 解析开始和结束日期
+            start_dt = datetime.strptime(start_date[:10], "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date[:10], "%Y-%m-%d")
+
+            if comparison_type == "环比":
+                # 环比：上月同日（保持日期天数一致）
+                if start_dt.month == 1:
+                    comp_start_year = start_dt.year - 1
+                    comp_start_month = 12
+                else:
+                    comp_start_year = start_dt.year
+                    comp_start_month = start_dt.month - 1
+
+                if end_dt.month == 1:
+                    comp_end_year = end_dt.year - 1
+                    comp_end_month = 12
+                else:
+                    comp_end_year = end_dt.year
+                    comp_end_month = end_dt.month - 1
+
+                comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
+                comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{end_dt.day:02d}"
+            else:
+                # 同比：去年同期
+                comp_start_year = start_dt.year - 1
+                comp_end_year = end_dt.year - 1
+                comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
+                comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{end_dt.day:02d}"
+        except Exception as e:
+            logger.error(f"[comparison] 日期计算失败: {str(e)}")
+            return {"skip_comparison": True}
+
+        logger.info(f"[comparison] comparison_type={comparison_type}, comparison_start={comparison_start}, comparison_end={comparison_end}")
+
+        # 构建对比SQL（替换时间条件）
+        original_sql = state.generated_sql
+        if not original_sql or original_sql == "METADATA_QUERY":
+            logger.info("[comparison] original_sql无效，跳过")
+            return {"skip_comparison": True}
+
+        # 替换开始日期 (处理 >= 和 = 两种格式)
+        # FDATE >= '2026-01-01' 或 FDATE = '2026-01-01'
+        comparison_sql = re.sub(
+            r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+            f"\\1 >= '{comparison_start}'",
+            original_sql,
+            flags=re.IGNORECASE
+        )
+        # 替换结束日期
+        comparison_sql = re.sub(
+            r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+            f"\\1 <= '{comparison_end}'",
+            comparison_sql,
+            flags=re.IGNORECASE
+        )
+
+        # 移除 LIMIT 和 OFFSET（用于对比查询）
+        comparison_sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', comparison_sql, flags=re.IGNORECASE)
+        comparison_sql = re.sub(r'\s+OFFSET\s+\d+', '', comparison_sql, flags=re.IGNORECASE)
+        logger.info(f"[comparison] 生成的对比SQL: {comparison_sql}")
+
+        try:
+            logger.info(f"[comparison] 对比SQL: {comparison_sql}")
+            # 执行对比查询
+            comparison_result = await self.sql_generator.execute(
+                sql=comparison_sql,
+                params=state.sql_params
+            )
+            logger.info(f"[comparison] 对比查询结果: {comparison_result}")
+
+            comparison_value = self._extract_metric_value(comparison_result)
+            logger.info(f"[comparison] 提取的对比值: {comparison_value}")
+
+            if comparison_value is not None and comparison_value != 0:
+                # 计算涨跌幅
+                change_rate = (current_value - comparison_value) / comparison_value * 100
+
+                state.comparison_result = {
+                    "current_value": current_value,
+                    "comparison_value": comparison_value,
+                    "comparison_date": f"{comparison_start} 至 {comparison_end}",
+                    "comparison_type": comparison_type,
+                    "change_rate": change_rate,
+                    "comparison_sql": comparison_sql,
+                }
+
+                self._add_thinking_step(state, "对比计算", "completed",
+                    f"当前值={current_value}，{comparison_type}={comparison_value}，"
+                    f"涨跌幅={change_rate:+.2f}%")
+
+                result = {"comparison_result": state.comparison_result}
+                logger.info(f"[comparison] 成功返回: {result}")
+                return result
+            else:
+                self._add_thinking_step(state, "对比计算", "completed", "对比数据为空")
+                logger.info("[comparison] 对比数据为空，跳过")
+                return {"skip_comparison": True}
+
+        except Exception as e:
+            logger.error(f"[comparison] 查询对比数据失败: {str(e)}")
+            self._add_thinking_step(state, "对比计算", "error", f"对比查询失败: {str(e)}")
+            logger.info(f"[comparison] 异常跳过: {str(e)}")
+            return {"skip_comparison": True}
+
+    def _extract_metric_value(self, sql_result: Dict) -> Optional[float]:
+        """从SQL查询结果中提取指标数值"""
+        if not sql_result:
+            return None
+
+        data = sql_result.get("data")
+        if not data:
+            return None
+
+        # 处理嵌套结构: {"data": {"count": 1, "data": [...]}}
+        # 外层 {"count": ..., "data": [...}} 包装，需要提取内层的 data
+        if isinstance(data, dict) and "data" in data:
+            inner_data = data["data"]
+            if isinstance(inner_data, list) and inner_data:
+                data = inner_data
+            elif isinstance(inner_data, dict):
+                # 内层也是包装结构，递归处理
+                return self._extract_metric_value({"data": inner_data})
+
+        # 判断 data 是列表还是单个字典
+        if isinstance(data, list):
+            if not data:
+                return None
+            row = data[0]
+        elif isinstance(data, dict):
+            row = data
+        else:
+            return None
+
+        # 尝试从不同可能的字段名提取值
+        value_fields = ["value", "metric_value", "total", "amount", "cnt", "count", "num", "page_views", "sessions_total"]
+        for field in value_fields:
+            # 不区分大小写匹配
+            for key in row.keys():
+                if key.lower() == field.lower() and row[key] is not None:
+                    try:
+                        val = row[key]
+                        if isinstance(val, str):
+                            val = val.replace(",", "").strip()
+                        return float(val)
+                    except (ValueError, TypeError):
+                        continue
+
+        # 如果都没找到，尝试取第一个数值类型的值
+        for key, val in row.items():
+            if isinstance(val, (int, float)):
+                return float(val)
+            # 处理字符串形式的数字
+            if isinstance(val, str):
+                try:
+                    return float(val.replace(",", "").strip())
+                except (ValueError, TypeError):
+                    continue
+
+        return None
+
     def response_node(self, state: ConversationState) -> Dict[str, Any]:
         """
         生成回答节点
@@ -1591,6 +1809,48 @@ class ConversationNodes:
                         metric_name=metric_name,
                         unit=unit,
                     )
+
+                    # 如果有对比计算结果，整合到主表格中展示
+                    comparison_result = getattr(state, 'comparison_result', None)
+                    if comparison_result:
+                        comp_type = comparison_result.get("comparison_type", "对比")
+                        comp_date = comparison_result.get("comparison_date", "")
+                        comp_value = comparison_result.get("comparison_value", 0)
+                        change_rate = comparison_result.get("change_rate", 0)
+                        current_value = comparison_result.get("current_value", 0)
+
+                        # 格式化数值
+                        def format_value(val, unit):
+                            if isinstance(val, (int, float)):
+                                if unit == "%":
+                                    return f"{val:.2f}%"
+                                elif unit in ("元", "万美元", "亿美元"):
+                                    return f"¥{val:,.2f}"
+                                else:
+                                    return f"{val:,.2f}"
+                            return str(val)
+
+                        current_str = format_value(current_value, unit)
+                        comp_str = format_value(comp_value, unit)
+
+                        if comp_type == "同比":
+                            comp_period = f"去年同期（{comp_date[:7]}）" if comp_date else "去年同期"
+                        else:
+                            comp_period = f"上月同期（{comp_date[:7]}）" if comp_date else "上月同期"
+
+                        change_emoji = "↑" if change_rate > 0 else ("↓" if change_rate < 0 else "→")
+                        change_color = "上涨" if change_rate > 0 else ("下跌" if change_rate < 0 else "持平")
+
+                        # 整合到统一表格：当期值、对比值、变化率在一张表
+                        answer += f"\n\n📊 **对比结果**\n"
+                        answer += f"| 指标 | 数值 |\n"
+                        answer += f"|------|------|\n"
+                        answer += f"| {metric_name}（当期） | {current_str} |\n"
+                        answer += f"| {comp_period} | {comp_str} |\n"
+                        answer += f"| {comp_type}变化 | {change_emoji} {abs(change_rate):.2f}%（{change_color}）|\n"
+                        comparison_sql = comparison_result.get("comparison_sql", "N/A")
+                        answer += f"\n📋 **对比SQL**\n```sql\n{comparison_sql}\n```"
+
                     # 保存当前指标/时间到上下文
                     self._update_context(state, state.entities)
                     return {
@@ -1598,6 +1858,7 @@ class ConversationNodes:
                         "suggest_questions": self._generate_suggestions(state),
                         "needs_clarification": False,
                         "result_data": data,
+                        "comparison_result": getattr(state, 'comparison_result', None),
                     }
 
         # 没有结果
