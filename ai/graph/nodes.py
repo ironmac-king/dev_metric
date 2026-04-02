@@ -1877,11 +1877,15 @@ class ConversationNodes:
 
                     # 保存当前指标/时间到上下文
                     self._update_context(state, state.entities)
+                    # 处理嵌套格式，确保 result_data 是 list
+                    result_data = data
+                    if isinstance(data, dict) and "data" in data:
+                        result_data = data["data"]
                     return {
                         "answer": answer,
                         "suggest_questions": self._generate_suggestions(state),
                         "needs_clarification": False,
-                        "result_data": data,
+                        "result_data": result_data,
                         "comparison_result": getattr(state, 'comparison_result', None),
                     }
 
