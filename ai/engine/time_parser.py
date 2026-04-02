@@ -52,7 +52,12 @@ class TimeParser:
         if result:
             return result
 
-        # 3. 绝对月份: "7月"、"12月" (但不是日期范围的一部分)
+        # 3. 具体日期: "4月2日"、"7月15日" (在月份之前检查，避免被"4月"匹配)
+        result = self._parse_specific_date(text)
+        if result:
+            return result
+
+        # 4. 绝对月份: "7月"、"12月" (但不是日期范围的一部分)
         result = self._parse_month_only(text)
         if result:
             return result
@@ -223,6 +228,29 @@ class TimeParser:
                     "original": text,
                     "has_explicit_year": False,
                     "time_key": f"{year}-{start_month:02d}_{year}-{end_month:02d}"
+                }
+        return None
+
+    def _parse_specific_date(self, text: str) -> Optional[Dict[str, Any]]:
+        """解析具体日期: 4月2日、7月15日（不是日期范围）"""
+        # 匹配 "4月2日" 格式，但不匹配范围（如 "7月1日-7月15日"）
+        # 负向前瞻：确保后面没有 "日-" 或 "日到"
+        match = re.search(r"(\d{1,2})月(\d{1,2})日(?![-到])", text)
+        if match:
+            month = int(match.group(1))
+            day = int(match.group(2))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                year = self._infer_year(text)
+                from calendar import monthrange
+                _, last_day = monthrange(year, month)
+                day = min(day, last_day)  # 避免 2 月 30 号等问题
+                return {
+                    "type": "date_range",  # 用 date_range 类型表示具体日期
+                    "start": f"{year}-{month:02d}-{day:02d}",
+                    "end": f"{year}-{month:02d}-{day:02d}",
+                    "original": text,
+                    "has_explicit_year": False,
+                    "time_key": f"{year}-{month:02d}-{day:02d}"
                 }
         return None
 

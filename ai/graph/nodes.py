@@ -3,6 +3,7 @@ LangGraph 对话节点 - 优化版
 """
 import re
 import os
+import calendar
 from typing import Dict, Any, Optional, List
 from ai.graph.state import ConversationState, IntentResult, SQLGenerationResult, ClarificationDecision, ThinkingStep, ConversationContext
 from ai.engine.rule_engine import RuleEngine
@@ -66,8 +67,7 @@ class ConversationNodes:
             intent_map = {
                 "指标值": "query_value", "数值": "query_value", "值": "query_value",
                 "趋势": "query_trend", "走势": "query_trend",
-                "对比": "query_comparison", "同比": "query_comparison", "环比": "query_comparison",
-                "比较": "query_comparison",
+                "对比": "query_comparison", "比较": "query_comparison",
             }
             matched_intent = None
             for keyword, intent in intent_map.items():
@@ -75,11 +75,42 @@ class ConversationNodes:
                     matched_intent = intent
                     break
 
-            # 场景B：用户回复很短但有历史上下文，默认恢复 query_value
+            # 场景B：用户回复很短但有历史上下文
             if not matched_intent and len(last_message.strip()) <= 4:
-                matched_intent = "query_value"
+                # 用户说"环比呢"/"同比呢"，用 LLM 补齐为完整问题
+                if last_message.strip() in ["环比呢", "同比呢", "环比", "同比"]:
+                    ctx = getattr(state, 'conversation_context', None)
+                    if ctx and ctx.current_metric_name:
+                        # 用 LLM 补齐短文本
+                        comparison_type = "环比" if "环比" in last_message else "同比"
+                        expanded = self.llm_engine.expand_followup_question(
+                            last_message, ctx.current_metric_name, ctx.current_time_expr, comparison_type
+                        )
+                        logger.info(f"[intent_node] LLM补齐: '{last_message}' → '{expanded}'")
+                        # 更新用户消息
+                        state.messages[-1].content = expanded
+                        self._add_thinking_step(state, "意图理解", "completed",
+                            f"LLM补齐追问：'{expanded}'")
+                        # 从 conversation_context 恢复指标和时间上下文
+                        restored_entities = {
+                            "metric_name": ctx.current_metric_name,
+                            "metric_code": ctx.current_metric_code,
+                        }
+                        if ctx.current_time_expr:
+                            restored_entities["time_range"] = ctx.current_time_expr
+                        state.entities.update(restored_entities)
+                        # 补齐后直接返回，让后续流程处理完整问题
+                        return {
+                            "current_intent": "query_comparison",
+                            "entities": restored_entities
+                        }
+                    else:
+                        matched_intent = "query_value"
+                else:
+                    matched_intent = "query_value"
 
-            if matched_intent:
+            # 如果 matched_intent 已确定（非短文本追问），走原有逻辑
+            if matched_intent and not (len(last_message.strip()) <= 4 and last_message.strip() in ["环比呢", "同比呢", "环比", "同比"]):
                 state.needs_clarification = False
                 state.clarification_type = None
                 state.clarification_message = None
@@ -279,9 +310,13 @@ class ConversationNodes:
             # 检查用户是否明确指定了新的时间
             last_message = state.messages[-1].content if state.messages else ""
             has_explicit_time = any(kw in last_message for kw in ["昨天", "今日", "本周", "本月", "去年"])
+            # 特殊处理：环比/同比追问应该继承时间，保持和上轮一样的时间周期
+            is_comparison_followup = any(kw in last_message for kw in ["环比呢", "同比呢", "环比", "同比"])
             if not has_explicit_time:
                 entities.setdefault("time_range", ctx.current_time_expr)
                 logger.debug(f"[entity_node] 继承上轮时间: {ctx.current_time_expr}")
+                if is_comparison_followup:
+                    logger.debug(f"[entity_node] 环比/同比追问，继承时间用于环比计算")
 
         # ========== 继承上轮的维度 ==========
         if ctx:
@@ -319,7 +354,8 @@ class ConversationNodes:
         # 新指标查询的特征：包含指标相关的词（如"数"、"量"、"用户"等）
         # 如果是新的指标查询，即使 metric_id 已设置，也要清除（因为这是不同的指标）
         if not term_links:
-            follow_up_only_indicators = ["定义", "口径", "规则", "怎么", "如何"]
+            follow_up_only_indicators = ["定义", "口径", "规则", "怎么", "如何", "环比", "同比"]
+            # 注意：环比/同比是意图词，不是指标名，不要加入 contains_metric_reference
             contains_metric_reference = any(word in last_message for word in ["数", "量", "额", "率", "次数", "人数", "销售额", "订单", "转化", "访客", "用户"])
 
             # 只有当查询只包含 follow-up 指示词，且不包含指标名时，才保留继承的指标
@@ -1505,6 +1541,10 @@ class ConversationNodes:
             start_dt = datetime.strptime(start_date[:10], "%Y-%m-%d")
             end_dt = datetime.strptime(end_date[:10], "%Y-%m-%d")
 
+            # 判断原始时间范围是否是完整月份（结束日期是该月最后一天）
+            is_full_month = end_dt.day == calendar.monthrange(end_dt.year, end_dt.month)[1]
+            logger.info(f"[comparison] is_full_month={is_full_month} (end_dt.day={end_dt.day})")
+
             if comparison_type == "环比":
                 # 环比：上月同日（保持日期天数一致）
                 if start_dt.month == 1:
@@ -1521,14 +1561,28 @@ class ConversationNodes:
                     comp_end_year = end_dt.year
                     comp_end_month = end_dt.month - 1
 
-                comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
-                comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{end_dt.day:02d}"
+                if is_full_month:
+                    # 整月查询：起始日期保持，结束日期用对比月月末
+                    comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
+                    comp_end_day = calendar.monthrange(comp_end_year, comp_end_month)[1]
+                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{comp_end_day:02d}"
+                else:
+                    # 非整月（如4月2日）：保持原始日期不变
+                    comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
+                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{end_dt.day:02d}"
             else:
                 # 同比：去年同期
                 comp_start_year = start_dt.year - 1
                 comp_end_year = end_dt.year - 1
-                comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
-                comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{end_dt.day:02d}"
+                if is_full_month:
+                    # 整月查询：起始日期保持，结束日期用对比月月末
+                    comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
+                    comp_end_day = calendar.monthrange(comp_end_year, end_dt.month)[1]
+                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{comp_end_day:02d}"
+                else:
+                    # 非整月（如4月2日）：保持原始日期不变
+                    comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
+                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{end_dt.day:02d}"
         except Exception as e:
             logger.error(f"[comparison] 日期计算失败: {str(e)}")
             return {"skip_comparison": True}
@@ -1543,16 +1597,17 @@ class ConversationNodes:
 
         # 替换开始日期 (处理 >= 和 = 两种格式)
         # FDATE >= '2026-01-01' 或 FDATE = '2026-01-01'
+        # 注意：使用 lambda 避免 f-string 中 \1 的转义问题
         comparison_sql = re.sub(
             r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
-            f"\\1 >= '{comparison_start}'",
+            lambda m: f"{m.group(1)} >= '{comparison_start}'",
             original_sql,
             flags=re.IGNORECASE
         )
         # 替换结束日期
         comparison_sql = re.sub(
             r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
-            f"\\1 <= '{comparison_end}'",
+            lambda m: f"{m.group(1)} <= '{comparison_end}'",
             comparison_sql,
             flags=re.IGNORECASE
         )

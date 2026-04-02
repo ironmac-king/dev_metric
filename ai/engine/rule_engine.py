@@ -446,7 +446,8 @@ class RuleEngine:
                 # 检查是否是明确的 follow-up 查询（只有元数据相关的词，没有指标名）
                 # 真正的 follow-up 示例："技术口径呢"、"业务定义呢"、"怎么计算的"
                 # 不是 follow-up 的示例："用户数呢"、"访客数是多少"（这些是新指标查询）
-                follow_up_only_indicators = ["定义", "口径", "规则", "怎么", "如何"]
+                follow_up_only_indicators = ["定义", "口径", "规则", "怎么", "如何", "环比", "同比"]
+                # 注意：环比/同比是意图词，不是指标名，不要加入 contains_metric_reference
                 contains_metric_reference = any(word in text for word in ["数", "量", "额", "率", "次数", "人数", "销售额", "订单", "转化", "访客", "用户"])
 
                 # 只有当查询只包含 follow-up 指示词，且不包含指标相关词汇时，才继承

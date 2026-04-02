@@ -186,6 +186,69 @@ class LLMEngine:
                 entities={}
             )
 
+    def expand_followup_question(self, text: str, inherited_metric: str, inherited_time: str = None, comparison_type: str = None) -> str:
+        """
+        将短文本追问补齐为完整问题
+
+        Args:
+            text: 用户输入的短文本（如"环比呢"）
+            inherited_metric: 上轮对话中的指标名（如"页面访问量"）
+            inherited_time: 上轮对话中的时间表达（如"上月"、"本月"等）
+            comparison_type: 对比类型（"环比"或"同比"），如果为None则从text推断
+
+        Returns:
+            补齐后的完整问题
+        """
+        # 从text推断对比类型
+        if comparison_type is None:
+            if "环比" in text:
+                comparison_type = "环比"
+            elif "同比" in text:
+                comparison_type = "同比"
+            else:
+                comparison_type = "环比"  # 默认
+
+        time_hint = f"上轮时间是「{inherited_time}」" if inherited_time else "上轮时间是「上月」"
+
+        prompt = f"""你是一个业务指标查询助手。用户在进行多轮对话。
+
+当前轮用户说：「{text}」
+上轮查询的指标是：「{inherited_metric}」
+{time_hint}
+
+请将用户的短文本追问补齐为完整的问题描述。
+
+规则：
+1. 直接返回补齐后的问题，不要解释
+2. 保持原有的对比类型（环比/同比）
+3. 时间必须继承上轮的时间，不能自己推断新时间
+4. 补齐后的问题应该像用户直接说出来的一样自然
+
+示例：
+- 上轮"上月销量同比是多少"，本轮"环比呢" → "上月销量环比是多少"
+- 上轮"本月广告花费"，本轮"同比呢" → "本月广告花费同比是多少"
+- 上轮"上周转化率"，本轮"趋势呢" → "上周转化率趋势是什么"
+
+直接返回补齐后的问题："""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=100,
+            )
+            expanded = response.choices[0].message.content.strip()
+            logger.info(f"[expand_followup] '{text}' + '{inherited_metric}' → '{expanded}'")
+            return expanded
+        except Exception as e:
+            logger.error(f"[expand_followup] 补齐失败: {e}")
+            # 降级处理：直接拼接
+            if comparison_type == "环比":
+                return f"上月{inherited_metric}环比是多少"
+            else:
+                return f"上月{inherited_metric}同比是多少"
+
     def validate_and_correct_intent(
         self,
         text: str,
