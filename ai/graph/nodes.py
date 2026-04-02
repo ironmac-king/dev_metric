@@ -10,6 +10,7 @@ from ai.engine.rule_engine import RuleEngine
 from ai.engine.llm import LLMEngine
 from ai.sql_gen.generator import SQLGenerator
 from ai.client.metric_client import MetricClient
+from ai.client.dim_value_client import DimValueClient
 from ai.config.logging_config import get_logger
 
 logger = get_logger("ai.nodes")
@@ -288,6 +289,61 @@ class ConversationNodes:
 
         state.conversation_context = ctx
 
+    def _extract_potential_dim_values(self, text: str, entities: Dict) -> List[str]:
+        """
+        从用户输入中提取可能是维度值的词
+        排除：指标名、时间、已识别的维度
+        策略：优先提取完整的维度值（4-8字），避免将 "笔记本支架" 拆成 "笔记本"
+        """
+        import re
+        metric_name = entities.get("metric_name", "") or ""
+
+        # 使用重叠匹配来提取所有可能的维度值
+        # (?=...) 是 lookahead，不消耗字符，所以可以重叠匹配
+        results = []
+
+        # 提取4-8字的完整维度值（更可能精确匹配）
+        for length in [8, 7, 6, 5, 4]:
+            # 使用 lookahead 实现重叠匹配
+            pattern = re.compile(rf'(?=[\u4e00-\u9fa5]{{{length}}})[\u4e00-\u9fa5]')
+            for match in pattern.finditer(text):
+                start, _ = match.span()
+                segment = text[start:start + length]
+                # 跳过时间词和指标名
+                if self._is_time_word(segment):
+                    continue
+                if segment in metric_name or metric_name in segment:
+                    continue
+                if segment not in results:  # 避免重复
+                    results.append(segment)
+
+        # 如果没有找到4-8字的词，尝试提取2-3字的短词
+        if not results:
+            for length in [3, 2]:
+                pattern = re.compile(rf'(?=[\u4e00-\u9fa5]{{{length}}})[\u4e00-\u9fa5]')
+                for match in pattern.finditer(text):
+                    start, _ = match.span()
+                    segment = text[start:start + length]
+                    if self._is_time_word(segment):
+                        continue
+                    if segment in metric_name or metric_name in segment:
+                        continue
+                    if segment not in results:
+                        results.append(segment)
+
+        return results
+
+    def _is_time_word(self, text: str) -> bool:
+        """判断是否是完全由时间词组成"""
+        time_words = ["昨天", "今天", "明天", "上周", "本周", "下周", "上月", "本月", "下月",
+                      "去年", "今年", "明年", "前天", "后天", "日前", "近日",
+                      "一号", "二号", "三号", "四号", "五号", "六号", "七号", "八号", "九号", "十号",
+                      "1号", "2号", "3号", "4号", "5号", "6号", "7号", "8号", "9号", "10号",
+                      "11号", "12号", "13号", "14号", "15号", "16号", "17号", "18号", "19号", "20号",
+                      "21号", "22号", "23号", "24号", "25号", "26号", "27号", "28号", "29号", "30号", "31号"]
+        # 只检查片段是否完全等于时间词（不是包含关系）
+        return text in time_words
+
     def entity_node(self, state: ConversationState) -> Dict[str, Any]:
         """
         实体链接节点 - 增强版
@@ -343,6 +399,23 @@ class ConversationNodes:
                 state.clarification_type = None  # 清除追问类型
                 state.clarification_message = None  # 清除追问消息
                 user_just_selected_metric = True  # 标记用户刚选择了指标
+
+        # 检查是否是回应上轮的 dimension_value 追问（用户选择维度值）
+        if getattr(state, 'clarification_type', None) == 'dimension_value' and hasattr(state, 'dimension_value_candidates'):
+            # 用户在选择维度值
+            candidates = state.dimension_value_candidates
+            logger.debug(f"[entity_node] dimension_value_candidates: {candidates}")
+            chosen_dim = self._parse_dimension_value_choice(last_message, candidates)
+            logger.debug(f"[entity_node] _parse_dimension_value_choice结果: {chosen_dim}")
+            if chosen_dim:
+                state.selected_dimension_field = chosen_dim["dimension_field"]
+                state.selected_dimension_value = chosen_dim["dimension_value"]
+                entities[chosen_dim["dimension_field"]] = chosen_dim["dimension_value"]
+                logger.info(f"[entity_node] 用户选择了维度值: {chosen_dim['dimension_field']}={chosen_dim['dimension_value']}")
+                state.dimension_value_candidates = None  # 清除候选
+                state.needs_clarification = False  # 清除追问状态
+                state.clarification_type = None  # 清除追问类型
+                state.clarification_message = None  # 清除追问消息
 
         # 链接业务术语到指标
         term_links = self.rule_engine.link_business_terms_enhanced(
@@ -513,6 +586,28 @@ class ConversationNodes:
         if 'llm_result' in dir() and llm_result and llm_result.get("metric_name"):
             entity_content += "（LLM辅助识别）"
         self._add_thinking_step(state, "实体识别", "completed", entity_content)
+
+        # ========== 维度值识别 ==========
+        # 从用户消息中提取可能的维度值
+        dim_value_client = DimValueClient()
+        unmatched_texts = self._extract_potential_dim_values(last_message, entities)
+        logger.info(f"[entity_node] 维度值提取结果: unmatched_texts={unmatched_texts}, metric_name={entities.get('metric_name', '')}")
+
+        for text in unmatched_texts:
+            candidates = dim_value_client.search_dimension_values(text, limit=3)
+            if candidates:
+                if len(candidates) == 1:
+                    # 唯一匹配，直接使用
+                    matched = candidates[0]
+                    entities[matched["dimension_field"]] = matched["dimension_value"]
+                    logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']}")
+                else:
+                    # 多个候选，需要用户确认
+                    state.needs_clarification = True
+                    state.clarification_type = "dimension_value"
+                    state.clarification_message = f"您说的是哪个维度：{[c['dimension_value'] for c in candidates]}？"
+                    state.dimension_value_candidates = candidates  # 保存候选列表供后续解析
+                    return {"entities": entities}
 
         return {"entities": entities}
 
@@ -1063,6 +1158,30 @@ class ConversationNodes:
 
         return None
 
+    def _parse_dimension_value_choice(self, user_input: str, candidates: List[Dict]) -> Optional[Dict[str, Any]]:
+        """
+        解析用户对 dimension_value 追问的选择
+        用户可以说数字（如"1"、"2"）或直接说维度值名称
+        """
+        import re
+        user_input = user_input.strip()
+
+        # 尝试数字选择（如 "1", "2"）
+        num_match = re.match(r'^(\d+)$', user_input)
+        if num_match:
+            idx = int(num_match.group(1)) - 1
+            if 0 <= idx < len(candidates):
+                return candidates[idx]
+
+        # 尝试维度值名称匹配
+        user_lower = user_input.lower()
+        for c in candidates:
+            dim_value = (c.get("dimension_value") or "").lower()
+            if dim_value == user_lower or user_lower in dim_value:
+                return c
+
+        return None
+
     # 维度配置缓存（避免每次查询都调 API）
     _table_dimensions_cache: Dict[str, Dict[str, Dict]] = {}
 
@@ -1124,6 +1243,20 @@ class ConversationNodes:
         if entities.get("device"):
             dimensions["device"] = entities.get("device")
 
+        # 品类维度 (GROUP_1, GROUP_2, GROUP_3)
+        if entities.get("GROUP_1"):
+            dimensions["GROUP_1"] = entities.get("GROUP_1")
+        if entities.get("GROUP_2"):
+            dimensions["GROUP_2"] = entities.get("GROUP_2")
+        if entities.get("GROUP_3"):
+            dimensions["GROUP_3"] = entities.get("GROUP_3")
+
+        # SKU, ASIN 等维度
+        if entities.get("SKU"):
+            dimensions["SKU"] = entities.get("SKU")
+        if entities.get("ASIN"):
+            dimensions["ASIN"] = entities.get("ASIN")
+
         # 时间维度（日、月、年）- 用于 GROUP BY
         for dim_key in ["日", "月", "年", "天", "周"]:
             if entities.get(dim_key):
@@ -1142,9 +1275,12 @@ class ConversationNodes:
             return True, None
 
         invalid_dims = []
+        # 品类维度（GROUP_1/2/3, SKU, ASIN）来自 StarRocks dim_value_mapping，不在此验证
+        skip_validation_keys = ["GROUP_1", "GROUP_2", "GROUP_3", "SKU", "ASIN", "日", "月", "年", "天", "周"]
+
         for dim_key, dim_value in dimensions.items():
-            # 跳过非维度参数（如时间维度）
-            if dim_key in ["日", "月", "年", "天", "周"]:
+            # 跳过非维度参数（如时间维度和品类维度）
+            if dim_key in skip_validation_keys:
                 continue
             if not self._is_dimension_registered(dim_key, dim_value):
                 invalid_dims.append(f"{dim_key}={dim_value}")
@@ -1932,6 +2068,16 @@ class ConversationNodes:
 
                     # 保存当前指标/时间到上下文
                     self._update_context(state, state.entities)
+
+                    # 用户选择了某个维度值后，更新频次
+                    if getattr(state, 'selected_dimension_field', None) and getattr(state, 'selected_dimension_value', None):
+                        dim_value_client = DimValueClient()
+                        dim_value_client.increment_frequency(
+                            state.selected_dimension_field,
+                            state.selected_dimension_value
+                        )
+                        logger.info(f"[response_node] 更新维度值频次: {state.selected_dimension_field}={state.selected_dimension_value}")
+
                     # 处理嵌套格式，确保 result_data 是 list
                     result_data = data
                     if isinstance(data, dict) and "data" in data:

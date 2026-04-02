@@ -207,6 +207,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			prompt.POST("/generate", handler.GeneratePromptConfig) // AI 生成 Prompt
 		}
 
+		// 维度值搜索（供 AI 服务调用）
+		dimensionValues := v1.Group("/dimension-values")
+		{
+			dimensionValues.GET("/search", handler.SearchDimensionValues)
+			dimensionValues.POST("/frequency", handler.IncrementFrequency)
+		}
+
 		// 认证
 		auth := v1.Group("/auth")
 		{

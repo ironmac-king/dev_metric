@@ -69,6 +69,10 @@ class ConversationState(BaseModel):
     conversation_context: Optional[ConversationContext] = None  # 对话上下文
     # ========== 对比计算结果（同比环比）==========
     comparison_result: Optional[Dict[str, Any]] = None  # 对比计算结果
+    # ========== 维度值频次学习 ==========
+    selected_dimension_field: Optional[str] = None  # 用户选择的维度字段
+    selected_dimension_value: Optional[str] = None  # 用户选择的维度值
+    dimension_value_candidates: Optional[List[Dict[str, Any]]] = None  # 维度值候选列表（用于追问选择）
 
 
 class IntentResult(BaseModel):

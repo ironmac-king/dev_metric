@@ -446,22 +446,47 @@
 
       <!-- 输入区域 -->
       <div class="chat-input-area">
-        <div class="input-wrapper">
+        <div class="input-wrapper relative">
           <el-input
-            v-model="inputText"
+            v-model="question"
             placeholder="输入您的问题..."
             @keyup.enter="handleSend"
+            @input="onInput"
+            @keydown.up.prevent="navigateUp"
+            @keydown.down.prevent="navigateDown"
+            @keydown.enter.prevent="selectCurrent"
+            @keydown.esc="closeSuggestions"
             :disabled="loading"
             resize="none"
             type="textarea"
             autosize
             class="chat-input"
           />
-          <button class="send-btn" @click="handleSend" :disabled="loading || !inputText.trim()">
+          <button class="send-btn" @click="handleSend" :disabled="loading || !question.trim()">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
               <path d="M3 9L15 9M15 9L10 4M15 9L10 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </button>
+
+          <!-- 候选下拉列表 -->
+          <div
+            v-if="showSuggestions && suggestions.length"
+            class="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-auto"
+          >
+            <div
+              v-for="(item, idx) in suggestions"
+              :key="item.dimension_value"
+              :class="[
+                'px-4 py-2 cursor-pointer transition-colors duration-200',
+                'hover:bg-gray-50',
+                idx === selectedIndex ? 'bg-blue-50 text-blue-600' : ''
+              ]"
+              @click="selectSuggestion(item)"
+            >
+              <span class="font-medium">{{ item.dimension_value }}</span>
+              <span class="ml-2 text-xs text-gray-400">[{{ item.dimension_field }}]</span>
+            </div>
+          </div>
         </div>
         <div class="input-hint">
           按 Enter 发送，Shift + Enter 换行
@@ -474,7 +499,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { askAPI } from '../api'
@@ -484,7 +509,7 @@ import AskSessionCard from './components/AskSessionCard.vue'
 
 const route = useRoute()
 
-const inputText = ref('')
+const question = ref('')
 const messages = ref([])
 const loading = ref(false)
 const sessionId = ref(localStorage.getItem('ask_session_id') || '')
@@ -500,6 +525,12 @@ const editingContent = ref('')
 
 // 下钻相关
 const selectedDims = ref({})  // { messageIndex: ['维度1', '维度2'] }
+
+// Type-ahead 相关
+const suggestions = ref<Array<{dimension_field: string, dimension_value: string}>>([])
+const selectedIndex = ref(-1)
+const showSuggestions = ref(false)
+let debounceTimer
 const currentMetricCode = ref('')
 const currentSQL = ref('')
 const currentGroupBy = ref('')
@@ -611,7 +642,7 @@ onMounted(() => {
   const sessionParam = route.query.session_id
 
   if (questionParam && typeof questionParam === 'string') {
-    inputText.value = questionParam
+    question.value = questionParam
     setTimeout(() => {
       handleSend()
     }, 100)
@@ -791,16 +822,16 @@ async function deleteSession(id) {
 }
 
 async function handleSend() {
-  if (!inputText.value.trim() || loading.value) return
+  if (!question.value.trim() || loading.value) return
 
   // 清空下钻历史
   drillHistory.value = []
-  const question = inputText.value.trim()
-  inputText.value = ''
+  const questionText = question.value.trim()
+  question.value = ''
 
   messages.value.push({
     role: 'user',
-    content: question,
+    content: questionText,
     created_at: new Date().toISOString(),
     thinking_expanded: true,
     thinking_steps: []
@@ -811,7 +842,7 @@ async function handleSend() {
 
   try {
     const res = await askAPI.ask({
-      question,
+      question: questionText,
       session_id: sessionId.value || undefined
     })
 
@@ -876,7 +907,7 @@ function extractMetricCode(data) {
 }
 
 function handleSuggest(text) {
-  inputText.value = text
+  question.value = text
   handleSend()
 }
 
@@ -884,8 +915,8 @@ function handleSuggest(text) {
 function selectMetricCandidate(idx, metric) {
   selectedCandidateIdx.value = idx
   // 用「指标名（编号）」作为新问题发送
-  const question = `${metric.name || metric.metric_name}（${metric.metric_code}）`
-  inputText.value = question
+  const metricQuestion = `${metric.name || metric.metric_name}（${metric.metric_code}）`
+  question.value = metricQuestion
   handleSend()
 }
 
@@ -1223,6 +1254,69 @@ async function handleClearContext() {
     localStorage.removeItem('ask_session_id')
     ElMessage.success('上下文已清空')
   } catch (e) {}
+}
+
+// ==================== Type-ahead 相关方法 ====================
+function onInput() {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(fetchSuggestions, 300)
+}
+
+async function fetchSuggestions() {
+  const text = question.value
+  // 提取可能的维度值片段（连续中文字符 ≥ 2）
+  const match = text.match(/[\u4e00-\u9fa5]{2,}/g)
+  if (!match || match.length === 0) {
+    closeSuggestions()
+    return
+  }
+
+  // 取最后一个匹配词作为查询词
+  const queryText = match[match.length - 1]
+  if (queryText.length < 2) {
+    closeSuggestions()
+    return
+  }
+
+  try {
+    const res = await fetch(`/api/v1/dimension-values/search?query=${encodeURIComponent(queryText)}&limit=5`)
+    const data = await res.json()
+    if (data.code === 0 && data.data) {
+      suggestions.value = data.data
+      showSuggestions.value = suggestions.value.length > 0
+      selectedIndex.value = suggestions.value.length > 0 ? 0 : -1
+    }
+  } catch (e) {
+    console.error('获取维度候选失败', e)
+    closeSuggestions()
+  }
+}
+
+function navigateUp() {
+  if (selectedIndex.value > 0) selectedIndex.value--
+}
+
+function navigateDown() {
+  if (selectedIndex.value < suggestions.value.length - 1) selectedIndex.value++
+}
+
+function selectCurrent() {
+  if (selectedIndex.value >= 0 && suggestions.value[selectedIndex.value]) {
+    selectSuggestion(suggestions.value[selectedIndex.value])
+  }
+}
+
+function selectSuggestion(item) {
+  // 替换输入框中的候选词
+  const text = question.value
+  // 找到最后一个连续中文字符并替换
+  question.value = text.replace(/[\u4e00-\u9fa5]{2,}$/, item.dimension_value)
+  closeSuggestions()
+}
+
+function closeSuggestions() {
+  showSuggestions.value = false
+  selectedIndex.value = -1
 }
 </script>
 
