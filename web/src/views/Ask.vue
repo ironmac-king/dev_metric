@@ -23,6 +23,7 @@
           :is-active="sessionId === (session.session_id || session.id)"
           @click="loadSession(session.session_id || session.id)"
           @star="toggleStarSession(session)"
+          @delete="deleteSession(session.session_id || session.id)"
         />
 
         <div v-if="!sessionHistory.length" class="empty-sessions">
@@ -773,11 +774,11 @@ async function deleteSession(id) {
     })
     await askAPI.clearSession(id)
     // 删除成功后，直接从本地列表中移除
-    const idx = sessionHistory.value.findIndex(s => s.id === id)
+    const idx = sessionHistory.value.findIndex(s => (s.session_id || s.id) === id)
     if (idx !== -1) {
       sessionHistory.value.splice(idx, 1)
     }
-    if (sessionId.value === id) {
+    if ((sessionId.value || '').toString() === id.toString()) {
       await createNewSession()
     }
     ElMessage.success('删除成功')

@@ -137,8 +137,9 @@ func ClearSession(c *gin.Context) {
 		return
 	}
 
-	// 调用 Python AI 服务（session_id 作为 query parameter）
-	resp, err := http.Get(fmt.Sprintf("http://localhost:8081/api/v1/ask/clear?session_id=%s", req.SessionID))
+	// 调用 Python AI 服务
+	pythonURL := fmt.Sprintf("http://localhost:8081/api/v1/ask/clear?session_id=%s", req.SessionID)
+	resp, err := http.Post(pythonURL, "application/json", nil)
 	if err != nil {
 		response.Error(c, response.CodeInternalError, "AI 服务调用失败")
 		return
