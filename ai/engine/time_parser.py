@@ -149,11 +149,8 @@ class TimeParser:
 
         year = self._infer_year(text)
 
-        # 检查是否有"去年"、"今年"等修饰
-        if "去年" in text or "上年" in text:
-            year -= 1
-        elif "明年" in text:
-            year += 1
+        # 注意：_infer_year 已经处理了"去年"/"今年"等修饰词的年份计算
+        # 这里不需要再调整 year，直接使用 _infer_year 的返回值即可
 
         if "上半年" in text:
             from calendar import monthrange
@@ -184,7 +181,7 @@ class TimeParser:
         return None
 
     def _parse_date_range(self, text: str) -> Optional[Dict[str, Any]]:
-        """解析日期范围: 7月1日-7月15日"""
+        """解析日期范围: 7月1日-7月15日 或 7月至9月"""
         # 匹配 "7月1日-7月15日" 或 "7月1-15日"
         # 正则: 第一个日期(月、日) - 第二个日期(月、日)
         match = re.search(r"(\d{1,2})月(\d{1,2})日?[-到](\d{1,2})月(\d{1,2})日?", text)
@@ -208,6 +205,25 @@ class TimeParser:
                 "has_explicit_year": False,
                 "time_key": f"{year}-{start_month:02d}-{start_day:02d}_{year}-{end_month:02d}-{end_day:02d}"
             }
+
+        # 匹配月份范围: "7月至9月" 或 "7月到9月"
+        match = re.search(r"(\d{1,2})月[-到](\d{1,2})月", text)
+        if match:
+            start_month, end_month = int(match.group(1)), int(match.group(2))
+            if 1 <= start_month <= 12 and 1 <= end_month <= 12:
+                year = self._infer_year(text)
+                from calendar import monthrange
+                _, start_last = monthrange(year, start_month)
+                _, end_last = monthrange(year, end_month)
+
+                return {
+                    "type": "date_range",
+                    "start": f"{year}-{start_month:02d}-01",
+                    "end": f"{year}-{end_month:02d}-{end_last}",
+                    "original": text,
+                    "has_explicit_year": False,
+                    "time_key": f"{year}-{start_month:02d}_{year}-{end_month:02d}"
+                }
         return None
 
     def _chinese_to_int(self, s: str) -> Optional[float]:
@@ -477,6 +493,50 @@ class TimeParser:
             return f"请问您说的是{current_year}年{month}月还是{last_year}年{month}月？"
 
         return "请问您想查询哪个时间段？"
+
+    def get_comparison_period(self, comparison_type: str = "环比") -> Dict[str, Any]:
+        """
+        计算对比周期（T+1数据逻辑）
+
+        参数:
+            comparison_type: "环比" 或 "同比"
+
+        返回:
+            {
+                "current_date": "2026-04-01",      # 实际可查的最新日期
+                "comparison_date": "2025-04-01",    # 对比日期
+                "comparison_start": "2025-04-01",   # 对比日期起点
+                "comparison_end": "2025-04-01",     # 对比日期终点（用于SQL查询）
+            }
+        """
+        from datetime import datetime, timedelta
+
+        # T+1数据：今天只能查到昨天
+        today = datetime.now()
+        yesterday = today - timedelta(days=1)
+        current_date = yesterday.strftime("%Y-%m-%d")
+
+        if comparison_type == "环比":
+            # 环比上月：取上月1号
+            if yesterday.month == 1:
+                # 去年12月1号
+                last_year = yesterday.year - 1
+                last_month = 12
+            else:
+                last_year = yesterday.year
+                last_month = yesterday.month - 1
+            comparison_date = f"{last_year}-{last_month:02d}-01"
+        else:
+            # 同比去年：取去年同月1号
+            last_year = yesterday.year - 1
+            comparison_date = f"{last_year}-{yesterday.month:02d}-01"
+
+        return {
+            "current_date": current_date,
+            "comparison_date": comparison_date,
+            "comparison_start": comparison_date,
+            "comparison_end": comparison_date,
+        }
 
 
 # 单元测试

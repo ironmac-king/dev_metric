@@ -95,6 +95,8 @@ func AskQuestion(c *gin.Context) {
 		"clarification_message":  aiResp["clarification_message"],
 		"clarification_type":     aiResp["clarification_type"],
 		"matched_metrics":       aiResp["matched_metrics"],
+		"comparison_result":     aiResp["comparison_result"],
+		"metric_code":           aiResp["metric_code"],
 	})
 }
 
@@ -237,7 +239,7 @@ func DrillDownQuestion(c *gin.Context) {
 	var req struct {
 		SessionID      string   `json:"session_id" binding:"required"`
 		DimensionNames []string `json:"dimension_names" binding:"required"`
-		MetricCode     string   `json:"metric_code" binding:"required"`
+		MetricCode     string   `json:"metric_code"`
 		CurrentSQL     string   `json:"current_sql" binding:"required"`
 		CurrentGroupBy string   `json:"current_group_by"`
 		Page           int      `json:"page"`
@@ -295,16 +297,23 @@ func DrillDownQuestion(c *gin.Context) {
 		"clarification_message":  aiResp["clarification_message"],
 		"clarification_type":     aiResp["clarification_type"],
 		"matched_metrics":       aiResp["matched_metrics"],
+		"comparison_result":     aiResp["comparison_result"],
+		"metric_code":          aiResp["metric_code"],
 	})
 }
 
 // SaveMessage 保存会话消息（Redis 缓存 + 异步落库 PostgreSQL）
 func SaveMessage(c *gin.Context) {
 	var req struct {
-		SessionID string `json:"session_id" binding:"required"`
-		Role     string `json:"role" binding:"required"` // user / assistant
-		Content  string `json:"content" binding:"required"`
-		SQL      string `json:"sql"`
+		SessionID       string `json:"session_id" binding:"required"`
+		Role           string `json:"role" binding:"required"` // user / assistant
+		Content        string `json:"content" binding:"required"`
+		SQL            string `json:"sql"`
+		ResultData     string `json:"result_data"`
+		ComparisonResult string `json:"comparison_result"`
+		DrillDownDims  string `json:"drill_down_dims"`
+		Breadcrumbs    string `json:"breadcrumbs"`
+		MetricCode     string `json:"metric_code"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -314,10 +323,15 @@ func SaveMessage(c *gin.Context) {
 
 	// 构造消息
 	msg := model.AskMessage{
-		SessionID: req.SessionID,
-		Role:     req.Role,
-		Content:  req.Content,
-		SQL:      req.SQL,
+		SessionID:        req.SessionID,
+		Role:            req.Role,
+		Content:         req.Content,
+		SQL:             req.SQL,
+		ResultData:      req.ResultData,
+		ComparisonResult: req.ComparisonResult,
+		DrillDownDims:   req.DrillDownDims,
+		Breadcrumbs:     req.Breadcrumbs,
+		MetricCode:      req.MetricCode,
 	}
 
 	// 同步写 Redis（7天过期）
@@ -351,7 +365,22 @@ func GetMessages(c *gin.Context) {
 	cacheKey := fmt.Sprintf("ask:messages:%s", sessionID)
 	var messages []model.AskMessage
 	if err := cache.GetJSON(ctx, cacheKey, &messages); err == nil && len(messages) > 0 {
-		response.Success(c, gin.H{"messages": messages, "source": "redis"})
+		// 将 JSON 字符串反序列化为对象
+		result := make([]map[string]interface{}, len(messages))
+		for i, msg := range messages {
+			result[i] = map[string]interface{}{
+				"role":                msg.Role,
+				"content":             msg.Content,
+				"sql":                 msg.SQL,
+				"created_at":          msg.CreatedAt,
+				"result_data":         decodeJSON(msg.ResultData),
+				"comparison_result":   decodeJSON(msg.ComparisonResult),
+				"drill_down_dims":    decodeJSON(msg.DrillDownDims),
+				"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
+				"metric_code":         msg.MetricCode,
+			}
+		}
+		response.Success(c, gin.H{"messages": result, "source": "redis"})
 		return
 	}
 
@@ -365,7 +394,34 @@ func GetMessages(c *gin.Context) {
 		}()
 	}
 
-	response.Success(c, gin.H{"messages": messages, "source": "db"})
+	// 将 JSON 字符串反序列化为对象
+	result := make([]map[string]interface{}, len(messages))
+	for i, msg := range messages {
+		result[i] = map[string]interface{}{
+			"role":                msg.Role,
+			"content":             msg.Content,
+			"sql":                 msg.SQL,
+			"created_at":          msg.CreatedAt,
+			"result_data":         decodeJSON(msg.ResultData),
+			"comparison_result":   decodeJSON(msg.ComparisonResult),
+			"drill_down_dims":    decodeJSON(msg.DrillDownDims),
+			"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
+			"metric_code":         msg.MetricCode,
+		}
+	}
+	response.Success(c, gin.H{"messages": result, "source": "db"})
+}
+
+// decodeJSON 将 JSON 字符串解码为 interface{}
+func decodeJSON(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	var result interface{}
+	if err := json.Unmarshal([]byte(s), &result); err != nil {
+		return nil
+	}
+	return result
 }
 
 // DeleteMessages 删除会话消息（Redis + PostgreSQL）

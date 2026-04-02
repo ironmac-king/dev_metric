@@ -12,6 +12,11 @@ class ConversationMessage(BaseModel):
     content: str
     sql: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.now)
+    # 响应数据（仅 assistant 消息有）
+    result_data: Optional[List[Dict[str, Any]]] = None
+    comparison_result: Optional[Dict[str, Any]] = None
+    drill_down_dims: Optional[List[Dict[str, str]]] = None
+    breadcrumbs: Optional[List[Dict[str, str]]] = None
 
 
 class ThinkingStep(BaseModel):
@@ -62,6 +67,8 @@ class ConversationState(BaseModel):
     context: Dict[str, Any] = {}                 # 知识图谱上下文（上游/下游/相关指标）
     # ========== 多轮对话上下文继承 ==========
     conversation_context: Optional[ConversationContext] = None  # 对话上下文
+    # ========== 对比计算结果（同比环比）==========
+    comparison_result: Optional[Dict[str, Any]] = None  # 对比计算结果
 
 
 class IntentResult(BaseModel):
