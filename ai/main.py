@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
+import json
 import httpx
 
 from ai.graph.state import ConversationState, ConversationMessage
@@ -31,14 +32,22 @@ logger = get_logger("ai")
 # Go 后端地址
 GO_API_BASE = "http://localhost:8080"
 
-def save_message_to_go(session_id: str, role: str, content: str, sql: str = None):
+def save_message_to_go(session_id: str, role: str, content: str, sql: str = None,
+                      result_data: Any = None, comparison_result: Any = None,
+                      drill_down_dims: Any = None, breadcrumbs: Any = None,
+                      metric_code: str = None):
     """保存消息到 Go 后端（Redis + PostgreSQL）"""
     try:
         payload = {
             "session_id": session_id,
             "role": role,
             "content": content,
-            "sql": sql or ""
+            "sql": sql or "",
+            "result_data": json.dumps(result_data) if result_data is not None else "",
+            "comparison_result": json.dumps(comparison_result) if comparison_result is not None else "",
+            "drill_down_dims": json.dumps(drill_down_dims) if drill_down_dims is not None else "",
+            "breadcrumbs": json.dumps(breadcrumbs) if breadcrumbs is not None else "",
+            "metric_code": metric_code or ""
         }
         with httpx.Client(timeout=5) as client:
             client.post(f"{GO_API_BASE}/api/v1/ask/messages", json=payload)
@@ -388,7 +397,15 @@ async def ask_question(req: AskRequest):
         ))
 
         # 保存助手消息到 Go 后端
-        save_message_to_go(session_id, "assistant", assistant_content, current_sql)
+        logger.info(f"[ask_question] response_updates keys: {list(response_updates.keys())}")
+        save_message_to_go(
+            session_id, "assistant", assistant_content, current_sql,
+            result_data=response_updates.get("result_data"),
+            comparison_result=response_updates.get("comparison_result"),
+            drill_down_dims=_get_drill_down_dims(state),
+            breadcrumbs=[],
+            metric_code=state.entities.get("metric_code") or getattr(state, 'current_metric_code', None)
+        )
 
         # 更新会话元数据
         if session_id in session_metadata:
@@ -417,7 +434,7 @@ async def ask_question(req: AskRequest):
             matched_metrics=state.matched_metrics if hasattr(state, 'matched_metrics') else None,
             drill_down_dims=_get_drill_down_dims(state),
             breadcrumbs=[],
-            result_data=_rename_result_columns(_extract_result_data(state.sql_result), _get_metric_name_for_result(state, conversation_nodes.metric_client)),
+            result_data=_rename_result_columns(response_updates.get("result_data") if isinstance(response_updates.get("result_data"), list) else None, _get_metric_name_for_result(state, conversation_nodes.metric_client)),
             total=_extract_result_total(state.sql_result),
             page=req.page,
             page_size=page_size,
@@ -944,6 +961,18 @@ async def drill_down_question(req: DrillDownRequest):
 
         if comparison_result_data:
             response["comparison_result"] = comparison_result_data
+
+        # 保存下钻结果到 Redis/PostgreSQL
+        save_message_to_go(
+            req.session_id, "assistant",
+            response.get("answer", ""),
+            response.get("sql"),
+            result_data=response.get("result_data"),
+            comparison_result=response.get("comparison_result"),
+            drill_down_dims=response.get("drill_down_dims"),
+            breadcrumbs=response.get("breadcrumbs"),
+            metric_code=response.get("metric_code")
+        )
 
         return response
 

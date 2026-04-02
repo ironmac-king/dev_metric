@@ -245,7 +245,7 @@
               </div>
 
               <!-- 查询结果表格 -->
-              <div v-if="msg.result_data && msg.result_data.length > 0" class="result-table">
+              <div v-if="msg.result_data && (msg.result_data.length > 0 || (msg.result_data.data && msg.result_data.data.length > 0))" class="result-table">
                 <div class="result-table-header">
                   <span>查询结果</span>
                   <span v-if="msg.total" class="result-total">(共 {{ msg.total }} 条)</span>
@@ -254,17 +254,15 @@
                   <table>
                     <thead>
                       <tr>
-                        <th v-for="(value, key) in msg.result_data[0]" :key="key">{{ key }}</th>
-                        <th v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">{{ msg.comparison_result.comparison_type === '同比' ? '去年同期' : '上月同期' }}</th>
-                        <th v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">变化率</th>
+                        <th v-for="(value, key) in (msg.result_data[0] || (msg.result_data.data && msg.result_data.data[0]) || {})" :key="key">{{ key }}</th>
+                        <th v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">{{ msg.comparison_result.comparison_type === '同比' ? '同比变化率' : '环比变化率' }}</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="(row, rowIdx) in msg.result_data" :key="rowIdx">
+                      <tr v-for="(row, rowIdx) in (msg.result_data.data || msg.result_data)" :key="rowIdx">
                         <td v-for="(value, key) in row" :key="key">{{ formatCellValue(value) }}</td>
-                        <td v-if="msg.comparison_result && msg.comparison_result.comparison_value !== undefined && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">{{ formatComparisonValue(msg.comparison_result.comparison_value) }}</td>
-                        <td v-if="msg.comparison_result && msg.comparison_result.change_rate !== undefined && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">
-                          <span :class="msg.comparison_result.change_rate >= 0 ? 'text-success' : 'text-danger'">
+                        <td v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">
+                          <span :style="{ color: msg.comparison_result.change_rate >= 0 ? '#67c23a' : '#f56c6c', fontWeight: 'bold' }">
                             {{ msg.comparison_result.change_rate >= 0 ? '↑' : '↓' }}
                             {{ Math.abs(msg.comparison_result.change_rate).toFixed(2) }}%
                           </span>
@@ -661,6 +659,11 @@ async function loadSession(id) {
         content: m.content,
         sql: m.sql,
         created_at: m.created_at,
+        result_data: m.result_data || null,
+        comparison_result: m.comparison_result || null,
+        drill_down_dims: m.drill_down_dims || null,
+        breadcrumbs: m.breadcrumbs || null,
+        metric_code: m.metric_code || null,
         thinking_expanded: true,
         thinking_steps: []
       }))
@@ -941,6 +944,10 @@ function formatMessage(content) {
 function formatCellValue(value) {
   if (value === null || value === undefined) return '-'
   if (typeof value === 'string') {
+    // 如果已经是带逗号的格式化字符串（如 "19,977,536.00"），直接返回
+    if (value.includes(',')) return value
+    // 如果包含 %，直接返回（已经是格式化后的百分比字符串）
+    if (value.includes('%')) return value
     const num = parseFloat(value)
     if (!isNaN(num)) {
       if (num === Math.floor(num)) {
@@ -1047,7 +1054,7 @@ async function handleDrillDown(msg, comparisonType = null) {
 
   // 保存当前上下文到历史（用于返回）
   drillHistory.value.push({
-    sql: currentSQL.value,
+    sql: currentSQL.value || msg.sql,
     groupBy: currentGroupBy.value,
     breadcrumbs: JSON.parse(JSON.stringify(msg.breadcrumbs || [])),
     result_data: msg.result_data,
@@ -1061,8 +1068,8 @@ async function handleDrillDown(msg, comparisonType = null) {
     const res = await askAPI.drillDown({
       session_id: sessionId.value,
       dimension_names: selected,
-      metric_code: currentMetricCode.value,
-      current_sql: currentSQL.value,
+      metric_code: msg.metric_code || currentMetricCode.value || '',
+      current_sql: msg.sql || currentSQL.value || '',
       current_group_by: currentGroupBy.value,
       comparison_type: comparisonType
     })

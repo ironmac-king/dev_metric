@@ -1810,7 +1810,7 @@ class ConversationNodes:
                         unit=unit,
                     )
 
-                    # 如果有对比计算结果，整合到主表格中展示
+                    # 如果有对比计算结果，添加到 result_data 每行
                     comparison_result = getattr(state, 'comparison_result', None)
                     if comparison_result:
                         comp_type = comparison_result.get("comparison_type", "对比")
@@ -1831,7 +1831,33 @@ class ConversationNodes:
                             return str(val)
 
                         current_str = format_value(current_value, unit)
-                        comp_str = format_value(comp_value, unit)
+                        comp_str = f"{int(comp_value):,}" if isinstance(comp_value, (int, float)) and comp_value == int(comp_value) else format_value(comp_value, unit)
+
+                        # 添加到 result_data 每行（用于前端表格展示）
+                        # 处理 Go 返回的嵌套格式: {"count": N, "data": [...]} 或直接的 list/dict
+                        rows_to_process = data
+                        if isinstance(data, dict):
+                            if "data" in data:
+                                # Go 返回的嵌套格式，解开外层包装
+                                rows_to_process = data["data"]
+                            else:
+                                # 单行 dict 结果，包装成 list
+                                rows_to_process = [data]
+                        # rows_to_process 现在应该是 list
+                        if isinstance(rows_to_process, list):
+                            for row in rows_to_process:
+                                if isinstance(row, dict):
+                                    if comp_type == "同比":
+                                        row["去年同期"] = comp_str
+                                    else:
+                                        row["上月同期"] = comp_str
+                        # 更新 data 为处理后的结果（返回扁平数组供 API 使用）
+                        if isinstance(data, dict) and "data" in data:
+                            # 原为嵌套格式，解包后返回内层扁平数组
+                            data = rows_to_process
+                        else:
+                            data = rows_to_process
+
 
                         if comp_type == "同比":
                             comp_period = f"去年同期（{comp_date[:7]}）" if comp_date else "去年同期"
@@ -1841,15 +1867,13 @@ class ConversationNodes:
                         change_emoji = "↑" if change_rate > 0 else ("↓" if change_rate < 0 else "→")
                         change_color = "上涨" if change_rate > 0 else ("下跌" if change_rate < 0 else "持平")
 
-                        # 整合到统一表格：当期值、对比值、变化率在一张表
+                        # 对比摘要（可选，保留在 answer 里供参考）
                         answer += f"\n\n📊 **对比结果**\n"
                         answer += f"| 指标 | 数值 |\n"
                         answer += f"|------|------|\n"
                         answer += f"| {metric_name}（当期） | {current_str} |\n"
                         answer += f"| {comp_period} | {comp_str} |\n"
                         answer += f"| {comp_type}变化 | {change_emoji} {abs(change_rate):.2f}%（{change_color}）|\n"
-                        comparison_sql = comparison_result.get("comparison_sql", "N/A")
-                        answer += f"\n📋 **对比SQL**\n```sql\n{comparison_sql}\n```"
 
                     # 保存当前指标/时间到上下文
                     self._update_context(state, state.entities)
