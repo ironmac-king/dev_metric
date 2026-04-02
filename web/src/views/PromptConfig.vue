@@ -108,25 +108,116 @@
       </template>
     </el-dialog>
 
-    <!-- AI 代写模式选择弹窗 -->
-    <el-dialog v-model="aiModeDialogVisible" title="AI 代写" width="500px">
-      <el-form label-width="120px">
-        <el-form-item label="生成模式">
-          <el-radio-group v-model="aiWriteMode">
-            <el-radio label="regenerate">重新生成</el-radio>
-            <el-radio label="improve">基于现有优化</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="当前模板" v-if="aiWriteMode === 'improve'">
-          <el-select v-model="aiTargetConfig" placeholder="选择要优化的模板" style="width:100%">
-            <el-option v-for="cfg in configs" :key="cfg.id" :label="cfg.name" :value="cfg.id" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="aiModeDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="executeAIWrite">确定</el-button>
-      </template>
+    <!-- AI 代写向导弹窗 -->
+    <el-dialog
+      v-model="aiWizardVisible"
+      title="AI 代写 Prompt"
+      width="700px"
+      :close-on-click-modal="false"
+    >
+      <!-- 步骤指示器 -->
+      <el-steps :active="aiWizardStep" finish-status="success" style="margin-bottom:24px">
+        <el-step title="配置参数" description="选择模式并描述需求" />
+        <el-step title="生成结果" description="AI 正在生成中..." />
+      </el-steps>
+
+      <!-- 步骤 1：配置参数 -->
+      <div v-show="aiWizardStep === 0">
+        <el-form label-width="100px" label-position="left">
+          <el-form-item label="生成模式">
+            <el-radio-group v-model="aiWriteMode">
+              <el-radio label="regenerate">
+                <strong>重新生成</strong>
+                <span style="color:#909399;font-size:12px;margin-left:8px">从空白模板开始创建</span>
+              </el-radio>
+              <el-radio label="improve">
+                <strong>基于现有优化</strong>
+                <span style="color:#909399;font-size:12px;margin-left:8px">在现有模板上改进</span>
+              </el-radio>
+            </el-radio-group>
+          </el-form-item>
+
+          <el-form-item label="选择模板" v-if="aiWriteMode === 'improve'">
+            <el-select v-model="aiTargetConfig" placeholder="请选择要优化的模板" style="width:100%">
+              <el-option
+                v-for="cfg in configs"
+                :key="cfg.id"
+                :label="cfg.name + ' (v' + cfg.version + ')'"
+                :value="cfg.id"
+              >
+                <span>{{ cfg.name }}</span>
+                <el-tag size="small" type="info" style="margin-left:8px">v{{ cfg.version }}</el-tag>
+              </el-option>
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="需求描述" required>
+            <el-input
+              v-model="aiRequirement"
+              type="textarea"
+              :rows="5"
+              placeholder="请详细描述你希望 AI 生成什么样的 Prompt。例如：
+• 用途是什么？（意图识别、SQL 生成、响应生成等）
+• 需要包含哪些核心要素？
+• 期望的风格或特点？
+• 有什么特殊要求？"
+              maxlength="500"
+              show-word-limit
+              style="font-size:14px"
+            />
+            <div style="color:#909399;font-size:12px;margin-top:8px">
+              描述越详细，生成的结果越符合你的期望
+            </div>
+          </el-form-item>
+        </el-form>
+
+        <div style="display:flex;justify-content:flex-end;margin-top:24px">
+          <el-button @click="aiWizardVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :disabled="!aiRequirement.trim()"
+            @click="startAIGenerate"
+          >
+            开始生成
+            <el-icon style="margin-left:4px"><ArrowRight /></el-icon>
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 步骤 2：生成中/结果 -->
+      <div v-show="aiWizardStep === 1">
+        <!-- 加载中状态 -->
+        <div v-if="aiWriting" style="text-align:center;padding:40px 0">
+          <el-icon class="is-loading" style="font-size:48px;color:#409eff;margin-bottom:16px">
+            <Loading />
+          </el-icon>
+          <p style="color:#606266;font-size:16px">AI 正在根据你的需求生成 Prompt...</p>
+          <p style="color:#909399;font-size:14px;margin-top:8px;max-width:500px;margin-left:auto;margin-right:auto">
+            需求：{{ aiRequirement }}
+          </p>
+        </div>
+
+        <!-- 生成结果 -->
+        <div v-else-if="aiSuggestedPrompt">
+          <el-input
+            type="textarea"
+            :rows="12"
+            v-model="aiSuggestedPrompt"
+            font-family="monospace"
+            style="margin-bottom:16px"
+          />
+          <div style="display:flex;justify-content:flex-end;gap:12px">
+            <el-button @click="resetAIGenerate">重新生成</el-button>
+            <el-button @click="applyAIGenerate" type="primary">应用到编辑器</el-button>
+          </div>
+        </div>
+
+        <!-- 生成失败 -->
+        <div v-else style="text-align:center;padding:40px 0;color:#f56c6c">
+          <p>AI 生成失败，请重试</p>
+          <el-button type="primary" @click="resetAIGenerate" style="margin-top:16px">重新生成</el-button>
+        </div>
+      </div>
     </el-dialog>
 
     <!-- 新增 Prompt 配置弹窗 -->
@@ -211,18 +302,20 @@
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { promptConfigAPI } from '@/api'
-import { MagicStick, Clock, Plus } from '@element-plus/icons-vue'
+import { MagicStick, Clock, Plus, ArrowRight, Loading } from '@element-plus/icons-vue'
 
 const configs = ref([])
 const selectedConfigId = ref('')
 const currentConfig = ref(null)
 const historyDialogVisible = ref(false)
 const aiDialogVisible = ref(false)
-const aiModeDialogVisible = ref(false)
+const aiWizardVisible = ref(false)
+const aiWizardStep = ref(0)
 const aiWriting = ref(false)
 const aiSuggestedPrompt = ref('')
 const aiWriteMode = ref('improve')
 const aiTargetConfig = ref('')
+const aiRequirement = ref('')
 const versions = ref([])
 const createDialogVisible = ref(false)
 const createFormRef = ref(null)
@@ -386,16 +479,40 @@ async function handleRollback(version) {
 }
 
 async function handleAIWrite() {
-  // 每次打开都重置选项
+  openAIWizard()
+}
+
+function openAIWizard() {
   aiWriteMode.value = 'improve'
   aiTargetConfig.value = currentConfig.value?.id || ''
-  aiModeDialogVisible.value = true
+  aiRequirement.value = ''
+  aiWizardStep.value = 0
+  aiSuggestedPrompt.value = ''
+  aiWizardVisible.value = true
+}
+
+function startAIGenerate() {
+  if (!aiRequirement.value.trim()) {
+    ElMessage.warning('请输入需求描述')
+    return
+  }
+  aiWizardStep.value = 1
+  executeAIWrite()
+}
+
+function resetAIGenerate() {
+  aiWizardStep.value = 0
+  aiSuggestedPrompt.value = ''
+}
+
+function applyAIGenerate() {
+  editForm.value.prompt_text = aiSuggestedPrompt.value
+  aiWizardVisible.value = false
+  ElMessage.success('已应用到编辑器，请检查后保存')
 }
 
 async function executeAIWrite() {
-  aiModeDialogVisible.value = false
   aiWriting.value = true
-  aiSuggestedPrompt.value = ''
 
   try {
     let promptContent = ''
@@ -407,32 +524,27 @@ async function executeAIWrite() {
       }
     }
 
-    // 调用后端 API 生成 Prompt
+    // 调用后端 API 生成 Prompt，将用户需求传入
     const res = await promptConfigAPI.generate({
       current_prompt: promptContent,
       task_name: editForm.value.name,
-      description: editForm.value.description || editForm.value.name,
+      description: aiRequirement.value,
       mode: aiWriteMode.value
     })
 
     if (res.data?.prompt) {
       aiSuggestedPrompt.value = res.data.prompt
-      aiDialogVisible.value = true
     } else {
+      aiSuggestedPrompt.value = ''
       ElMessage.error('AI 代写失败：未获取到有效内容')
     }
   } catch (e) {
     console.error('AI 代写失败:', e)
+    aiSuggestedPrompt.value = ''
     ElMessage.error('AI 代写失败：' + (e.message || '未知错误'))
   } finally {
     aiWriting.value = false
   }
-}
-
-function handleApplyAIPrompt() {
-  editForm.value.prompt_text = aiSuggestedPrompt.value
-  aiDialogVisible.value = false
-  ElMessage.success('已应用到编辑器，请检查后保存')
 }
 
 function formatTime(time) {
