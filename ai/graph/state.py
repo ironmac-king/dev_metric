@@ -73,6 +73,7 @@ class ConversationState(BaseModel):
     selected_dimension_field: Optional[str] = None  # 用户选择的维度字段
     selected_dimension_value: Optional[str] = None  # 用户选择的维度值
     dimension_value_candidates: Optional[List[Dict[str, Any]]] = None  # 维度值候选列表（用于追问选择）
+    dimension_value_matched_text: Optional[str] = None  # 匹配维度值时的原始文本（如"1011"）
 
 
 class IntentResult(BaseModel):

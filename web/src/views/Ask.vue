@@ -245,6 +245,23 @@
                 </div>
               </div>
 
+              <!-- 维度值候选选择 -->
+              <div v-if="msg.needs_clarification && msg.dimension_value_candidates && msg.dimension_value_candidates.length > 0" class="metric-candidates">
+                <div class="candidates-header">请选择维度值：</div>
+                <div class="candidates-list">
+                  <div
+                    v-for="(dimValue, idx) in msg.dimension_value_candidates"
+                    :key="idx"
+                    class="candidate-item"
+                    :class="{ selected: selectedDimValueIdx === idx }"
+                    @click="selectDimensionValueCandidate(idx, dimValue)"
+                  >
+                    <span class="candidate-name">{{ dimValue.dimension_value }}</span>
+                    <span class="candidate-code">[{{ dimValue.dimension_field }}]</span>
+                  </div>
+                </div>
+              </div>
+
               <!-- 查询结果表格 -->
               <div v-if="msg.result_data && (msg.result_data.length > 0 || (msg.result_data.data && msg.result_data.data.length > 0))" class="result-table">
                 <div class="result-table-header">
@@ -518,6 +535,8 @@ const sidebarCollapsed = ref(false)
 const messagesContainer = ref(null)
 const showPreferencesPanel = ref(false) // 偏好设置面板
 const selectedCandidateIdx = ref(null) // 当前选中的候选指标索引
+const selectedDimValueIdx = ref(null) // 当前选中的维度值候选索引
+const lastDimValueMatchedText = ref('') // 上一次匹配维度值时的原始文本（如"1011"）
 
 // 编辑消息相关
 const editingMessageIndex = ref(-1)
@@ -772,7 +791,9 @@ async function resendMessage() {
         needs_clarification: res.data.needs_clarification || false,
         clarification_message: res.data.clarification_message || null,
         clarification_type: res.data.clarification_type || null,
-        matched_metrics: res.data.matched_metrics || []
+        matched_metrics: res.data.matched_metrics || [],
+        dimension_value_candidates: res.data.dimension_value_candidates || [],
+        dimension_value_matched_text: res.data.dimension_value_matched_text || ''
       })
     }
   } catch (e) {
@@ -847,7 +868,9 @@ async function handleSend() {
     })
 
     if (res.data) {
-      console.log('AI 响应 result_data:', res.data.result_data)
+      console.log('AI 响应 dimension_value_candidates:', res.data.dimension_value_candidates)
+      console.log('AI 响应 dimension_value_matched_text:', res.data.dimension_value_matched_text)
+      console.log('AI 响应 needs_clarification:', res.data.needs_clarification)
       if (!sessionId.value && res.data.session_id) {
         sessionId.value = res.data.session_id
         localStorage.setItem('ask_session_id', sessionId.value)
@@ -874,7 +897,9 @@ async function handleSend() {
         needs_clarification: res.data.needs_clarification || false,
         clarification_message: res.data.clarification_message || null,
         clarification_type: res.data.clarification_type || null,
-        matched_metrics: res.data.matched_metrics || []
+        matched_metrics: res.data.matched_metrics || [],
+        dimension_value_candidates: res.data.dimension_value_candidates || [],
+        dimension_value_matched_text: res.data.dimension_value_matched_text || ''
       })
     }
   } catch (e) {
@@ -917,6 +942,70 @@ function selectMetricCandidate(idx, metric) {
   // 用「指标名（编号）」作为新问题发送
   const metricQuestion = `${metric.name || metric.metric_name}（${metric.metric_code}）`
   question.value = metricQuestion
+  handleSend()
+}
+
+function selectDimensionValueCandidate(idx, dimValue) {
+  selectedDimValueIdx.value = idx
+  console.log('===== selectDimensionValueCandidate =====')
+  console.log('点击的维度值:', dimValue.dimension_value)
+
+  // 找到最后一个带有 dimension_value_candidates 的消息（AI 追问消息）
+  let lastAiMsgWithCandidates = null
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const msg = messages.value[i]
+    if (msg.role === 'assistant' && msg.dimension_value_candidates && msg.dimension_value_candidates.length > 0) {
+      lastAiMsgWithCandidates = msg
+      break
+    }
+  }
+
+  // 找到对应的用户消息（AI 追问消息的前一条）
+  let newQuestion = ''
+  if (lastAiMsgWithCandidates) {
+    const aiIndex = messages.value.indexOf(lastAiMsgWithCandidates)
+    const userMsgIndex = aiIndex - 1
+
+    if (userMsgIndex >= 0 && messages.value[userMsgIndex].role === 'user') {
+      const userMsg = messages.value[userMsgIndex]
+      const matchedText = lastAiMsgWithCandidates.dimension_value_matched_text || ''
+
+      console.log('用户消息 index:', userMsgIndex)
+      console.log('用户消息内容:', userMsg.content)
+      console.log('matchedText:', matchedText)
+
+      // 检查 matchedText 是否是独立的数字（在数字边界内不算）
+      // 如果 matchedText 是纯数字，检查它是否被更长的数字包含（如 "1011" 在 "10117" 中）
+      const isStandaloneNumber = /^\d+$/.test(matchedText)
+      let canReplace = matchedText && userMsg.content.includes(matchedText)
+
+      if (canReplace && isStandaloneNumber) {
+        // 检查 matchedText 是否是更长数字的一部分
+        // 构建正则：前面不是数字，后面也不是数字
+        const pattern = new RegExp(`(?<![0-9])${matchedText}(?![0-9])`)
+        canReplace = pattern.test(userMsg.content)
+        console.log('是独立数字检查:', canReplace, 'pattern:', pattern)
+      }
+
+      if (canReplace) {
+        newQuestion = userMsg.content.replace(matchedText, dimValue.dimension_value)
+        console.log('替换后:', newQuestion)
+      } else {
+        // matchedText 已被替换或不存在，直接发送选中的维度值
+        newQuestion = dimValue.dimension_value
+        console.log('matchedText 不可用，直接发送:', newQuestion)
+      }
+
+      // 清除已使用的 candidates，防止重复使用
+      lastAiMsgWithCandidates.dimension_value_candidates = null
+    }
+  }
+
+  if (!newQuestion) {
+    newQuestion = dimValue.dimension_value
+  }
+
+  question.value = newQuestion
   handleSend()
 }
 

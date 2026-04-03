@@ -2,7 +2,7 @@
 LLM 引擎 - 调用腾讯云 DeepSeek
 """
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from openai import OpenAI
 from dotenv import load_dotenv
 from ai.graph.state import IntentResult, SQLGenerationResult, ClarificationDecision
@@ -1033,6 +1033,42 @@ NL2Structure Prompt 用于将用户自然语言转换为结构化数据，输出
             return response.choices[0].message.content.strip()
         except Exception as e:
             logger.info(f"[LLMEngine] Prompt 生成失败: {e}")
+            return ""
+
+
+    def suggest_dimension_correction(self, query: str, candidates: List[str]) -> str:
+        """
+        LLM 生成维度值纠错建议
+
+        Args:
+            query: 用户输入的维度值
+            candidates: 候选维度值列表
+
+        Returns:
+            纠错建议，如"您是指'有线网卡'吗？"
+        """
+        if not candidates:
+            return ""
+
+        candidates_str = ", ".join([f"'{c}'" for c in candidates])
+        prompt = f"""用户输入的维度值 '{query}' 没有精确匹配。
+最相似的候选值：{candidates_str}
+
+请生成一句友好的纠错建议，例如：
+"您是指'有线网卡'吗？"
+
+只输出建议语句，不要其他内容。"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=100,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.info(f"[LLMEngine] 维度纠错建议生成失败: {e}")
             return ""
 
 

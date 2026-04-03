@@ -54,6 +54,8 @@ class RuleEngine:
                                 "description": t.get("description", ""),
                                 "metric_ids": t.get("metric_ids", []),
                                 "synonyms": t.get("synonyms", []),  # 加载同义词
+                                "dimension_field": t.get("dimension_field", ""),  # 维度字段
+                                "dimension_value": t.get("dimension_value", ""),  # 维度值
                             }
                     logger.info(f"[RuleEngine] 加载了 {len(self.business_terms)} 个业务术语")
         except Exception as e:
@@ -318,11 +320,16 @@ class RuleEngine:
         return result
 
     def _match_by_synonyms(self, text: str) -> Optional[str]:
-        """通过同义词匹配找到标准术语
+        """通过同义词匹配找到标准术语或维度值映射
 
         匹配策略：分词整词匹配为主 + 短词子串兜底
         - 缩写类（DAU、UV）用子串匹配，避免分词破坏
         - 完整词类用分词后整词匹配，避免误匹配
+
+        返回值格式：
+        - 维度值映射: __DIM_VALUE__{dimension_field}__{dimension_value}
+        - 指标映射: __METRIC__{metric_id}
+        - 标准术语: 术语名称（用于后续指标匹配）
         """
         import jieba
 
@@ -340,13 +347,29 @@ class RuleEngine:
                 # 短词（<=3字符）用子串匹配，兼容缩写类
                 if len(syn) <= 3:
                     if syn_lower in text_lower:
-                        logger.debug(f"同义词匹配成功: '{syn}' -> 标准术语 '{info.get('term')}'")
+                        logger.debug(f"同义词匹配成功: '{syn}' -> 术语 '{info.get('term')}'")
+                        # 返回维度值映射或指标映射
+                        dimension_value = info.get("dimension_value", "")
+                        if dimension_value:
+                            dimension_field = info.get("dimension_field", "")
+                            return f"__DIM_VALUE__{dimension_field}__{dimension_value}"
+                        metric_ids = info.get("metric_ids", [])
+                        if metric_ids:
+                            return f"__METRIC__{metric_ids[0]}"
                         return info.get("term")
                 else:
                     # 长词用分词后整词匹配
                     token_lowers = [t.lower() for t in tokens]
                     if syn_lower in token_lowers:
-                        logger.debug(f"同义词匹配成功: '{syn}' -> 标准术语 '{info.get('term')}'")
+                        logger.debug(f"同义词匹配成功: '{syn}' -> 术语 '{info.get('term')}'")
+                        # 返回维度值映射或指标映射
+                        dimension_value = info.get("dimension_value", "")
+                        if dimension_value:
+                            dimension_field = info.get("dimension_field", "")
+                            return f"__DIM_VALUE__{dimension_field}__{dimension_value}"
+                        metric_ids = info.get("metric_ids", [])
+                        if metric_ids:
+                            return f"__METRIC__{metric_ids[0]}"
                         return info.get("term")
         return None
 
@@ -429,13 +452,29 @@ class RuleEngine:
         if not result:
             matched_term = self._match_by_synonyms(text)
             if matched_term:
-                # 用匹配到的标准术语再次匹配指标
-                for term, metric_info in self.metric_templates.items():
-                    if term.lower() == matched_term.lower():
-                        result.update(metric_info)
-                        logger.debug(f"同义词标准术语匹配成功: '{matched_term}' -> {metric_info.get('metric_name')}")
+                # 处理维度值映射格式: __DIM_VALUE__{dimension_field}__{dimension_value}
+                if matched_term.startswith("__DIM_VALUE__"):
+                    parts = matched_term.split("__")
+                    if len(parts) >= 4:
+                        dimension_field = parts[2]
+                        dimension_value = parts[3]
+                        result[f"dim_{dimension_field}"] = dimension_value
+                        logger.debug(f"同义词维度值匹配成功: '{dimension_field}' = '{dimension_value}'")
                         result.update(extracted_dimensions)
-                        break
+                # 处理指标映射格式: __METRIC__{metric_id}
+                elif matched_term.startswith("__METRIC__"):
+                    metric_id = matched_term.split("__")[2]
+                    result["metric_id"] = int(metric_id)
+                    logger.debug(f"同义词指标匹配成功: metric_id = {metric_id}")
+                    result.update(extracted_dimensions)
+                else:
+                    # 用匹配到的标准术语再次匹配指标
+                    for term, metric_info in self.metric_templates.items():
+                        if term.lower() == matched_term.lower():
+                            result.update(metric_info)
+                            logger.debug(f"同义词标准术语匹配成功: '{matched_term}' -> {metric_info.get('metric_name')}")
+                            result.update(extracted_dimensions)
+                            break
 
         # 继承上下文的指标信息 - 仅当查询是 follow-up 类型时才继承
         # 关键：如果完全没有匹配到任何指标（result为空），不继承上轮指标

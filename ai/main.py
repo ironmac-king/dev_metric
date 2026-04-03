@@ -97,6 +97,8 @@ class AskResponse(BaseModel):
     clarification_message: Optional[str] = None
     clarification_type: Optional[str] = None
     matched_metrics: Optional[List[Dict[str, Any]]] = None
+    dimension_value_candidates: Optional[List[Dict[str, Any]]] = None  # 维度值候选
+    dimension_value_matched_text: Optional[str] = None  # 匹配维度值时的原始文本
     drill_down_dims: Optional[List[Dict[str, str]]] = None
     breadcrumbs: Optional[List[Dict[str, str]]] = None
     result_data: Optional[List[Dict[str, Any]]] = None  # SQL 查询结果
@@ -435,6 +437,8 @@ async def ask_question(req: AskRequest):
             clarification_message=state.clarification_message if hasattr(state, 'clarification_message') else None,
             clarification_type=state.clarification_type if hasattr(state, 'clarification_type') else None,
             matched_metrics=state.matched_metrics if hasattr(state, 'matched_metrics') else None,
+            dimension_value_candidates=getattr(state, 'dimension_value_candidates', None),
+            dimension_value_matched_text=getattr(state, 'dimension_value_matched_text', None),
             drill_down_dims=_get_drill_down_dims(state),
             breadcrumbs=[],
             result_data=_rename_result_columns(response_updates.get("result_data") if isinstance(response_updates.get("result_data"), list) else None, _get_metric_name_for_result(state, conversation_nodes.metric_client)),

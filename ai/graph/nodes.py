@@ -332,16 +332,26 @@ class ConversationNodes:
                         results.append(segment)
 
         # 提取数字/字母混合序列（SKU、ASIN等），长度为3-20
-        # 匹配纯数字、纯字母、或字母数字混合
+        # 注意：无论是否找到中文候选，都需要提取数字/字母序列
+        # 因为"上月1011"中的"1011"应该被提取
         alphanum_pattern = re.compile(r'[A-Za-z0-9]{3,20}')
         for match in alphanum_pattern.finditer(text):
             segment = match.group()
             # 跳过时间相关的数字（如月份、日期）
             if self._is_time_word(segment):
                 continue
-            # 跳过已经是数字时间词的部分（如"2024"年）
-            if re.match(r'^\d{4}$', segment) and any(tw in text[max(0, match.start()-1):match.end()+1] for tw in ['年', '月']):
-                continue
+            # 跳过紧跟"年"或"月"的4位年份数字（如"2024年"），但不跳过"上月1011"中的"1011"
+            # 检查数字前面的字符，如果是"月"或"年"需要确认它是否属于时间词的一部分
+            start_idx = match.start()
+            if start_idx > 0:
+                prev_char = text[start_idx - 1]
+                if re.match(r'^\d{4}$', segment) and prev_char in '年月':
+                    # 检查前面的2个字符是否构成时间词（如"上月"、"本月"、"去年"等）
+                    two_chars_before = text[max(0, start_idx-2):start_idx]
+                    time_words_with_suffix = ['上月', '本月', '下月', '去年', '今年', '明年', '上月']
+                    if two_chars_before not in time_words_with_suffix:
+                        # 不是时间词的一部分，是真正的年份/月份数字，跳过
+                        continue
             # 跳过指标名中包含的数字
             if segment in metric_name or metric_name in segment:
                 continue
@@ -631,6 +641,7 @@ class ConversationNodes:
                     state.clarification_type = "dimension_value"
                     state.clarification_message = f"您说的是哪个维度：{[c['dimension_value'] for c in candidates]}？"
                     state.dimension_value_candidates = candidates  # 保存候选列表供后续解析
+                    state.dimension_value_matched_text = text  # 保存匹配的原始文本（如"1011"）
                     return {"entities": entities}
 
         return {"entities": entities}
