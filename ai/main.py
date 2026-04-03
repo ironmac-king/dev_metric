@@ -24,6 +24,8 @@ from ai.feedback.collector import get_feedback_collector, FeedbackType
 from ai.feedback.analyzer import get_feedback_analyzer
 from ai.feedback.rule_optimizer import get_rule_optimizer
 from ai.config.logging_config import setup_logging, get_logger
+from ai.engine import get_engine
+from ai.engine.rule_engine import RuleEngine
 
 # 初始化日志
 setup_logging()
@@ -76,6 +78,7 @@ class AskRequest(BaseModel):
     session_id: Optional[str] = None
     page: int = 1
     page_size: int = 10
+    engine_type: Optional[str] = "legacy"  # "legacy" 或 "langgraph"
 
 
 class ThinkingStepResponse(BaseModel):
@@ -258,198 +261,74 @@ def _get_drill_down_dims(state) -> List[Dict[str, str]]:
 
 @app.post("/api/v1/ask", response_model=AskResponse)
 async def ask_question(req: AskRequest):
-    """智能问数接口"""
-    # 获取或创建会话
+    """智能问数接口 - 支持引擎切换 A/B Test"""
+    # 获取或创建会话 ID
     session_id = req.session_id or str(uuid.uuid4())
 
-    if session_id not in sessions:
-        sessions[session_id] = ConversationState(session_id=session_id)
-        session_metadata[session_id] = {
-            "id": session_id,
-            "title": req.question[:20] + "..." if len(req.question) > 20 else req.question,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
+    # 获取引擎
+    engine_type = req.engine_type or "legacy"
+    engine = get_engine(engine_type)
+    logger = get_logger("ai.main")
+    logger.info(f"[ask_question] engine_type={engine_type}, question={req.question[:50]}")
 
-    state = sessions[session_id]
-
-    # 清除上一轮的错误状态，开始新一轮查询
-    # 保存上轮追问类型，用于识别对追问的回复
-    prev_clarification_type = getattr(state, 'clarification_type', None)
-    prev_clarification_message = getattr(state, 'clarification_message', None)
-    state.needs_clarification = False
-    state.clarification_message = None
-    state.clarification_type = None
-    state.matched_metrics = None
-    state.error = None
-    # 清除上轮对比结果和SQL结果，避免残留
-    state.comparison_result = None
-    state.sql_result = None
-    # 暂存上轮追问信息，供 intent_node 判断用户回复
-    state._prev_clarification_type = prev_clarification_type
-    state._prev_clarification_message = prev_clarification_message
-    # 清除 dimension，避免残留上一轮的维度信息干扰当前查询
-    state.entities.pop("dimension", None)
-    # 清除 Step 0 意图确认标记（如果存在）
-    if hasattr(state, '_intent_confirmed_from_context'):
-        try:
-            delattr(state, '_intent_confirmed_from_context')
-        except (ValueError, AttributeError):
-            pass
-    # 清空思考步骤
-    state.thinking_steps = []
-
-    # 添加用户消息
-    state.messages.append(ConversationMessage(
-        role="user",
-        content=req.question
-    ))
-
-    # 保存用户消息到 Go 后端
-    save_message_to_go(session_id, "user", req.question)
-
-    # 执行对话流程
     try:
-        # 意图识别
-        intent_updates = conversation_nodes.intent_node(state)
-        state.current_intent = intent_updates.get("current_intent")
-        state.entities.update(intent_updates.get("entities", {}))
-
-        # 实体链接
-        entity_updates = conversation_nodes.entity_node(state)
-        # 使用解包合并而不是update，这样可以处理字段清除的情况
-        # 如果entity_node返回的entities中有值为None的字段，表示需要清除
-        new_entities = entity_updates.get("entities", {})
-        for key in ["metric_name", "metric_code", "unit", "starrocks_sql"]:
-            if key in new_entities and new_entities[key] is None:
-                # 字段被清除
-                state.entities.pop(key, None)
-                del new_entities[key]
-        state.entities.update(new_entities)
-
-        # SQL 生成
-        sql_updates = conversation_nodes.sql_gen_node(state)
-        state.generated_sql = sql_updates.get("generated_sql")
-        state.sql_params = sql_updates.get("sql_params", {})
-        # 处理 intent_is_metadata_query
-        if "intent_is_metadata_query" in sql_updates:
-            state.intent_is_metadata_query = sql_updates.get("intent_is_metadata_query")
-        # 处理默认值应用
-        if sql_updates.get("applied_defaults"):
-            state.applied_defaults = sql_updates.get("applied_defaults")
-        if sql_updates.get("needs_clarification"):
-            state.needs_clarification = True
-            state.clarification_message = sql_updates.get("clarification_message")
-            state.clarification_type = sql_updates.get("clarification_type")
-            state.matched_metrics = sql_updates.get("matched_metrics")
-
-        # 执行查询
-        import re
-        # 添加分页 LIMIT（最大1000条）
-        page_size = min(req.page_size, 1000)
-        offset = (req.page - 1) * page_size
-        if state.generated_sql and state.generated_sql not in ["METADATA_QUERY", "NONE"]:
-            sql = state.generated_sql
-            # 移除所有 LIMIT 和 OFFSET
-            sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', sql, flags=re.IGNORECASE)
-            sql = re.sub(r'\s+OFFSET\s+\d+', '', sql, flags=re.IGNORECASE)
-            # 清理可能产生的连续空格和尾部空白
-            sql = re.sub(r'\s+', ' ', sql).strip()
-            # 追加 LIMIT 和 OFFSET 到 SQL 末尾
-            sql = f"{sql} LIMIT {page_size} OFFSET {offset}"
-            state.generated_sql = sql
-            logger.info(f"分页查询: page={req.page}, page_size={page_size}, offset={offset}")
-
-        execute_updates = await conversation_nodes.execute_node(state)
-
-        # 对比计算（同比/环比）
-        comparison_updates = await conversation_nodes.comparison_node(state)
-
-        # 生成回答
-        response_updates = conversation_nodes.response_node(state)
-
-        # 自动失败检测
-        auto_detector = get_auto_fail_detector()
-        fail_result = auto_detector.detect_failure(
-            state=state,
-            result=state.sql_result,
-            error=state.error
-        )
-
-        if fail_result.is_failure:
-            # 记录自动失败反馈
-            collector = get_feedback_collector()
-            collector.record_auto_feedback(
-                session_id=session_id,
-                turn_index=len(state.messages) // 2,
-                fail_reason=fail_result.fail_reason.value,
-                clarification_type=getattr(state, 'clarification_type', None),
-                clarification_question=getattr(state, 'clarification_message', None),
-                metric_id=state.metric_id,
-                context_snapshot=fail_result.context_for_debug,
-                raw_llm_output=None
-            )
-
-        # 获取当前 SQL（如果助手消息需要显示）
-        current_sql = state.generated_sql if state.generated_sql and state.generated_sql != "METADATA_QUERY" else None
-
-        # 添加助手消息
-        assistant_content = response_updates.get("answer", "抱歉，我无法回答这个问题。")
-        state.messages.append(ConversationMessage(
-            role="assistant",
-            content=assistant_content,
-            sql=current_sql
-        ))
-
-        # 保存助手消息到 Go 后端
-        logger.info(f"[ask_question] response_updates keys: {list(response_updates.keys())}")
-        save_message_to_go(
-            session_id, "assistant", assistant_content, current_sql,
-            result_data=response_updates.get("result_data"),
-            comparison_result=response_updates.get("comparison_result"),
-            drill_down_dims=_get_drill_down_dims(state),
-            breadcrumbs=[],
-            metric_code=state.entities.get("metric_code") or getattr(state, 'current_metric_code', None)
+        # 调用引擎处理
+        result = await engine.process(
+            question=req.question,
+            session_id=session_id,
+            page=req.page,
+            page_size=req.page_size
         )
 
         # 更新会话元数据
         if session_id in session_metadata:
             session_metadata[session_id]["updated_at"] = datetime.now().isoformat()
+        elif session_id not in session_metadata:
+            session_metadata[session_id] = {
+                "id": session_id,
+                "title": req.question[:20] + "..." if len(req.question) > 20 else req.question,
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat()
+            }
 
         # 准备思考步骤
         thinking_steps = []
-        for step in state.thinking_steps:
-            thinking_steps.append(ThinkingStepResponse(
-                step=step.step,
-                status=step.status,
-                content=step.content,
-                timestamp=step.timestamp.isoformat() if step.timestamp else None,
-                llm_used=step.llm_used
-            ))
+        for step in result.get("thinking_steps") or []:
+            if isinstance(step, dict):
+                thinking_steps.append(ThinkingStepResponse(
+                    step=step.get("step", ""),
+                    status=step.get("status", ""),
+                    content=step.get("content"),
+                    timestamp=step.get("timestamp"),
+                    llm_used=step.get("llm_used", False)
+                ))
 
         return AskResponse(
-            session_id=session_id,
-            answer=response_updates.get("answer", "抱歉，我无法回答这个问题。"),
-            suggest=response_updates.get("suggest_questions", []),
-            sql=current_sql,
+            session_id=result.get("session_id", session_id),
+            answer=result.get("answer", "抱歉，我无法回答这个问题。"),
+            suggest=result.get("suggest", []),
+            sql=result.get("sql"),
             thinking_steps=thinking_steps if thinking_steps else None,
-            needs_clarification=state.needs_clarification if hasattr(state, 'needs_clarification') else None,
-            clarification_message=state.clarification_message if hasattr(state, 'clarification_message') else None,
-            clarification_type=state.clarification_type if hasattr(state, 'clarification_type') else None,
-            matched_metrics=state.matched_metrics if hasattr(state, 'matched_metrics') else None,
-            dimension_value_candidates=getattr(state, 'dimension_value_candidates', None),
-            dimension_value_matched_text=getattr(state, 'dimension_value_matched_text', None),
-            drill_down_dims=_get_drill_down_dims(state),
-            breadcrumbs=[],
-            result_data=_rename_result_columns(response_updates.get("result_data") if isinstance(response_updates.get("result_data"), list) else None, _get_metric_name_for_result(state, conversation_nodes.metric_client)),
-            total=_extract_result_total(state.sql_result),
-            page=req.page,
-            page_size=page_size,
-            comparison_result=getattr(state, 'comparison_result', None),
-            metric_code=state.entities.get("metric_code") or getattr(state, 'current_metric_code', None)
+            needs_clarification=result.get("needs_clarification"),
+            clarification_message=result.get("clarification_message"),
+            clarification_type=result.get("clarification_type"),
+            matched_metrics=result.get("matched_metrics"),
+            dimension_value_candidates=result.get("dimension_value_candidates"),
+            dimension_value_matched_text=result.get("dimension_value_matched_text"),
+            drill_down_dims=result.get("drill_down_dims"),
+            breadcrumbs=result.get("breadcrumbs") or [],
+            result_data=result.get("result_data"),
+            total=result.get("total"),
+            page=result.get("page", req.page),
+            page_size=result.get("page_size", req.page_size),
+            comparison_result=result.get("comparison_result"),
+            metric_code=result.get("metric_code")
         )
 
     except Exception as e:
+        logger.error(f"ask_question 处理出错: {e}")
+        import traceback
+        traceback.print_exc()
         return AskResponse(
             session_id=session_id,
             answer=f"处理出错: {str(e)}",
@@ -603,15 +482,17 @@ async def drill_down_question(req: DrillDownRequest):
             # 从 starrocks_sql 提取字段名并建立映射
             if target_metric:
                 starrocks_sql = target_metric.get("starrocks_sql", "") or ""
-                field_matches = re.findall(r'(?:sum\()?\s*([\w]+)\s*\)?\s*(?:as\s*`?([\w]+)`?)?', starrocks_sql, re.IGNORECASE)
-                # 如果有别名对，提取别名；否则提取字段名
-                if any(m[1] for m in field_matches):
-                    field_matches = [m[1] if m[1] else m[0] for m in field_matches]
+                # 匹配 "sum(xxx) as alias" 或 "xxx as alias" 或 "sum(xxx)"
+                # SQL关键字列表（排除这些）
+                sql_keywords = {'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'GROUP', 'BY', 'ORDER', 'LIMIT', 'OFFSET', 'HAVING', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'IN', 'NOT', 'NULL', 'AS', 'DISTINCT', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'UNION', 'ALL', 'DWS'}
+                # 只匹配 sum(xxx) as alias 这种模式，忽略其他
+                sum_alias_matches = re.findall(r'sum\s*\(\s*(\w+)\s*\)\s*as\s*`?(\w+)`?', starrocks_sql, re.IGNORECASE)
                 metric_name = target_metric.get("name", req.metric_code)
-                for field in field_matches:
-                    field_upper = field.upper()
-                    if field_upper:
-                        metric_name_map[field_upper] = metric_name
+                for orig_field, alias_field in sum_alias_matches:
+                    key = alias_field.upper()
+                    if key and key not in sql_keywords:
+                        metric_name_map[key] = metric_name
+            logger.info(f"[drill_down] metric_name_map={metric_name_map}, metric_code={req.metric_code}")
         except Exception as e:
             logger.warning(f"获取指标名称失败: {e}")
 
@@ -798,9 +679,14 @@ async def drill_down_question(req: DrillDownRequest):
                 comp_day = 1  # 月份第一天
 
             comparison_date = f"{comp_year}-{comp_month:02d}-{comp_day:02d}"
+            # 对比周期的结束日期：使用原始结束日期的日部分，但年份改为对比年份
+            from calendar import monthrange
+            comp_month_days = monthrange(comp_year, comp_month)[1]
+            original_end_day = current_date.day  # 原始结束日期的日
+            comp_end_day = min(original_end_day, comp_month_days)  # 不能超过对比月的最大天数
+            comparison_end_date = f"{comp_year}-{comp_month:02d}-{comp_end_day:02d}"
 
-            # 构建对比SQL: 把时间条件改为对比周期第一天
-            # 查找时间条件 (FDATE >= 'xxx' AND FDATE <= 'xxx')
+            # 构建对比SQL: 把开始时间改为对比周期，把结束时间改为对比周期的结束
             comparison_sql = re.sub(
                 r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
                 f"\\1 >= '{comparison_date}'",
@@ -809,7 +695,7 @@ async def drill_down_question(req: DrillDownRequest):
             )
             comparison_sql = re.sub(
                 r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
-                f"\\1 <= '{comparison_date}'",
+                f"\\1 <= '{comparison_end_date}'",
                 comparison_sql,
                 flags=re.IGNORECASE
             )
@@ -854,11 +740,15 @@ async def drill_down_question(req: DrillDownRequest):
                             dim_key = "|".join(dim_key_parts)
                             if dim_key in comp_index:
                                 comp_row = comp_index[dim_key]
-                                # 提取指标值
+                                # 提取指标值 - 修复: 大小写不匹配问题
+                                row_upper_keys = {k.upper(): k for k in row.keys()}
+                                comp_upper_keys = {k.upper(): k for k in comp_row.keys()}
                                 for metric_col in metric_name_map.keys():
-                                    if metric_col in row and metric_col in comp_row:
-                                        current_val = row.get(metric_col)
-                                        comp_val = comp_row.get(metric_col)
+                                    row_key = row_upper_keys.get(metric_col)
+                                    comp_key = comp_upper_keys.get(metric_col)
+                                    if row_key and comp_key:
+                                        current_val = row.get(row_key)
+                                        comp_val = comp_row.get(comp_key)
                                         if current_val is not None and comp_val is not None:
                                             try:
                                                 current_num = float(str(current_val).replace(",", ""))
@@ -876,32 +766,31 @@ async def drill_down_question(req: DrillDownRequest):
                                                 pass
                                         break
 
-                    # 计算总体对比
+                    # 计算总体对比 - 累加所有行的指标值
                     total_current = 0
                     total_comp = 0
-                    metric_col_found = None
+                    # 修复: 大小写不匹配问题 - 将 row 的 key 转为大写后匹配
                     for row in data_list:
+                        row_upper_keys = {k.upper(): k for k in row.keys()}
                         for metric_col in metric_name_map.keys():
-                            if metric_col in row:
+                            original_key = row_upper_keys.get(metric_col)
+                            if original_key:
                                 try:
-                                    total_current += float(str(row.get(metric_col, 0)).replace(",", ""))
-                                    metric_col_found = metric_col
+                                    total_current += float(str(row.get(original_key, 0)).replace(",", ""))
                                 except (ValueError, TypeError):
                                     pass
-                                break
-                        if metric_col_found:
-                            break
+                                break  # 每个row找到一个metric col即可
 
                     for row in comp_data_list:
+                        row_upper_keys = {k.upper(): k for k in row.keys()}
                         for metric_col in metric_name_map.keys():
-                            if metric_col in row:
+                            original_key = row_upper_keys.get(metric_col)
+                            if original_key:
                                 try:
-                                    total_comp += float(str(row.get(metric_col, 0)).replace(",", ""))
+                                    total_comp += float(str(row.get(original_key, 0)).replace(",", ""))
                                 except (ValueError, TypeError):
                                     pass
-                                break
-                        if metric_col_found:
-                            break
+                                break  # 每个row找到一个metric col即可
 
                     comparison_result_data = {
                         "comparison_type": req.comparison_type,
@@ -911,6 +800,7 @@ async def drill_down_question(req: DrillDownRequest):
                     }
                     if total_comp != 0:
                         total_change_rate = (total_current - total_comp) / total_comp * 100
+                        comparison_result_data["change_rate"] = round(total_change_rate, 2)
                         comparison_result_data["total_change_rate"] = round(total_change_rate, 2)
                     logger.info(f"[drill_down] 对比结果: {comparison_result_data}")
             except Exception as e:
@@ -944,12 +834,28 @@ async def drill_down_question(req: DrillDownRequest):
                     # 替换维度列名为中文维度名
                     elif k in col_to_dim_name:
                         new_row[col_to_dim_name[k]] = v
-                    # 替换指标列名为中文指标名
-                    elif k in metric_name_map:
-                        new_row[metric_name_map[k]] = v
+                    # 替换指标列名为中文指标名（大小写不敏感）
+                    elif k.upper() in metric_name_map:
+                        new_row[metric_name_map[k.upper()]] = v
                     else:
                         new_row[k] = v
-                renamed_data_list.append(new_row)
+
+                logger.info(f"[drill_down] col_to_dim_name={col_to_dim_name}, metric_name_map={metric_name_map}")
+                logger.info(f"[drill_down] new_row after rename: {new_row}")
+
+                # 固定列顺序：保持原始顺序，追加对比列
+                comparison_cols = ['去年同期', '同比变化率']
+                final_row = {}
+                # 先添加已处理的列（保持原始顺序）
+                for k, v in new_row.items():
+                    if k not in comparison_cols:
+                        final_row[k] = v
+                # 追加对比列
+                for col in comparison_cols:
+                    if col in new_row:
+                        final_row[col] = new_row[col]
+                renamed_data_list.append(final_row)
+            logger.info(f"[drill_down] final_row order: {list(final_row.keys())}")
             data_list = renamed_data_list
 
         # 构建返回
@@ -1085,6 +991,20 @@ async def trigger_analysis():
 async def health():
     """健康检查"""
     return {"status": "ok"}
+
+
+@app.post("/api/v1/admin/reload-config")
+async def reload_config():
+    """重新加载指标配置"""
+    from ai.graph.nodes import conversation_nodes
+    try:
+        # 重新初始化 RuleEngine
+        conversation_nodes.rule_engine = RuleEngine()
+        logger.info("指标配置已重新加载")
+        return {"success": True, "message": "配置已重新加载"}
+    except Exception as e:
+        logger.error(f"重新加载配置失败: {e}")
+        return {"success": False, "message": str(e)}
 
 
 @app.post("/api/v1/prompt/generate")

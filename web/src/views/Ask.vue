@@ -90,6 +90,20 @@
           </div>
         </div>
         <div class="header-actions">
+          <!-- 引擎切换 A/B Test -->
+          <div class="engine-toggle">
+            <span class="engine-label">引擎:</span>
+            <button
+              class="engine-btn"
+              :class="{ active: engineType === 'legacy' }"
+              @click="setEngineType('legacy')"
+            >Legacy</button>
+            <button
+              class="engine-btn"
+              :class="{ active: engineType === 'langgraph' }"
+              @click="setEngineType('langgraph')"
+            >LangGraph</button>
+          </div>
           <button class="action-btn" @click="showPreferencesPanel = true" title="偏好设置">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
               <circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="1.5"/>
@@ -273,13 +287,15 @@
                     <thead>
                       <tr>
                         <th v-for="(value, key) in (msg.result_data[0] || (msg.result_data.data && msg.result_data.data[0]) || {})" :key="key">{{ key }}</th>
-                        <th v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">{{ msg.comparison_result.comparison_type === '同比' ? '同比变化率' : '环比变化率' }}</th>
+                        <!-- 当行数据中没有对比相关列时，才显示API级别的对比列 -->
+                        <th v-if="msg.comparison_result && !hasRowComparison(msg)">{{ msg.comparison_result.comparison_type === '同比' ? '同比变化率' : '环比变化率' }}</th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-for="(row, rowIdx) in (msg.result_data.data || msg.result_data)" :key="rowIdx">
-                        <td v-for="(value, key) in row" :key="key">{{ formatCellValue(value) }}</td>
-                        <td v-if="msg.comparison_result && !(msg.breadcrumbs && msg.breadcrumbs.length > 0)">
+                        <td v-for="(value, key) in row" :key="key" v-html="formatCellValue(value, key)"></td>
+                        <!-- 当行数据中没有对比相关列时，才显示API级别的对比值 -->
+                        <td v-if="msg.comparison_result && !hasRowComparison(msg)">
                           <span :style="{ color: msg.comparison_result.change_rate >= 0 ? '#67c23a' : '#f56c6c', fontWeight: 'bold' }">
                             {{ msg.comparison_result.change_rate >= 0 ? '↑' : '↓' }}
                             {{ Math.abs(msg.comparison_result.change_rate).toFixed(2) }}%
@@ -488,20 +504,25 @@
           <!-- 候选下拉列表 -->
           <div
             v-if="showSuggestions && suggestions.length"
-            class="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-auto"
+            class="dim-suggestions-dropdown"
           >
             <div
               v-for="(item, idx) in suggestions"
               :key="item.dimension_value"
               :class="[
-                'px-4 py-2 cursor-pointer transition-colors duration-200',
-                'hover:bg-gray-50',
-                idx === selectedIndex ? 'bg-blue-50 text-blue-600' : ''
+                'dim-suggestion-item',
+                { 'selected': idx === selectedIndex }
               ]"
               @click="selectSuggestion(item)"
             >
-              <span class="font-medium">{{ item.dimension_value }}</span>
-              <span class="ml-2 text-xs text-gray-400">[{{ item.dimension_field }}]</span>
+              <span class="candidate-name">{{ item.dimension_value }}</span>
+              <span class="candidate-code">[{{ item.dimension_field }}]</span>
+            </div>
+            <!-- 键盘导航提示 -->
+            <div class="keyboard-hint">
+              <span><kbd>↑</kbd><kbd>↓</kbd> 导航</span>
+              <span><kbd>Enter</kbd> 选择</span>
+              <span><kbd>Esc</kbd> 关闭</span>
             </div>
           </div>
         </div>
@@ -553,6 +574,7 @@ let debounceTimer
 const currentMetricCode = ref('')
 const currentSQL = ref('')
 const currentGroupBy = ref('')
+const engineType = ref(localStorage.getItem('engine_type') || 'langgraph')  // 引擎类型: legacy 或 langgraph
 const drillHistory = ref([])  // 下钻历史，用于返回 { sql, groupBy, breadcrumbs, result_data, ... }
 
 // Avatar configuration
@@ -762,7 +784,8 @@ async function resendMessage() {
   try {
     const res = await askAPI.ask({
       question: newContent,
-      session_id: sessionId.value || undefined
+      session_id: sessionId.value || undefined,
+      engine_type: engineType.value
     })
 
     if (res.data) {
@@ -864,7 +887,8 @@ async function handleSend() {
   try {
     const res = await askAPI.ask({
       question: questionText,
-      session_id: sessionId.value || undefined
+      session_id: sessionId.value || undefined,
+      engine_type: engineType.value
     })
 
     if (res.data) {
@@ -1009,6 +1033,12 @@ function selectDimensionValueCandidate(idx, dimValue) {
   handleSend()
 }
 
+function setEngineType(type) {
+  engineType.value = type
+  localStorage.setItem('engine_type', type)
+  ElMessage.success(`已切换到 ${type === 'legacy' ? 'Legacy' : 'LangGraph'} 引擎`)
+}
+
 async function handleCommand(command) {
   if (command === 'clear') {
     messages.value = []
@@ -1062,34 +1092,45 @@ function formatMessage(content) {
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
 }
 
-function formatCellValue(value) {
+function formatCellValue(value, key) {
   if (value === null || value === undefined) return '-'
-  if (typeof value === 'string') {
-    // 如果已经是带逗号的格式化字符串（如 "19,977,536.00"），直接返回
-    if (value.includes(',')) return value
-    // 如果包含 %，直接返回（已经是格式化后的百分比字符串）
-    if (value.includes('%')) return value
-    const num = parseFloat(value)
-    if (!isNaN(num)) {
-      if (num === Math.floor(num)) {
-        return new Intl.NumberFormat('zh-CN').format(num)
+  // 检查是否为对比变化率列
+  const isComparisonCol = key === '同比变化率' || key === '环比变化率'
+  if (!isComparisonCol) {
+    // 普通列
+    if (typeof value === 'string') {
+      if (value.includes(',')) return value
+      const num = parseFloat(value)
+      if (!isNaN(num)) {
+        return new Intl.NumberFormat('zh-CN', {
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 2
+        }).format(num)
       }
+    }
+    if (typeof value === 'number') {
       return new Intl.NumberFormat('zh-CN', {
         minimumFractionDigits: 0,
         maximumFractionDigits: 2
-      }).format(num)
+      }).format(value)
     }
+    return value
   }
+  // 对比变化率列：数字 + 箭头 + % + 颜色（内联样式）
+  let num = null
   if (typeof value === 'number') {
-    if (value === Math.floor(value)) {
-      return new Intl.NumberFormat('zh-CN').format(value)
-    }
-    return new Intl.NumberFormat('zh-CN', {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 2
-    }).format(value)
+    num = value
+  } else if (typeof value === 'string') {
+    num = parseFloat(value)
   }
-  return value
+  if (num === null || isNaN(num)) return value
+  const arrow = num >= 0 ? '↑' : '↓'
+  const color = num >= 0 ? '#67c23a' : '#f56c6c'
+  const formatted = new Intl.NumberFormat('zh-CN', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  }).format(Math.abs(num))
+  return `<span style="color:${color};font-weight:bold">${arrow}${formatted}%</span>`
 }
 
 function formatComparisonValue(value) {
@@ -1104,6 +1145,30 @@ function formatComparisonValue(value) {
     return new Intl.NumberFormat('zh-CN').format(value)
   }
   return value
+}
+
+// 检查行数据是否已包含对比相关列（去年同期、同比变化率等）
+function hasRowComparison(msg) {
+  const firstRow = msg.result_data?.data?.[0] || msg.result_data?.[0]
+  if (!firstRow) return false
+  const keys = Object.keys(firstRow)
+  return keys.some(k => k === '去年同期' || k === '同比变化率' || k === '上月同期' || k === '环比变化率')
+}
+
+// 获取对比列的样式类（红涨绿跌）
+function getComparisonClass(key, value) {
+  const isComparisonCol = key === '同比变化率' || key === '环比变化率'
+  if (!isComparisonCol) return ''
+  if (typeof value === 'number') {
+    return value >= 0 ? 'comparison-up' : 'comparison-down'
+  }
+  if (typeof value === 'string') {
+    const num = parseFloat(value)
+    if (!isNaN(num)) {
+      return num >= 0 ? 'comparison-up' : 'comparison-down'
+    }
+  }
+  return ''
 }
 
 async function handleFeedback(index, feedback) {
@@ -1238,7 +1303,8 @@ async function handlePageChange(page, msg) {
       question: msg.content || '当前数据',
       session_id: sessionId.value,
       page: page,
-      page_size: 10
+      page_size: 10,
+      engine_type: engineType.value
     })
 
     if (res.data) {
@@ -1353,22 +1419,28 @@ function onInput() {
 
 async function fetchSuggestions() {
   const text = question.value
-  // 提取可能的维度值片段（连续中文字符 ≥ 2）
-  const match = text.match(/[\u4e00-\u9fa5]{2,}/g)
-  if (!match || match.length === 0) {
+  // 提取可能的维度值片段
+  // 支持：中文（≥2字符）、数字（≥3字符）、字母数字混合（≥3字符）
+  const chineseMatch = text.match(/[\u4e00-\u9fa5]{2,}/g) || []
+  const codeMatch = text.match(/[A-Za-z0-9\-_]{3,}/g) || []
+
+  // 合并所有匹配
+  const allMatches = [...chineseMatch, ...codeMatch]
+
+  if (allMatches.length === 0) {
     closeSuggestions()
     return
   }
 
-  // 取最后一个匹配词作为查询词
-  const queryText = match[match.length - 1]
+  // 取最后一个匹配词作为查询词（用户最可能刚输入的）
+  const queryText = allMatches[allMatches.length - 1]
   if (queryText.length < 2) {
     closeSuggestions()
     return
   }
 
   try {
-    const res = await fetch(`/api/v1/dimension-values/search?query=${encodeURIComponent(queryText)}&limit=5`)
+    const res = await fetch(`/api/v1/dimension-values/search?query=${encodeURIComponent(queryText)}&limit=10`)
     const data = await res.json()
     if (data.code === 0 && data.data) {
       suggestions.value = data.data
@@ -1382,11 +1454,26 @@ async function fetchSuggestions() {
 }
 
 function navigateUp() {
-  if (selectedIndex.value > 0) selectedIndex.value--
+  if (selectedIndex.value > 0) {
+    selectedIndex.value--
+    scrollToSelected()
+  }
 }
 
 function navigateDown() {
-  if (selectedIndex.value < suggestions.value.length - 1) selectedIndex.value++
+  if (selectedIndex.value < suggestions.value.length - 1) {
+    selectedIndex.value++
+    scrollToSelected()
+  }
+}
+
+function scrollToSelected() {
+  nextTick(() => {
+    const container = document.querySelector('.dim-suggestions-dropdown')
+    const items = container?.querySelectorAll('.dim-suggestion-item')
+    const selected = items?.[selectedIndex.value]
+    selected?.scrollIntoView({ block: 'nearest' })
+  })
 }
 
 function selectCurrent() {
@@ -1398,8 +1485,9 @@ function selectCurrent() {
 function selectSuggestion(item) {
   // 替换输入框中的候选词
   const text = question.value
-  // 找到最后一个连续中文字符并替换
-  question.value = text.replace(/[\u4e00-\u9fa5]{2,}$/, item.dimension_value)
+  // 找到最后一个连续字符序列并替换（支持中文、数字、字母混合）
+  const pattern = /([\u4e00-\u9fa5]{2,}|[A-Za-z0-9\-_]{3,})$/
+  question.value = text.replace(pattern, item.dimension_value)
   closeSuggestions()
 }
 
@@ -1648,6 +1736,44 @@ function closeSuggestions() {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
+}
+
+/* 引擎切换按钮 */
+.engine-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--bg-primary);
+  border-radius: 8px;
+  margin-right: 8px;
+}
+
+.engine-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-right: 2px;
+}
+
+.engine-btn {
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+
+.engine-btn:hover {
+  background: var(--bg-secondary);
+}
+
+.engine-btn.active {
+  background: var(--accent);
+  color: white;
 }
 
 .action-btn {
@@ -2059,6 +2185,7 @@ function closeSuggestions() {
 }
 
 .input-wrapper {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 10px;
@@ -2071,6 +2198,130 @@ function closeSuggestions() {
 
 .input-wrapper:focus-within {
   border-color: var(--primary);
+}
+
+/* Type-ahead 下拉框样式 - 固定向上展开 */
+.dim-suggestions-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 12px rgba(0, 0, 0, 0.08);
+  z-index: 9999;
+  overflow: hidden;
+  max-height: 320px;
+  overflow-y: auto;
+  animation: dropdownFadeInUp 0.2s ease-out;
+}
+
+/* 箭头指示器 */
+.dim-suggestions-dropdown::before {
+  content: '';
+  position: absolute;
+  bottom: -6px;
+  left: 20px;
+  width: 10px;
+  height: 10px;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  transform: rotate(45deg);
+}
+
+@keyframes dropdownFadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dim-suggestion-item {
+  padding: 10px 14px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: all 0.15s ease;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.dim-suggestion-item:last-child {
+  border-bottom: none;
+}
+
+.dim-suggestion-item:first-child {
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+.dim-suggestion-item:last-child {
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
+
+.dim-suggestion-item:hover {
+  background: var(--bg-primary);
+}
+
+.dim-suggestion-item.selected {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  color: white;
+}
+
+.dim-suggestion-item.selected .candidate-code {
+  background: rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.candidate-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.candidate-code {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+
+/* 键盘导航提示 */
+.keyboard-hint {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-light);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.keyboard-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--text-secondary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .chat-input {
@@ -2569,5 +2820,16 @@ function closeSuggestions() {
 .btn-cancel:hover {
   border-color: var(--text-muted);
   color: var(--text-primary);
+}
+
+/* 对比变化率样式 - 红涨绿跌 */
+.comparison-up {
+  color: #67c23a;
+  font-weight: bold;
+}
+
+.comparison-down {
+  color: #f56c6c;
+  font-weight: bold;
 }
 </style>
