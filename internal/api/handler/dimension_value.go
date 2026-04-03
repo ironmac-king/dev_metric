@@ -97,6 +97,7 @@ func IncrementFrequency(c *gin.Context) {
 
 // buildDimValueSearchSQL 构建维度值搜索 SQL
 // 分层匹配：精确匹配 > 前缀匹配 > 模糊匹配
+// 如果有精确匹配，只返回精确匹配（避免 SKU=10116 时出现 10116JP 等候选）
 func buildDimValueSearchSQL(query, dimensionField string, limit int) string {
 	// 转义 query 中的特殊字符
 	escapedQuery := query
@@ -135,15 +136,20 @@ func buildDimValueSearchSQL(query, dimensionField string, limit int) string {
 		WHERE dimension_value_pinyin LIKE '%%%s%%'%s`,
 		escapedQuery, whereClause)
 
-	// 组合查询并限制结果
+	// 策略：如果有精确匹配结果，只返回精确匹配；否则返回其他匹配
+	// 使用子查询：如果精确匹配数 > 0，只返回精确匹配；否则返回所有匹配
 	sql := fmt.Sprintf(`
-		SELECT * FROM (
-			%s
-			UNION ALL %s
-			UNION ALL %s
-			UNION ALL %s
-		) t
-		ORDER BY CASE match_type WHEN 'exact' THEN 1 WHEN 'prefix' THEN 2 ELSE 3 END, frequency DESC
+		SELECT dimension_field, dimension_value, dimension_value_pinyin, frequency, match_type FROM (
+			SELECT dimension_field, dimension_value, dimension_value_pinyin, frequency, match_type,
+				CASE WHEN match_type = 'exact' THEN 0 ELSE 1 END as priority
+			FROM (
+				%s
+				UNION ALL %s
+				UNION ALL %s
+				UNION ALL %s
+			) t
+		) combined
+		ORDER BY priority, frequency DESC
 		LIMIT %d`,
 		exactSQL, prefixSQL, fuzzySQL, pinyinSQL, limit)
 

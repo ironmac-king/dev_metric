@@ -331,6 +331,23 @@ class ConversationNodes:
                     if segment not in results:
                         results.append(segment)
 
+        # 提取数字/字母混合序列（SKU、ASIN等），长度为3-20
+        # 匹配纯数字、纯字母、或字母数字混合
+        alphanum_pattern = re.compile(r'[A-Za-z0-9]{3,20}')
+        for match in alphanum_pattern.finditer(text):
+            segment = match.group()
+            # 跳过时间相关的数字（如月份、日期）
+            if self._is_time_word(segment):
+                continue
+            # 跳过已经是数字时间词的部分（如"2024"年）
+            if re.match(r'^\d{4}$', segment) and any(tw in text[max(0, match.start()-1):match.end()+1] for tw in ['年', '月']):
+                continue
+            # 跳过指标名中包含的数字
+            if segment in metric_name or metric_name in segment:
+                continue
+            if segment not in results:
+                results.append(segment)
+
         return results
 
     def _is_time_word(self, text: str) -> bool:
@@ -596,13 +613,20 @@ class ConversationNodes:
         for text in unmatched_texts:
             candidates = dim_value_client.search_dimension_values(text, limit=3)
             if candidates:
-                if len(candidates) == 1:
-                    # 唯一匹配，直接使用
+                # 优先使用精确匹配
+                exact_matches = [c for c in candidates if c.get("match_type") == "exact"]
+                if len(exact_matches) == 1:
+                    # 唯一精确匹配，直接使用
+                    matched = exact_matches[0]
+                    entities[matched["dimension_field"]] = matched["dimension_value"]
+                    logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']} (精确匹配)")
+                elif len(candidates) == 1:
+                    # 唯一匹配（可能是前缀或模糊），直接使用
                     matched = candidates[0]
                     entities[matched["dimension_field"]] = matched["dimension_value"]
                     logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']}")
                 else:
-                    # 多个候选，需要用户确认
+                    # 多个候选且无精确匹配，需要用户确认
                     state.needs_clarification = True
                     state.clarification_type = "dimension_value"
                     state.clarification_message = f"您说的是哪个维度：{[c['dimension_value'] for c in candidates]}？"
