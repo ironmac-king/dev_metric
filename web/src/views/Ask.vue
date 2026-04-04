@@ -1452,7 +1452,8 @@ async function fetchSuggestions() {
     if (data.code === 0 && data.data) {
       suggestions.value = data.data
       showSuggestions.value = suggestions.value.length > 0
-      selectedIndex.value = suggestions.value.length > 0 ? 0 : -1
+      // 不要默认选中第一个，只有用户用键盘/鼠标明确选择时才选中
+      // selectedIndex.value = suggestions.value.length > 0 ? 0 : -1
     }
   } catch (e) {
     console.error('获取维度候选失败', e)
@@ -1490,11 +1491,14 @@ function selectCurrent() {
 }
 
 function selectSuggestion(item) {
-  // 替换输入框中的候选词
+  // 追加候选词到输入框（不再做替换，避免特殊字符导致SQL解析错误）
   const text = question.value
-  // 找到最后一个连续字符序列并替换（支持中文、数字、字母混合）
-  const pattern = /([\u4e00-\u9fa5]{2,}|[A-Za-z0-9\-_]{3,})$/
-  question.value = text.replace(pattern, item.dimension_value)
+  // 如果末尾已有非空字符，添加空格分隔
+  if (text && !text.endsWith(' ') && !text.endsWith('\n')) {
+    question.value = text + ' ' + item.dimension_value
+  } else {
+    question.value = text + item.dimension_value
+  }
   closeSuggestions()
 }
 

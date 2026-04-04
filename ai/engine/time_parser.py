@@ -317,7 +317,8 @@ class TimeParser:
         }
 
         for pattern, (time_key, year_offset, month_offset) in fixed_time_map.items():
-            if re.search(pattern, text):
+            match = re.search(pattern, text)
+            if match:
                 # 计算目标月份
                 # 使用 0-based 月份: 0=1月, 11=12月
                 current_month_index = (self.current_year * 12 + datetime.now().month) - 1
@@ -335,7 +336,7 @@ class TimeParser:
                     "type": "relative",
                     "start": start,
                     "end": end,
-                    "original": text,
+                    "original": match.group(0),
                     "has_explicit_year": True,
                     "time_key": time_key
                 }
@@ -350,7 +351,8 @@ class TimeParser:
         # 特殊处理"半年"：因为"半年"在语义上=6个月，而不是0.5年
         # "近半年" = "近" + "半年" + "年"，其中"半年"表示6个月，不是1年
         # 如果直接让正则匹配"年"模式，会错误地把"半年"解析为1年
-        if re.search(r"近(半|半年)年|过去(半|半年)年", text):
+        match = re.search(r"近(半|半年)年|过去(半|半年)年", text)
+        if match:
             from datetime import timedelta
             today = datetime.now()
             start = (today - timedelta(days=180)).strftime("%Y-%m-%d")
@@ -359,7 +361,7 @@ class TimeParser:
                 "type": "relative",
                 "start": start,
                 "end": end,
-                "original": text,
+                "original": match.group(0),
                 "has_explicit_year": True,
                 "time_key": "last_6_months"
             }
@@ -416,7 +418,7 @@ class TimeParser:
                     "type": "relative",
                     "start": start,
                     "end": end,
-                    "original": text,
+                    "original": match.group(0),
                     "has_explicit_year": True,
                     "time_key": time_key
                 }

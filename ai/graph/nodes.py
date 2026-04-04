@@ -1368,9 +1368,53 @@ class ConversationNodes:
         # 清理其他未替换的占位符
         result_sql = re.sub(r'\{[^}]+\}', '', result_sql)
 
+        # === 避免重复追加 ORDER BY/LIMIT ===
+        # 如果 SQL 已经包含 ORDER BY，不重复追加 ORDER BY 部分
+        if "ORDER BY" in sql.upper():
+            # 去掉 pattern 中的 ORDER BY 部分（如果 pattern 包含的话）
+            result_sql = re.sub(r'ORDER\s+BY\s+[^\s]+\s+(ASC|DESC)?\s*', '', result_sql, flags=re.IGNORECASE).strip()
+
+        # 如果 SQL 已经包含 LIMIT，不重复追加 LIMIT 部分
+        if "LIMIT" in sql.upper():
+            # 去掉 pattern 中的 LIMIT 部分（如果 pattern 包含的话）
+            result_sql = re.sub(r'LIMIT\s+\d+', '', result_sql, flags=re.IGNORECASE).strip()
+
+        # 如果处理后 result_sql 为空，直接返回原始 SQL
+        if not result_sql.strip():
+            logger.info(f"[_apply_formula_syntax] SQL已包含ORDER BY/LIMIT，跳过追加")
+            return sql
+
         # 追加到原始 SQL
         sql = sql.rstrip().rstrip(";") + " " + result_sql
         logger.info(f"[_apply_formula_syntax] 应用公式语法: {config.get('name')}, SQL: {sql}")
+
+        # === 修复：将 GROUP BY 列添加到 SELECT ===
+        group_cols = []
+        group_match = re.search(r'GROUP\s+BY\s+([\w,\s]+?)(?=\s*(?:ORDER|GROUP|LIMIT|$))', sql, re.IGNORECASE)
+        if group_match:
+            group_by_clause = group_match.group(1)
+            for col in group_by_clause.split(','):
+                col = col.strip()
+                if col:
+                    group_cols.append(col)
+
+        if group_cols:
+            select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.IGNORECASE | re.DOTALL)
+            if select_match:
+                select_clause = select_match.group(1)
+                cols_to_add = []
+                for col in group_cols:
+                    if col.upper() not in select_clause.upper():
+                        cols_to_add.append(col)
+                if cols_to_add:
+                    sql = re.sub(
+                        r'(SELECT\s+)(.*?)(\s+FROM)',
+                        r'\1' + ', '.join(cols_to_add) + r', \2\3',
+                        sql,
+                        flags=re.IGNORECASE | re.DOTALL
+                    )
+                    logger.info(f"[_apply_formula_syntax] 添加GROUP BY列到SELECT: {cols_to_add}")
+
         return sql
 
     def _get_table_dimensions_cached(self, table_name: str) -> Dict[str, Dict]:
@@ -1647,13 +1691,41 @@ class ConversationNodes:
                 col_match = re.search(r'(sum|avg)\s*\(\s*(\w+)\s*\)', adjusted_sql, re.IGNORECASE)
                 if col_match:
                     metric_col = col_match.group(2)
-            # 获取 GROUP BY 列（如果有的话）
-            group_col = None
-            group_match = re.search(r'GROUP\s+BY\s+(\w+)', adjusted_sql, re.IGNORECASE)
+
+            # === 修复：支持多列 GROUP BY ===
+            group_cols = []  # 改为列表，支持多列
+            group_match = re.search(r'GROUP\s+BY\s+([\w,\s]+?)(?=\s*(?:ORDER|GROUP|LIMIT|$))', adjusted_sql, re.IGNORECASE)
             if group_match:
-                group_col = group_match.group(1)
+                group_by_clause = group_match.group(1)
+                # 解析所有列（逗号分隔）
+                for col in group_by_clause.split(','):
+                    col = col.strip()
+                    if col:
+                        group_cols.append(col)
+
+            # === 修复：将 GROUP BY 列添加到 SELECT ===
+            if group_cols:
+                # 获取 SELECT 子句
+                select_match = re.search(r'SELECT\s+(.*?)\s+FROM', adjusted_sql, re.IGNORECASE | re.DOTALL)
+                if select_match:
+                    select_clause = select_match.group(1)
+                    # 检查哪些列还没在 SELECT 中
+                    cols_to_add = []
+                    for col in group_cols:
+                        if col.upper() not in select_clause.upper():
+                            cols_to_add.append(col)
+
+                    # 将缺失的列添加到 SELECT（插入到聚合函数之前）
+                    if cols_to_add:
+                        adjusted_sql = re.sub(
+                            r'(SELECT\s+)(.*?)(\s+FROM)',
+                            r'\1' + ', '.join(cols_to_add) + r', \2\3',
+                            adjusted_sql,
+                            flags=re.IGNORECASE | re.DOTALL
+                        )
+
             # 添加 ORDER BY 和 LIMIT
-            if group_col:
+            if group_cols:
                 adjusted_sql = re.sub(r'\s*$', '', adjusted_sql)  # 去掉末尾空白
                 if "ORDER BY" not in adjusted_sql.upper():
                     adjusted_sql += f" ORDER BY {metric_col} DESC"
@@ -1682,7 +1754,7 @@ class ConversationNodes:
         return result
 
     def _extract_top_n(self, text: str) -> Optional[int]:
-        """从文本中提取 top N 排名信息（如"前三"、"前十"、"前13名"、"十三级"等）"""
+        """从文本中提取 top N 排名信息（如"前三"、"前十"、"前13名"、"十三级"、"最高的10个"等）"""
         import re
         # 中文数字映射
         chinese_nums = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '零': 0}
@@ -1692,6 +1764,8 @@ class ConversationNodes:
             r'前(\d+)级',                  # 前10级
             r'前([一二三四五六七八九十零]+)名',  # 前三名、前十名
             r'前([一二三四五六七八九十]+)',     # 前三、前十
+            r'最高的(\d+)个',               # 最高的10个
+            r'最高的(\d+)名',               # 最高的10名
         ]
         for pattern in patterns:
             match = re.search(pattern, text)
