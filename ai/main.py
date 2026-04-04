@@ -1000,6 +1000,14 @@ async def reload_config():
     try:
         # 重新初始化 RuleEngine
         conversation_nodes.rule_engine = RuleEngine()
+
+        # 清除 IntentNode 的公式语法配置缓存
+        from ai.graph.nodes import IntentNode
+        if hasattr(IntentNode, '_formula_syntax_loaded'):
+            IntentNode._formula_syntax_loaded = False
+        if hasattr(IntentNode, '_formula_syntax_cache'):
+            IntentNode._formula_syntax_cache = []
+
         logger.info("指标配置已重新加载")
         return {"success": True, "message": "配置已重新加载"}
     except Exception as e:

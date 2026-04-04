@@ -62,7 +62,7 @@ class ConversationState(BaseModel):
     # 记录的默认值（用于在回复中告知用户）
     applied_defaults: Dict[str, Any] = {}
     # ========== 思考过程相关字段 ==========
-    thinking_steps: List[ThinkingStep] = []      # 思考步骤列表
+    thinking_steps: List[ThinkingStep] = Field(default_factory=list)  # 思考步骤列表
     # ========== 图谱上下文相关字段 ==========
     context: Dict[str, Any] = {}                 # 知识图谱上下文（上游/下游/相关指标）
     # ========== 多轮对话上下文继承 ==========
@@ -74,6 +74,8 @@ class ConversationState(BaseModel):
     selected_dimension_value: Optional[str] = None  # 用户选择的维度值
     dimension_value_candidates: Optional[List[Dict[str, Any]]] = None  # 维度值候选列表（用于追问选择）
     dimension_value_matched_text: Optional[str] = None  # 匹配维度值时的原始文本（如"1011"）
+    # ========== 公式语法匹配结果 ==========
+    matched_formula_syntax: Optional[Dict[str, Any]] = None  # 匹配到的公式语法配置
 
 
 class IntentResult(BaseModel):

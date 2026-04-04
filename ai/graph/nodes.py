@@ -77,10 +77,14 @@ class ConversationNodes:
                     break
 
             # 场景B：用户回复很短但有历史上下文
-            if not matched_intent and len(last_message.strip()) <= 4:
+            is_comparison_followup = last_message.strip() in ["环比呢", "同比呢", "环比", "同比"]
+            ctx_check = getattr(state, 'conversation_context', None)
+            logger.info(f"[intent_node Step0] last_msg='{last_message}' is_comparison={is_comparison_followup} ctx={ctx_check} ctx_metric={ctx_check.current_metric_name if ctx_check else None}")
+            if (not matched_intent or is_comparison_followup) and len(last_message.strip()) <= 4:
                 # 用户说"环比呢"/"同比呢"，用 LLM 补齐为完整问题
-                if last_message.strip() in ["环比呢", "同比呢", "环比", "同比"]:
+                if is_comparison_followup:
                     ctx = getattr(state, 'conversation_context', None)
+                    logger.info(f"[intent_node] 环比/同比追问检测到, ctx={ctx}, current_metric={ctx.current_metric_name if ctx else None}")
                     if ctx and ctx.current_metric_name:
                         # 用 LLM 补齐短文本
                         comparison_type = "环比" if "环比" in last_message else "同比"
@@ -100,12 +104,44 @@ class ConversationNodes:
                         if ctx.current_time_expr:
                             restored_entities["time_range"] = ctx.current_time_expr
                         state.entities.update(restored_entities)
+                        logger.info(f"[intent_node] 恢复实体: {restored_entities}")
                         # 补齐后直接返回，让后续流程处理完整问题
                         return {
                             "current_intent": "query_comparison",
                             "entities": restored_entities
                         }
                     else:
+                        logger.warning(f"[intent_node] 环比/同比追问但conversation_context为空，检查state.entities是否有继承指标")
+                        # ctx 为 None 但 state.entities 可能包含从上一个恢复周期继承的指标信息
+                        logger.info(f"[intent_node] state.entities内容: {state.entities}")
+                        inherited_metric = state.entities.get("metric_name")
+                        inherited_code = state.entities.get("metric_code")
+                        logger.info(f"[intent_node] inherited_metric={inherited_metric}, inherited_code={inherited_code}")
+                        if inherited_metric:
+                            logger.info(f"[intent_node] 从state.entities恢复指标: metric_name={inherited_metric}, metric_code={inherited_code}")
+                            comparison_type = "环比" if "环比" in last_message else "同比"
+                            expanded = self.llm_engine.expand_followup_question(
+                                last_message, inherited_metric, state.entities.get("time_range"), comparison_type
+                            )
+                            logger.info(f"[intent_node] LLM补齐(继承实体): '{last_message}' → '{expanded}'")
+                            # 更新用户消息
+                            state.messages[-1].content = expanded
+                            self._add_thinking_step(state, "意图理解", "completed",
+                                f"LLM补齐追问(继承实体)：'{expanded}'")
+                            # 从 state.entities 恢复指标
+                            restored_entities = {
+                                "metric_name": inherited_metric,
+                                "metric_code": inherited_code,
+                            }
+                            if state.entities.get("time_range"):
+                                restored_entities["time_range"] = state.entities.get("time_range")
+                            state.entities.update(restored_entities)
+                            logger.info(f"[intent_node] 恢复实体(继承): {restored_entities}")
+                            # 补齐后直接返回
+                            return {
+                                "current_intent": "query_comparison",
+                                "entities": restored_entities
+                            }
                         matched_intent = "query_value"
                 else:
                     matched_intent = "query_value"
@@ -133,6 +169,17 @@ class ConversationNodes:
                     for dim_key, dim_val in (ctx.current_dimensions or {}).items():
                         if dim_val and dim_key not in restored_entities:
                             restored_entities[dim_key] = dim_val
+                else:
+                    # ctx 为 None 时，检查 state.entities 是否有从上一个恢复周期继承的指标信息
+                    inherited_metric = state.entities.get("metric_name")
+                    inherited_code = state.entities.get("metric_code")
+                    logger.info(f"[intent_node] ctx为空，从state.entities恢复: metric_name={inherited_metric}, metric_code={inherited_code}")
+                    if inherited_metric:
+                        restored_entities["metric_name"] = inherited_metric
+                    if inherited_code:
+                        restored_entities["metric_code"] = inherited_code
+                    if state.entities.get("time_range"):
+                        restored_entities["time_range"] = state.entities.get("time_range")
 
                 state.entities.update(restored_entities)
                 self._add_thinking_step(state, "意图理解", "completed",
@@ -147,8 +194,38 @@ class ConversationNodes:
                 "inherited_metric": inherited_context.current_metric_name,
                 "inherited_metric_name": inherited_context.current_metric_name,
             }
+        else:
+            # conversation_context 为空但 state.entities 可能有继承的指标信息
+            inherited_metric = state.entities.get("metric_name")
+            inherited_code = state.entities.get("metric_code")
+            logger.info(f"[intent_node Step1] ctx为空,检查state.entities: metric_name={inherited_metric}, metric_code={inherited_code}")
+            if inherited_metric:
+                inherited_entities = {
+                    "inherited_metric": inherited_metric,
+                    "inherited_metric_name": inherited_metric,
+                }
+                # 同时更新 inherited_context 以便后续使用
+                inherited_context.current_metric_name = inherited_metric
+                inherited_context.current_metric_code = inherited_code
+                inherited_context.current_time_expr = state.entities.get("time_range")
+                logger.info(f"[intent_node Step1] 从state.entities恢复上下文: metric_name={inherited_metric}")
 
         logger.debug(f"[intent_node] 输入: {last_message}")
+
+        # ========== Step 1.5: 短文本追问检测与扩展 ==========
+        # 如果用户输入是"同比呢"/"环比呢"这类极短文本，先用 expand_followup_question 补齐
+        is_comparison_short = last_message.strip() in ["环比呢", "同比呢", "环比", "同比"]
+        if is_comparison_short and inherited_context.current_metric_name:
+            comparison_type = "环比" if "环比" in last_message else "同比"
+            expanded = self.llm_engine.expand_followup_question(
+                last_message, inherited_context.current_metric_name,
+                inherited_context.current_time_expr, comparison_type
+            )
+            logger.info(f"[intent_node] 短文本追问扩展: '{last_message}' → '{expanded}'")
+            # 更新用户消息
+            state.messages[-1].content = expanded
+            # 扩展后的问题直接用于后续处理
+            last_message = expanded
 
         # ========== Step 2: 直接调用 LLM 进行意图识别 ==========
         # 不再使用规则层 → 语义搜索 → TF-IDF 的降级架构
@@ -163,8 +240,43 @@ class ConversationNodes:
             )
             logger.debug(f"[intent_node] LLM 识别结果: intent={intent_result.intent}, confidence={intent_result.confidence}, entities={intent_result.entities}")
 
-            # 如果置信度太低，标记为需要追问
-            if intent_result.confidence < 0.4:
+            # ========== Bug Fix 1: 先提取时间信息（不依赖 confidence） ==========
+            formula_match = None  # 初始化，避免在 try 块外引用
+
+            # 检查用户输入是否包含时间词
+            has_explicit_time = bool(re.search(
+                r'昨天|今日|明日|昨日|本周|本月|上周|上月|去年|今年|明年|上个月|'
+                r'近几|最近|过去|前几|天前|月前|周前|年前|'
+                r'\d+月|\d+天|\d+周',
+                last_message
+            ))
+
+            # 如果用户没有明确说时间，清除 LLM 推断的时间
+            if intent_result.entities.get("time_range") and not has_explicit_time:
+                logger.debug(f"[intent_node] 用户未明确时间，清除 LLM 推断的 time_range")
+                intent_result.entities.pop("time_range", None)
+                intent_result.entities.pop("time_info", None)
+                intent_result.entities.pop("time_key", None)
+
+            # 如果用户说了时间，提取 time_info（不依赖 confidence）
+            if has_explicit_time and not intent_result.entities.get("time_info"):
+                time_info = self._extract_time_info(last_message)
+                if time_info:
+                    intent_result.entities["time_info"] = time_info
+                    logger.info(f"[intent_node] 时间解析: {time_info.get('time_key')}, original={time_info.get('original')}")
+
+            # ========== Bug Fix 2: 公式语法匹配修正 intent ==========
+            formula_match = self._match_formula_syntax(intent_result.intent, last_message)
+            final_intent = intent_result.intent
+            if formula_match:
+                formula_intent = formula_match.get("intent_type")
+                if formula_intent and formula_intent != intent_result.intent:
+                    logger.info(f"[intent_node] 公式修正: {intent_result.intent} → {formula_intent}, matched={formula_match.get('name')}")
+                    final_intent = formula_intent
+                    state.matched_formula_syntax = formula_match
+
+            # ========== Bug Fix 3: 置信度检查（formula_match 可以修正 intent） ==========
+            if intent_result.confidence < 0.4 and not formula_match and not has_explicit_time:
                 state.needs_clarification = True
                 state.clarification_type = "intent"
                 state.clarification_message = "抱歉，我没理解您的意思。您是想查询指标值、趋势、还是对比数据呢？"
@@ -172,33 +284,20 @@ class ConversationNodes:
                     f"LLM 置信度 {intent_result.confidence:.2f} < 0.4，需要追问")
                 return {"current_intent": None, "entities": intent_result.entities}
 
-            # 补充 time_info（LLM 可能只返回 time_range 字符串，没有 time_info 对象）
-            if intent_result.entities.get("time_range") and not intent_result.entities.get("time_info"):
-                time_info = self._extract_time_info(last_message)
-                if time_info:
-                    intent_result.entities["time_info"] = time_info
-                    logger.debug(f"[intent_node] 补充 time_info: {time_info}")
-
-            # 检查用户输入是否真的包含时间词（防止 LLM 错误推断）
-            has_explicit_time = bool(re.search(
-                r'昨天|今日|明日|昨日|本周|本月|上周|上月|去年|今年|明年|上个月|'
-                r'近几|最近|过去|前几|天前|月前|周前|年前|'
-                r'\d+月|\d+天|\d+周',
-                last_message
-            ))
-            if intent_result.entities.get("time_range") and not has_explicit_time:
-                # 用户没说时间，LLM 不应该推断，清除并触发追问
-                logger.debug(f"[intent_node] 用户未明确时间，清除 LLM 推断的 time_range")
-                intent_result.entities.pop("time_range", None)
-                intent_result.entities.pop("time_info", None)
-                intent_result.entities.pop("time_key", None)
-
             # 补充 top_n 排名信息（检测"前三"、"前十"、"前13"等模式）
             if not intent_result.entities.get("top_n"):
                 top_n = self._extract_top_n(last_message)
                 if top_n:
                     intent_result.entities["top_n"] = top_n
                     logger.debug(f"[intent_node] 检测到 top_n: {top_n}")
+
+            # 补充排名维度信息（检测"最高的+维度词"模式，如"最高的品类"）
+            # 当公式语法匹配到排名意图时，自动提取分组维度
+            if not intent_result.entities.get("dimension") and not intent_result.entities.get("category"):
+                detected_dim = self._extract_ranking_dimension(last_message, final_intent)
+                if detected_dim:
+                    intent_result.entities["dimension"] = detected_dim
+                    logger.debug(f"[intent_node] 检测到排名维度: {detected_dim}")
 
         except Exception as e:
             logger.error(f"[intent_node] LLM 意图识别失败: {e}")
@@ -208,6 +307,7 @@ class ConversationNodes:
                 confidence=0.3,
                 entities={}
             )
+            final_intent = "query_value"
 
         # ========== 更新上下文 ==========
         self._update_context(state, intent_result.entities)
@@ -218,16 +318,20 @@ class ConversationNodes:
             "query_trend": "查询趋势",
             "query_comparison": "对比分析",
             "query_metadata": "查询元数据",
+            "query_ranking": "排名分析",
+            "query_ratio": "占比分析",
+            "query_retention": "留存分析",
             "greeting": "问候",
             "thanks": "感谢",
             "bye": "告别",
-        }.get(intent_result.intent, intent_result.intent)
+        }.get(final_intent, final_intent)
 
+        formula_note = f", 公式修正" if formula_match else ""
         self._add_thinking_step(state, "意图理解", "completed",
-            f"LLM 识别为「{intent_desc}」，置信度 {intent_result.confidence:.2f}")
+            f"LLM 识别为「{intent_desc}」，置信度 {intent_result.confidence:.2f}{formula_note}")
 
         return {
-            "current_intent": intent_result.intent,
+            "current_intent": final_intent,
             "entities": intent_result.entities,
         }
 
@@ -275,8 +379,10 @@ class ConversationNodes:
         # 更新指标信息
         if entities.get("metric_name"):
             ctx.current_metric_name = entities.get("metric_name")
+            logger.info(f"[_update_context] 保存 metric_name: {entities.get('metric_name')}")
         if entities.get("metric_code"):
             ctx.current_metric_code = entities.get("metric_code")
+            logger.info(f"[_update_context] 保存 metric_code: {entities.get('metric_code')}")
 
         # 更新时间表达式
         if entities.get("time_range"):
@@ -502,7 +608,9 @@ class ConversationNodes:
             # 关键优化：当规则引擎匹配不到时，尝试用 LLM 识别短输入中的指标
             # 比如用户说"sku"，LLM 可以识别出可能是"缺货SKU数"
             # 但如果用户已经提供了时间词（如"最近7天"）且有继承的指标，不要让 LLM 猜测新指标
-            should_extract_metric = is_short_input or (not term_links and not is_pure_followup)
+            # 另外：如果是环比/同比追问且已有继承指标，不要用 LLM 猜测新指标
+            is_comparison_followup = any(kw in last_message for kw in ["环比呢", "同比呢", "环比", "同比"])
+            should_extract_metric = (is_short_input or (not term_links and not is_pure_followup)) and not (is_comparison_followup and inherited_metric)
             is_primary_time_input = is_time_word and inherited_metric
             llm_result = None  # Initialize for scope
             if should_extract_metric and not is_primary_time_input:
@@ -531,17 +639,17 @@ class ConversationNodes:
                 logger.debug(f"[entity_node] 识别时间维度: {entities['dimension']}")
 
         # 如果没有匹配到指标但有时间范围，也要提取
-        if not term_links and not entities.get("time_range"):
+        if not entities.get("time_range"):
             time_range = self._extract_time_range(last_message)
             if time_range:
                 entities["time_range"] = time_range
-                logger.debug(f"[entity_node] 提取到时间范围: {time_range}")
 
         # 提取完整时间信息（用于追问和SQL组装）
-        time_info = self._extract_time_info(last_message)
+        # 优先使用 intent_node 中 LLM 已提取的 time_info（不受 Redis 编码损坏影响）
+        # 只有当 LLM 未提取时才尝试解析，但 last_message 可能已乱码
+        time_info = entities.get("time_info") or self._extract_time_info(last_message)
         if time_info:
             entities["time_info"] = time_info
-            logger.debug(f"[entity_node] 提取到完整时间信息: {time_info}")
 
         # 检查是否是业务术语查询（ASIN、SKU等）
         business_term_info = self.rule_engine.recognize_business_term(last_message)
@@ -636,13 +744,25 @@ class ConversationNodes:
                     entities[matched["dimension_field"]] = matched["dimension_value"]
                     logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']}")
                 else:
-                    # 多个候选且无精确匹配，需要用户确认
-                    state.needs_clarification = True
-                    state.clarification_type = "dimension_value"
-                    state.clarification_message = f"您说的是哪个维度：{[c['dimension_value'] for c in candidates]}？"
-                    state.dimension_value_candidates = candidates  # 保存候选列表供后续解析
-                    state.dimension_value_matched_text = text  # 保存匹配的原始文本（如"1011"）
-                    return {"entities": entities}
+                    # 【重要】如果是排名查询（如"最高的XXX"），不应该追问维度值候选
+                    # 而应该直接执行 GROUP BY 查询，让用户看到排名结果
+                    is_ranking_query = state.current_intent == "query_ranking"
+                    has_ranking_keywords = any(kw in last_message for kw in ["最高", "最低", "最多", "最少", "第一名", "前", "排名"])
+                    is_dimension_type_query = text.upper() in ["SKU", "ASIN", "品类", "品牌", "渠道", "地区", "平台"]
+
+                    if is_ranking_query or (has_ranking_keywords and is_dimension_type_query):
+                        # 排名查询场景：直接跳过追问，将此作为 GROUP BY 维度处理
+                        logger.info(f"[entity_node] 排名查询检测到维度类型词 '{text}'，跳过维度值追问，作为 GROUP BY 维度处理")
+                        # 将 text 作为 dimension 存入 entities（如 "SKU"）
+                        entities["dimension"] = text
+                    else:
+                        # 非排名查询：多个候选且无精确匹配，需要用户确认
+                        state.needs_clarification = True
+                        state.clarification_type = "dimension_value"
+                        state.clarification_message = f"您说的是哪个维度：{[c['dimension_value'] for c in candidates]}？"
+                        state.dimension_value_candidates = candidates  # 保存候选列表供后续解析
+                        state.dimension_value_matched_text = text  # 保存匹配的原始文本（如"1011"）
+                        return {"entities": entities}
 
         return {"entities": entities}
 
@@ -720,16 +840,15 @@ class ConversationNodes:
         time_range = state.entities.get("time_range")
         time_info = state.entities.get("time_info")  # 完整时间信息
 
+        # [DEBUG] clarification 时间检查日志
+        logger.info(f"[clarification_node] time检查 | metric_name={metric_name} | time_range={time_range} | time_info={time_info}")
+
         # 确定缺失字段
         missing_fields = []
         if not metric_name:
             missing_fields.append("metric_name")
-        if not time_range:
+        if not time_range and not time_info:
             missing_fields.append("time_range")
-
-        # 检查是否需要追问年份（绝对月份如"7月"没有明确年份）
-        needs_year_clarification = False
-        if time_info:
             from ai.engine.time_parser import TimeParser
             parser = TimeParser()
             needs_year_clarification = parser.needs_year_clarification(time_info)
@@ -917,6 +1036,12 @@ class ConversationNodes:
             self._add_thinking_step(state, "SQL 生成", "completed",
                 f"基于预置 SQL 模板，指标：{metric_name or '未知指标'}")
 
+            # === 应用公式语法配置 ===
+            last_message = state.messages[-1].content if state.messages else ""
+            formula_config = self._match_formula_syntax(state.current_intent, last_message)
+            if formula_config:
+                adjusted_sql = self._apply_formula_syntax(adjusted_sql, formula_config, state.entities)
+
             return {
                 "generated_sql": adjusted_sql,
                 "sql_params": {"metric_id": metric_id, "metric_code": metric_code},
@@ -946,8 +1071,13 @@ class ConversationNodes:
             # 记录思考步骤：SQL 生成
             self._add_thinking_step(state, "SQL 生成", "completed",
                 f"基于 {metric_name or '未知指标'} 生成 SQL 查询")
+            # === 应用公式语法配置 ===
+            last_message = state.messages[-1].content if state.messages else ""
+            formula_config = self._match_formula_syntax(state.current_intent, last_message)
+            if formula_config:
+                adjusted_sql = self._apply_formula_syntax(adjusted_sql, formula_config, state.entities)
             return {
-                "generated_sql": sql_result.sql,
+                "generated_sql": adjusted_sql,
                 "sql_params": sql_result.params,
             }
 
@@ -981,6 +1111,11 @@ class ConversationNodes:
                 if actual_starrocks_sql:
                     # 使用指标的实际 SQL 模板
                     adjusted_sql = self._apply_dimensions_to_sql(actual_starrocks_sql, dimensions, state.entities, time_info)
+                    # === 应用公式语法配置 ===
+                    last_message = state.messages[-1].content if state.messages else ""
+                    formula_config = self._match_formula_syntax(state.current_intent, last_message)
+                    if formula_config:
+                        adjusted_sql = self._apply_formula_syntax(adjusted_sql, formula_config, state.entities)
                     return {
                         "generated_sql": adjusted_sql,
                         "sql_params": {"metric_id": metric_id, "metric_code": metric_code},
@@ -1219,6 +1354,87 @@ class ConversationNodes:
 
     # 维度配置缓存（避免每次查询都调 API）
     _table_dimensions_cache: Dict[str, Dict[str, Dict]] = {}
+
+    # 公式语法配置缓存
+    _formula_syntax_cache: List[Dict[str, Any]] = []
+    _formula_syntax_loaded: bool = False
+
+    def _get_formula_syntax_configs(self) -> List[Dict[str, Any]]:
+        """获取公式语法配置，带缓存"""
+        if self._formula_syntax_loaded:
+            logger.info(f"[_get_formula_syntax_configs] 使用缓存, count={len(self._formula_syntax_cache)}")
+            return self._formula_syntax_cache
+        try:
+            configs = self.metric_client.get_formula_syntax_configs()
+            self._formula_syntax_cache = configs
+            self._formula_syntax_loaded = True
+            logger.info(f"[_get_formula_syntax_configs] 首次加载成功, count={len(configs)}")
+        except Exception as e:
+            logger.warning(f"获取公式语法配置失败: {e}")
+            self._formula_syntax_cache = []
+            self._formula_syntax_loaded = True
+        return self._formula_syntax_cache
+
+    def _match_formula_syntax(self, intent: str, text: str) -> Optional[Dict[str, Any]]:
+        """根据用户输入文本匹配公式语法配置（不限制 intent_type）"""
+        configs = self._get_formula_syntax_configs()
+        if not configs:
+            return None
+
+        text_lower = text.lower()
+        best_match = None
+        best_priority = -1
+
+        for cfg in configs:
+            keywords = cfg.get("keywords", "")
+            if not keywords:
+                continue
+            # 检查关键词是否在用户输入中
+            keyword_list = [k.strip() for k in keywords.split(",")]
+            for kw in keyword_list:
+                if kw and kw.lower() in text_lower:
+                    priority = cfg.get("priority", 0)
+                    # 优先匹配优先级高的配置
+                    if priority > best_priority:
+                        best_match = cfg
+                        best_priority = priority
+                    break
+        return best_match
+
+    def _apply_formula_syntax(self, sql: str, config: Dict[str, Any], entities: Dict[str, Any]) -> str:
+        """将公式语法配置应用到 SQL"""
+        if not sql or not config:
+            return sql
+
+        pattern = config.get("sql_pattern", "")
+        if not pattern:
+            return sql
+
+        # 替换占位符
+        result_sql = pattern
+
+        # {metric} -> 指标列名
+        metric_col = "value"  # 默认指标列
+        col_match = re.search(r'(sum|avg)\s*\(\s*(\w+)\s*\)', sql, re.IGNORECASE)
+        if col_match:
+            metric_col = col_match.group(2)
+        result_sql = result_sql.replace("{metric}", metric_col)
+
+        # {n} -> top_n 值（默认10）
+        top_n = entities.get("top_n")
+        if top_n:
+            result_sql = result_sql.replace("{n}", str(top_n))
+        else:
+            # 默认返回前10名
+            result_sql = result_sql.replace("{n}", "10")
+
+        # 清理其他未替换的占位符
+        result_sql = re.sub(r'\{[^}]+\}', '', result_sql)
+
+        # 追加到原始 SQL
+        sql = sql.rstrip().rstrip(";") + " " + result_sql
+        logger.info(f"[_apply_formula_syntax] 应用公式语法: {config.get('name')}, SQL: {sql}")
+        return sql
 
     def _get_table_dimensions_cached(self, table_name: str) -> Dict[str, Dict]:
         """获取表的维度配置，带缓存"""
@@ -1524,9 +1740,9 @@ class ConversationNodes:
     def _extract_time_info(self, text: str) -> Optional[Dict]:
         """从文本中提取完整时间信息（用于追问和SQL组装）"""
         from ai.engine.time_parser import TimeParser
-
         parser = TimeParser()
-        return parser.parse(text)
+        result = parser.parse(text)
+        return result
 
     def _extract_top_n(self, text: str) -> Optional[int]:
         """从文本中提取 top N 排名信息（如"前三"、"前十"、"前13名"、"十三级"等）"""
@@ -1555,6 +1771,75 @@ class ConversationNodes:
                     for c in num_str[1:]:
                         result += chinese_nums.get(c, 0)
                     return result if result > 10 else chinese_nums.get(num_str, 0)
+        return None
+
+    def _extract_ranking_dimension(self, text: str, intent: str) -> Optional[str]:
+        """
+        从文本中提取排名分析的分组维度
+        例如："最高的品类" -> "品类", "销售最好的品牌" -> "品牌"
+
+        Returns:
+            维度类型字符串（如"品类"、"品牌"、"渠道"），或者 None
+        """
+        import re
+        text_lower = text.lower()
+
+        # 如果不是排名类意图，直接返回
+        ranking_intents = ["query_ranking", "query_value"]
+        if intent not in ranking_intents:
+            return None
+
+        # 定义维度词及其可能的变体
+        dimension_words = {
+            "品类": ["品类", "类目", "商品类", "产品类", "category"],
+            "品牌": ["品牌", "商标", "牌子", "brand"],
+            "渠道": ["渠道", "通路", "channel"],
+            "地区": ["地区", "区域", "地域", "省份", "城市", "region"],
+            "平台": ["平台", "platform"],
+            "国家": ["国家", "country", "国度"],
+            "客户": ["客户", "顾客", "买家", "用户", "customer"],
+            "商品": ["商品", "产品", "货品", "item", "product"],
+            "SKU": ["sku", "SKU", "款号"],
+            "ASIN": ["asin", "ASIN"],
+            "部门": ["部门", "科室", "team", "department"],
+            "设备": ["设备", "device"],
+            "广告": ["广告", "ad", "广告计划"],
+        }
+
+        # 检测"最高的/最好的/最低的/最差的+维度词"模式
+        ranking_patterns = [
+            r'最高的\s*(\w+)',    # 最高的品类
+            r'最好的\s*(\w+)',    # 最好的品牌
+            r'最低的\s*(\w+)',    # 最低的地区
+            r'最差的\s*(\w+)',    # 最差的渠道
+            r'销量最高的\s*(\w+)', # 销量最高的品类
+            r'销售最高的\s*(\w+)', # 销售最高的品牌
+            r'卖得最好的\s*(\w+)', # 卖得最好的商品
+            r'卖得最差的\s*(\w+)', # 卖得最差的商品
+            r'最受欢迎的\s*(\w+)', # 最受欢迎的商品
+            r'排名第一的\s*(\w+)', # 排名第一的品牌
+        ]
+
+        for pattern in ranking_patterns:
+            match = re.search(pattern, text)
+            if match:
+                extracted_dim = match.group(1)
+                # 检查是否匹配已知的维度词
+                for dim_type, dim_variants in dimension_words.items():
+                    for variant in dim_variants:
+                        if variant in extracted_dim or extracted_dim in variant:
+                            logger.debug(f"[_extract_ranking_dimension] 检测到排名维度: {dim_type}")
+                            return dim_type
+
+        # 备选：直接检测常见的维度词是否出现在"最高的"后面
+        # 有些用户可能说"品类最高的"（维度词在"最高的"前面）
+        for dim_type, dim_variants in dimension_words.items():
+            for variant in dim_variants:
+                # 检测"X最高的"或"最高的X"
+                if re.search(rf'{variant}.*最高|最高.*{variant}', text):
+                    logger.debug(f"[_extract_ranking_dimension] 检测到排名维度(变体): {dim_type}")
+                    return dim_type
+
         return None
 
     def _extract_time_range(self, text: str) -> Optional[str]:
@@ -1902,6 +2187,7 @@ class ConversationNodes:
                     "answer": state.clarification_message,
                     "suggest_questions": getattr(state, 'suggest_questions', []) or self._generate_suggestions(state),
                     "needs_clarification": True,
+                    "clarification_type": clarification_type,
                 }
             # 其他追问类型：优先使用 state.error
             error_msg = getattr(state, 'error', None)
@@ -2028,6 +2314,7 @@ class ConversationNodes:
                     # 有数据，调用 LLM 生成自然语言回答
                     metric_name = state.entities.get("metric_name", "该指标")
                     unit = state.entities.get("unit", "")
+                    logger.info(f"[response_node] metric_name={metric_name}, entities={state.entities}")
                     answer = self.llm_engine.generate_response(
                         question=state.messages[-1].content if state.messages else "",
                         sql=state.generated_sql or "",
