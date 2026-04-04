@@ -155,6 +155,43 @@ class MetricClient:
             # 按分数排序，取前 limit 个
             scored.sort(key=lambda x: x[0], reverse=True)
             return [m for _, m in scored[:limit]]
+
+    def create_analysis_log(
+        self,
+        user_id: str,
+        session_id: str,
+        question: str,
+        intent: str,
+        success: bool,
+        fail_stage: str = "",
+        fail_reason: str = "",
+        suggestion: str = "",
+        thinking_steps: str = ""
+    ) -> bool:
+        """写入问数分析日志"""
+        try:
+            payload = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "question": question,
+                "intent": intent,
+                "success": success,
+                "fail_stage": fail_stage,
+                "fail_reason": fail_reason,
+                "suggestion": suggestion,
+                "thinking_steps": thinking_steps
+            }
+            response = httpx.post(
+                f"{self.base_url}/api/v1/ask-analysis/log",
+                json=payload,
+                timeout=10
+            )
+            if response.status_code == 200:
+                logger.info(f"分析日志写入成功: session_id={session_id}, success={success}")
+                return True
+            else:
+                logger.warning(f"分析日志写入失败: status={response.status_code}")
+                return False
         except Exception as e:
-            logger.warning(f"搜索指标失败: {e}")
-            return []
+            logger.warning(f"分析日志写入异常: {e}")
+            return False

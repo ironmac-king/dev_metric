@@ -35,6 +35,11 @@ const routes = [
         component: () => import('../views/Ask.vue')
       },
       {
+        path: 'ask-analysis',
+        name: 'AskAnalysis',
+        component: () => import('../views/AskAnalysis.vue')
+      },
+      {
         path: 'ai-assistant',
         name: 'AIAssistant',
         component: () => import('../views/components/AskDashboard.vue')

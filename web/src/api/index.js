@@ -121,6 +121,12 @@ export const feedbackAPI = {
   getByType: () => api.get('/feedback/by-type')
 }
 
+// 问数分析 API
+export const askAnalysisAPI = {
+  getLogs: (params) => api.get('/ask-analysis/logs', { params }),
+  getLog: (id) => api.get(`/ask-analysis/logs/${id}`)
+}
+
 // 认证 API
 export const authAPI = {
   login: (data) => api.post('/auth/login', data),

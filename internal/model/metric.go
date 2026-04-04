@@ -118,12 +118,14 @@ func (Dimension) TableName() string {
 
 // BusinessTerm 业务术语映射表
 type BusinessTerm struct {
-	ID        uint           `json:"id" gorm:"primaryKey"`
-	Term      string         `json:"term" gorm:"size:128;uniqueIndex"`
-	MetricIDs pq.Int64Array  `json:"metric_ids" gorm:"type:integer[]"`
-	Synonyms  pq.StringArray `json:"synonyms" gorm:"type:text[]"`  // 同义词列表，如 ["PV", "访问量"]
-	Description string       `json:"description" gorm:"type:text"`
-	CreatedAt time.Time      `json:"created_at"`
+	ID             uint           `json:"id" gorm:"primaryKey"`
+	Term           string         `json:"term" gorm:"size:128;uniqueIndex"`
+	MetricIDs      pq.Int64Array  `json:"metric_ids" gorm:"type:integer[]"`
+	Synonyms       pq.StringArray `json:"synonyms" gorm:"type:text[]"`  // 同义词列表，如 ["PV", "访问量"]
+	Description    string         `json:"description" gorm:"type:text"`
+	DimensionField string         `json:"dimension_field" gorm:"size:64"`      // 维度字段名，如 GROUP_3
+	DimensionValue string         `json:"dimension_value" gorm:"size:256"`      // 维度值，如 有线网卡
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 func (BusinessTerm) TableName() string {
@@ -375,4 +377,23 @@ type AskUserPreference struct {
 
 func (AskUserPreference) TableName() string {
 	return "ask_user_preferences"
+}
+
+// AskAnalysisLog 问数分析日志表
+type AskAnalysisLog struct {
+	ID            uint      `json:"id" gorm:"primaryKey"`
+	UserID       string    `json:"user_id" gorm:"size:64;index;default:'default'"` // 用户ID
+	SessionID    string    `json:"session_id" gorm:"size:64;index"`                // 会话ID
+	Question     string    `json:"question" gorm:"type:text"`                     // 用户问题
+	Intent       string    `json:"intent" gorm:"size:32"`                        // 识别的意图
+	Success      bool      `json:"success"`                                       // 是否成功
+	FailStage    string    `json:"fail_stage" gorm:"size:32"`                  // 失败阶段: intent/entity/sql/execute
+	FailReason   string    `json:"fail_reason" gorm:"type:text"`                // 失败原因
+	Suggestion   string    `json:"suggestion" gorm:"type:text"`                 // 建议解决方案
+	ThinkingSteps string    `json:"thinking_steps" gorm:"type:text"`             // JSON序列化的思考步骤
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (AskAnalysisLog) TableName() string {
+	return "ask_analysis_logs"
 }

@@ -111,6 +111,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.DELETE("/shortcuts/:id", handler.DeleteShortcut)
 		}
 
+		// 问数分析 API
+		askAnalysis := v1.Group("/ask-analysis")
+		{
+			askAnalysis.POST("/log", handler.CreateAnalysisLog)
+			askAnalysis.GET("/logs", handler.GetAnalysisLogs)
+			askAnalysis.GET("/logs/:id", handler.GetAnalysisLog)
+		}
+
 		// 指标元数据 API（供 AI 服务调用）
 		metadata := v1.Group("/metadata")
 		{

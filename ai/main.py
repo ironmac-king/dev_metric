@@ -79,6 +79,7 @@ class AskRequest(BaseModel):
     page: int = 1
     page_size: int = 10
     engine_type: Optional[str] = "legacy"  # "legacy" 或 "langgraph"
+    user_id: Optional[str] = "default"  # 用户ID，用于日志隔离
 
 
 class ThinkingStepResponse(BaseModel):
@@ -279,6 +280,87 @@ async def ask_question(req: AskRequest):
             page=req.page,
             page_size=req.page_size
         )
+
+        # 异步写入分析日志（不阻塞响应）
+        import asyncio
+        from ai.client.metric_client import MetricClient
+
+        async def write_analysis_log():
+            try:
+                # 分析结果，确定成功/失败状态
+                needs_clarification = result.get("needs_clarification", False)
+                answer = result.get("answer", "")
+                thinking_steps_data = result.get("thinking_steps") or []
+
+                # 判断成功：不是追问状态，且回答不包含明显的失败提示
+                is_success = not needs_clarification and "抱歉" not in answer and "无法" not in answer
+
+                # 确定失败阶段和原因
+                fail_stage = ""
+                fail_reason = ""
+                suggestion = ""
+
+                if not is_success:
+                    # 从 thinking_steps 提取失败信息
+                    for step in thinking_steps_data:
+                        if isinstance(step, dict):
+                            status = step.get("status", "")
+                            if status in ("requires_clarification", "error", "failed"):
+                                # 提取阶段名
+                                step_name = step.get("step", "")
+                                if "意图" in step_name:
+                                    fail_stage = "intent"
+                                elif "实体" in step_name or "指标" in step_name:
+                                    fail_stage = "entity"
+                                elif "SQL" in step_name or "sql" in step_name.lower():
+                                    fail_stage = "sql"
+                                elif "执行" in step_name or "查询" in step_name:
+                                    fail_stage = "execute"
+                                else:
+                                    fail_stage = "unknown"
+
+                                fail_reason = step.get("content", "") or ""
+                                break
+
+                    # 如果没有从 thinking_steps 获取到，使用 clarification_message
+                    if not fail_reason:
+                        fail_reason = result.get("clarification_message", "") or answer
+
+                    # 根据 fail_stage 提供建议
+                    if fail_stage == "intent":
+                        suggestion = "可在「意图配置」页面添加更多匹配模式或提高优先级"
+                    elif fail_stage == "entity":
+                        suggestion = "请检查指标名称是否正确，或在「指标管理」中添加对应指标"
+                    elif fail_stage == "sql":
+                        suggestion = "请检查 SQL 模板配置是否正确，或在「意图配置」中添加新的公式语法"
+                    elif fail_stage == "execute":
+                        suggestion = "请检查 StarRocks 连接配置和数据是否存在"
+
+                # 序列化 thinking_steps
+                import json
+                thinking_steps_json = json.dumps(thinking_steps_data, ensure_ascii=False, default=str)
+
+                # 获取意图
+                current_intent = result.get("current_intent", "") or ""
+
+                # 写入日志
+                metric_client = MetricClient()
+                metric_client.create_analysis_log(
+                    user_id=req.user_id or "default",
+                    session_id=session_id,
+                    question=req.question,
+                    intent=current_intent,
+                    success=is_success,
+                    fail_stage=fail_stage,
+                    fail_reason=fail_reason,
+                    suggestion=suggestion,
+                    thinking_steps=thinking_steps_json
+                )
+            except Exception as log_err:
+                logger.warning(f"写入分析日志失败: {log_err}")
+
+        # 启动异步任务（不等待完成）
+        asyncio.create_task(write_analysis_log())
 
         # 更新会话元数据
         if session_id in session_metadata:

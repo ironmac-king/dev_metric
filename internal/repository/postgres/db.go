@@ -37,6 +37,18 @@ func Init(cfg *config.DatabaseConfig) error {
 	return nil
 }
 
+// InitWithSeed 初始化数据库并填充预置数据
+func InitWithSeed(cfg *config.DatabaseConfig) error {
+	if err := Init(cfg); err != nil {
+		return err
+	}
+	// 填充公式语法预置数据
+	if err := SeedFormulaSyntaxConfigs(db); err != nil {
+		return fmt.Errorf("填充公式语法预置数据失败: %w", err)
+	}
+	return nil
+}
+
 func autoMigrate() error {
 	return db.AutoMigrate(
 		&model.Metric{},
@@ -60,6 +72,10 @@ func autoMigrate() error {
 		&model.AskQueryStat{},
 		&model.AskUserPreference{},
 		&model.AskMessage{},
+		// 公式语法配置
+		&model.FormulaSyntaxConfig{},
+		// 问数分析日志
+		&model.AskAnalysisLog{},
 	)
 }
 

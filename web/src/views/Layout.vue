@@ -60,6 +60,14 @@
             </svg>
             <span>智能问数</span>
           </router-link>
+          <router-link to="/ask-analysis" class="nav-item" :class="{ active: $route.path === '/ask-analysis' }">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <path d="M9 2L2 7V11L9 16L16 11V7L9 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M9 8V6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <circle cx="9" cy="10" r="0.75" fill="currentColor"/>
+            </svg>
+            <span>问数分析</span>
+          </router-link>
         </div>
 
         <div class="nav-section">

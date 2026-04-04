@@ -220,7 +220,7 @@
                       </span>
                       <span class="step-name">{{ step.step }}</span>
                     </div>
-                    <div v-if="step.content" class="step-content">{{ step.content }}</div>
+                    <div v-if="step.content" class="step-content" :class="{ warning: isWarningContent(step.content) }">{{ step.content }}</div>
                   </div>
                   <!-- SQL 步骤 -->
                   <div v-if="msg.sql" class="thinking-step completed">
@@ -1090,6 +1090,13 @@ function formatMessage(content) {
   return content
     .replace(/\n/g, '<br>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+}
+
+// 检测内容是否为警告信息（用于高亮样式）
+function isWarningContent(content) {
+  if (!content) return false
+  const warningKeywords = ['未提取', '未匹配', '未识别', '失败', '错误', '无法', '缺失']
+  return warningKeywords.some(keyword => content.includes(keyword))
 }
 
 function formatCellValue(value, key) {
@@ -2029,6 +2036,10 @@ function closeSuggestions() {
   animation: pulse-dot 1.5s infinite;
 }
 
+.progress-dot.requires_clarification {
+  background: #f59e0b;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }
@@ -2093,6 +2104,24 @@ function closeSuggestions() {
 
 .thinking-step.pending .step-icon {
   color: var(--text-muted);
+}
+
+.thinking-step.requires_clarification .step-icon {
+  color: #f59e0b;
+}
+
+.thinking-step.requires_clarification {
+  border-left: 3px solid #f59e0b;
+  background: #fffbeb;
+}
+
+.step-content.warning {
+  color: #d97706;
+  font-weight: 500;
+  padding: 4px 8px;
+  background: #fef3c7;
+  border-radius: 4px;
+  margin-top: 4px;
 }
 
 .step-name {
