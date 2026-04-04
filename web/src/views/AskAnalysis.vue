@@ -89,9 +89,9 @@
         v-loading="loading"
         class="analysis-table"
         row-class-name="table-row"
+        row-key="id"
         @row-click="handleRowClick"
         highlight-current-row
-        expand-row-keys="expanded"
         :expand-row-keys="expandedRows"
         @expand-change="handleExpandChange"
       >

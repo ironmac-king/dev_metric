@@ -155,6 +155,9 @@ class MetricClient:
             # 按分数排序，取前 limit 个
             scored.sort(key=lambda x: x[0], reverse=True)
             return [m for _, m in scored[:limit]]
+        except Exception as e:
+            logger.warning(f"搜索指标失败: {e}")
+            return []
 
     def create_analysis_log(
         self,
