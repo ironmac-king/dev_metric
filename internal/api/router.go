@@ -150,6 +150,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			nlp.PUT("/sql-templates/:id", handler.UpdateSQLTemplate)
 			nlp.DELETE("/sql-templates/:id", handler.DeleteSQLTemplate)
 
+			// 公式语法配置
+			nlp.GET("/formula-syntax", handler.ListFormulaSyntaxConfigs)
+			nlp.GET("/formula-syntax/enabled", handler.GetEnabledFormulaSyntaxConfigs)
+			nlp.GET("/formula-syntax/:id", handler.GetFormulaSyntaxConfig)
+			nlp.POST("/formula-syntax", handler.CreateFormulaSyntaxConfig)
+			nlp.PUT("/formula-syntax/:id", handler.UpdateFormulaSyntaxConfig)
+			nlp.DELETE("/formula-syntax/:id", handler.DeleteFormulaSyntaxConfig)
+
 			// 向量重建 API
 			nlp.POST("/intents/rebuild-embeddings", handler.RebuildIntentEmbeddings)
 			nlp.POST("/metrics/rebuild-embeddings", handler.RebuildMetricEmbeddings)
@@ -224,7 +232,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	}
 
 	// 初始化数据库
-	if err := postgres.Init(&cfg.Database); err != nil {
+	if err := postgres.InitWithSeed(&cfg.Database); err != nil {
 		log.Printf("警告: 数据库连接失败: %v", err)
 	}
 

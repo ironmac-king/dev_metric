@@ -26,6 +26,26 @@ class MetricClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    def get_metric_by_code(self, metric_code: str) -> Optional[Dict[str, Any]]:
+        """根据 metric_code 获取指标详情"""
+        try:
+            # 先获取所有指标，再按 code 过滤
+            all_metrics = self.get_all_metrics()
+            for m in all_metrics:
+                if m.get("metric_code") == metric_code:
+                    # 获取关联的维度
+                    metric_id = m.get("id")
+                    if metric_id:
+                        response = httpx.get(f"{self.base_url}/api/v1/metadata/metrics/{metric_id}", timeout=5)
+                        if response.status_code == 200:
+                            data = response.json().get("data", {})
+                            m["dimensions"] = data.get("dimensions", [])
+                    return m
+            return None
+        except Exception as e:
+            logger.error(f"获取指标失败: {e}")
+            return None
+
     def get_all_dimensions(self) -> List[Dict[str, Any]]:
         """获取所有维度"""
         response = httpx.get(f"{self.base_url}/api/v1/metadata/dimensions")
@@ -56,6 +76,17 @@ class MetricClient:
         )
         response.raise_for_status()
         return response.json().get("data", [])
+
+    def get_formula_syntax_configs(self) -> List[Dict[str, Any]]:
+        """获取所有启用的公式语法配置"""
+        import json
+        response = httpx.get(
+            f"{self.base_url}/api/v1/nlp/formula-syntax/enabled",
+            timeout=10
+        )
+        response.raise_for_status()
+        # 显式使用 UTF-8 解码避免 Windows 编码问题
+        return json.loads(response.content.decode('utf-8')).get("data", [])
 
     async def get_all_metrics_async(self) -> List[Dict[str, Any]]:
         """异步获取所有指标"""
