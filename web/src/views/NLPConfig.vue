@@ -148,6 +148,61 @@
           </div>
         </el-tab-pane>
 
+        <!-- 公式语法配置 -->
+        <el-tab-pane label="公式语法" name="formula">
+          <div class="section">
+            <div class="section-header">
+              <h2 class="section-title">公式语法配置</h2>
+              <el-button type="primary" class="btn-primary" @click="showFormulaDialog('create')">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                添加配置
+              </el-button>
+            </div>
+            <div class="table-card">
+              <table class="config-table">
+                <thead>
+                  <tr>
+                    <th>规则名称</th>
+                    <th>分类</th>
+                    <th>意图类型</th>
+                    <th>触发关键词</th>
+                    <th>SQL 片段模板</th>
+                    <th>优先级</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="cfg in formulaConfigs" :key="cfg.id">
+                    <td class="name-cell">{{ cfg.name }}</td>
+                    <td><span class="category-badge">{{ cfg.category }}</span></td>
+                    <td><span class="intent-badge">{{ cfg.intent_type }}</span></td>
+                    <td class="patterns-cell">{{ cfg.keywords }}</td>
+                    <td class="sql-cell">{{ cfg.sql_pattern }}</td>
+                    <td class="priority-cell">{{ cfg.priority }}</td>
+                    <td>
+                      <el-switch
+                        v-model="cfg.status"
+                        :active-value="1"
+                        :inactive-value="0"
+                        @change="updateFormulaStatus(cfg)"
+                      />
+                    </td>
+                    <td>
+                      <div class="action-group">
+                        <el-button link class="action-btn" @click="showFormulaDialog('edit', cfg)">编辑</el-button>
+                        <el-button link class="action-btn delete" @click="deleteFormula(cfg.id)">删除</el-button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </el-tab-pane>
+
         <!-- 业务术语 -->
         <el-tab-pane label="业务术语" name="terms">
           <div class="section">
@@ -331,6 +386,68 @@
       </template>
     </el-dialog>
 
+    <!-- Formula Syntax Dialog -->
+    <el-dialog v-model="formulaDialogVisible" :title="formulaDialogTitle" width="600px" class="config-dialog">
+      <el-form :model="formulaForm" label-width="100px" class="config-form">
+        <el-form-item label="规则名称">
+          <el-input v-model="formulaForm.name" placeholder="如：排名前十" />
+        </el-form-item>
+        <el-form-item label="分类">
+          <el-select v-model="formulaForm.category" placeholder="选择分类" style="width: 100%">
+            <el-option label="时间序列" value="时间序列" />
+            <el-option label="排名分析" value="排名分析" />
+            <el-option label="占比分析" value="占比分析" />
+            <el-option label="留存分析" value="留存分析" />
+            <el-option label="排序分析" value="排序分析" />
+            <el-option label="移动窗口" value="移动窗口" />
+            <el-option label="用户分群" value="用户分群" />
+            <el-option label="地理分析" value="地理分析" />
+            <el-option label="文本处理" value="文本处理" />
+            <el-option label="数值计算" value="数值计算" />
+            <el-option label="条件逻辑" value="条件逻辑" />
+            <el-option label="业务指标" value="业务指标" />
+            <el-option label="预算预测" value="预算预测" />
+            <el-option label="高级分析" value="高级分析" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="意图类型">
+          <el-select v-model="formulaForm.intent_type" placeholder="选择意图" style="width: 100%">
+            <el-option label="查数值" value="query_value" />
+            <el-option label="查趋势" value="query_trend" />
+            <el-option label="对比分析" value="query_comparison" />
+            <el-option label="排名查询" value="query_ranking" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="触发关键词">
+          <el-input
+            v-model="formulaForm.keywords"
+            type="textarea"
+            :rows="2"
+            placeholder="关键词用逗号分隔，如：排名前,前几名,Top"
+          />
+        </el-form-item>
+        <el-form-item label="SQL 片段模板">
+          <el-input
+            v-model="formulaForm.sql_pattern"
+            type="textarea"
+            :rows="3"
+            placeholder="如：ORDER BY {metric} DESC LIMIT {n}"
+          />
+          <div class="form-tip">占位符：{metric}=指标列名，{n}=排名前N</div>
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-input-number v-model="formulaForm.priority" :min="0" :max="100" />
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input v-model="formulaForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button size="large" @click="formulaDialogVisible = false">取消</el-button>
+        <el-button type="primary" size="large" @click="saveFormula" class="btn-primary">保存</el-button>
+      </template>
+    </el-dialog>
+
     <!-- Term Dialog -->
     <el-dialog v-model="termDialogVisible" :title="termDialogTitle" width="500px" class="config-dialog">
       <el-form :model="termForm" label-width="80px" class="config-form">
@@ -406,6 +523,22 @@ const sqlForm = ref({
 })
 const editingSQLId = ref(null)
 
+// Formula Dialog
+const formulaDialogVisible = ref(false)
+const formulaDialogTitle = ref('添加公式语法配置')
+const formulaConfigs = ref([])
+const formulaForm = ref({
+  name: '',
+  category: '业务指标',
+  intent_type: 'query_value',
+  keywords: '',
+  sql_pattern: '',
+  description: '',
+  priority: 0,
+  status: 1
+})
+const editingFormulaId = ref(null)
+
 // Term Dialog
 const termDialogVisible = ref(false)
 const termDialogTitle = ref('添加术语映射')
@@ -418,17 +551,19 @@ const editingTermId = ref(null)
 
 async function loadData() {
   try {
-    const [intentsRes, sqlRes, termsRes, metricsRes] = await Promise.all([
+    const [intentsRes, sqlRes, termsRes, metricsRes, formulaRes] = await Promise.all([
       fetch('/api/v1/nlp/intents').then(r => r.json()),
       fetch('/api/v1/nlp/sql-templates').then(r => r.json()),
       fetch('/api/v1/metadata/terms').then(r => r.json()),
-      metricAPI.list({ page: 1, page_size: 500 })
+      metricAPI.list({ page: 1, page_size: 500 }),
+      fetch('/api/v1/nlp/formula-syntax').then(r => r.json())
     ])
 
     intentTemplates.value = intentsRes.data || []
     sqlTemplates.value = sqlRes.data || []
     businessTerms.value = termsRes.data || []
     metricsList.value = metricsRes.data?.list || []
+    formulaConfigs.value = formulaRes.data || []
   } catch (e) {
     console.error('加载数据失败:', e)
   }
@@ -553,6 +688,69 @@ async function deleteSQL(id) {
   await ElMessageBox.confirm('确定删除这个模板吗？', '提示', { type: 'warning' })
   try {
     await fetch(`/api/v1/nlp/sql-templates/${id}`, { method: 'DELETE' })
+    ElMessage.success('删除成功')
+    loadData()
+  } catch (e) {
+    ElMessage.error('删除失败')
+  }
+}
+
+// Formula Syntax
+function showFormulaDialog(mode, cfg = null) {
+  if (mode === 'create') {
+    formulaDialogTitle.value = '添加公式语法配置'
+    formulaForm.value = { name: '', category: '业务指标', intent_type: 'query_value', keywords: '', sql_pattern: '', description: '', priority: 0, status: 1 }
+    editingFormulaId.value = null
+  } else {
+    formulaDialogTitle.value = '编辑公式语法配置'
+    formulaForm.value = { ...cfg }
+    editingFormulaId.value = cfg.id
+  }
+  formulaDialogVisible.value = true
+}
+
+async function saveFormula() {
+  try {
+    if (editingFormulaId.value) {
+      await fetch(`/api/v1/nlp/formula-syntax/${editingFormulaId.value}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formulaForm.value)
+      })
+      ElMessage.success('更新成功')
+    } else {
+      await fetch('/api/v1/nlp/formula-syntax', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formulaForm.value)
+      })
+      ElMessage.success('创建成功')
+    }
+    formulaDialogVisible.value = false
+    loadData()
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+async function updateFormulaStatus(cfg) {
+  try {
+    await fetch(`/api/v1/nlp/formula-syntax/${cfg.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: cfg.status })
+    })
+    ElMessage.success('状态更新成功')
+  } catch (e) {
+    ElMessage.error('更新失败')
+    loadData()
+  }
+}
+
+async function deleteFormula(id) {
+  await ElMessageBox.confirm('确定删除这个配置吗？', '提示', { type: 'warning' })
+  try {
+    await fetch(`/api/v1/nlp/formula-syntax/${id}`, { method: 'DELETE' })
     ElMessage.success('删除成功')
     loadData()
   } catch (e) {
@@ -893,6 +1091,16 @@ watch(activeTab, (tab) => {
   font-weight: 600;
 }
 
+.category-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  background: #f0f9ff;
+  color: #0369a1;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .patterns-cell {
   max-width: 180px;
   overflow: hidden;
@@ -1054,5 +1262,12 @@ watch(activeTab, (tab) => {
 .config-form :deep(.el-input__wrapper:hover),
 .config-form :deep(.el-input__wrapper.is-focus) {
   border-color: var(--primary);
+}
+
+.form-tip {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  line-height: 1.4;
 }
 </style>

@@ -339,7 +339,7 @@ type AskMessage struct {
 	CreatedAt time.Time `json:"created_at"`
 	// 响应数据（JSON 序列化存储）
 	ResultData       string `json:"result_data" gorm:"type:text"`
-	ComparisonResult string `json:"comparison_result" gorm:"type:text"`
+	ComparisonResults string `json:"comparison_results" gorm:"column:comparison_results;type:text"`
 	DrillDownDims    string `json:"drill_down_dims" gorm:"type:text"`
 	Breadcrumbs      string `json:"breadcrumbs" gorm:"type:text"`
 	MetricCode       string `json:"metric_code" gorm:"size:64"`
