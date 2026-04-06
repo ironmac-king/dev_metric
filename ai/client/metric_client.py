@@ -13,12 +13,16 @@ class MetricClient:
 
     def __init__(self, base_url: str = "http://localhost:8080"):
         self.base_url = base_url
+        self._metrics_cache = None  # 指标列表缓存
+        self._dimensions_cache = None  # 维度列表缓存
 
     def get_all_metrics(self) -> List[Dict[str, Any]]:
-        """获取所有指标"""
-        response = httpx.get(f"{self.base_url}/api/v1/metadata/metrics")
-        response.raise_for_status()
-        return response.json()["data"]
+        """获取所有指标（带缓存）"""
+        if self._metrics_cache is None:
+            response = httpx.get(f"{self.base_url}/api/v1/metadata/metrics")
+            response.raise_for_status()
+            self._metrics_cache = response.json()["data"]
+        return self._metrics_cache
 
     def get_metric(self, metric_id: int) -> Dict[str, Any]:
         """获取指标详情"""
@@ -47,10 +51,12 @@ class MetricClient:
             return None
 
     def get_all_dimensions(self) -> List[Dict[str, Any]]:
-        """获取所有维度"""
-        response = httpx.get(f"{self.base_url}/api/v1/metadata/dimensions")
-        response.raise_for_status()
-        return response.json()["data"]
+        """获取所有维度（带缓存）"""
+        if self._dimensions_cache is None:
+            response = httpx.get(f"{self.base_url}/api/v1/metadata/dimensions")
+            response.raise_for_status()
+            self._dimensions_cache = response.json()["data"]
+        return self._dimensions_cache
 
     def get_all_terms(self) -> List[Dict[str, Any]]:
         """获取所有业务术语"""

@@ -26,6 +26,8 @@ from ai.feedback.rule_optimizer import get_rule_optimizer
 from ai.config.logging_config import setup_logging, get_logger
 from ai.engine import get_engine
 from ai.engine.rule_engine import RuleEngine
+from ai.graph._result_formatter import ResultFormatter
+from ai.graph._dimension_resolver import DimensionResolver
 
 # 初始化日志
 setup_logging()
@@ -35,7 +37,7 @@ logger = get_logger("ai")
 GO_API_BASE = "http://localhost:8080"
 
 def save_message_to_go(session_id: str, role: str, content: str, sql: str = None,
-                      result_data: Any = None, comparison_result: Any = None,
+                      result_data: Any = None, comparison_results: Any = None,
                       drill_down_dims: Any = None, breadcrumbs: Any = None,
                       metric_code: str = None):
     """保存消息到 Go 后端（Redis + PostgreSQL）"""
@@ -46,7 +48,7 @@ def save_message_to_go(session_id: str, role: str, content: str, sql: str = None
             "content": content,
             "sql": sql or "",
             "result_data": json.dumps(result_data) if result_data is not None else "",
-            "comparison_result": json.dumps(comparison_result) if comparison_result is not None else "",
+            "comparison_result": json.dumps(comparison_results) if comparison_results is not None else "",
             "drill_down_dims": json.dumps(drill_down_dims) if drill_down_dims is not None else "",
             "breadcrumbs": json.dumps(breadcrumbs) if breadcrumbs is not None else "",
             "metric_code": metric_code or ""
@@ -78,7 +80,7 @@ class AskRequest(BaseModel):
     session_id: Optional[str] = None
     page: int = 1
     page_size: int = 10
-    engine_type: Optional[str] = "legacy"  # "legacy" 或 "langgraph"
+    engine_type: Optional[str] = "langgraph"  # "langgraph" | "llm"
     user_id: Optional[str] = "default"  # 用户ID，用于日志隔离
 
 
@@ -109,7 +111,7 @@ class AskResponse(BaseModel):
     total: Optional[int] = None  # 总记录数
     page: Optional[int] = None  # 当前页
     page_size: Optional[int] = None  # 每页条数
-    comparison_result: Optional[Dict[str, Any]] = None  # 同比环比结果
+    comparison_results: Optional[List[Dict[str, Any]]] = None  # 同比环比结果列表（支持同时展示同比和环比）
     metric_code: Optional[str] = None  # 当前指标代码
 
 
@@ -274,6 +276,7 @@ async def ask_question(req: AskRequest):
 
     try:
         # 调用引擎处理
+        logger.info(f"[ask_question] Calling engine.process, session_id={session_id}")
         result = await engine.process(
             question=req.question,
             session_id=session_id,
@@ -385,6 +388,9 @@ async def ask_question(req: AskRequest):
                     llm_used=step.get("llm_used", False)
                 ))
 
+        rd = result.get("result_data")
+        logger.info(f"[ask_question] RETURNING result_data: {list(rd[0].keys()) if rd and isinstance(rd, list) and rd else 'empty'}")
+
         return AskResponse(
             session_id=result.get("session_id", session_id),
             answer=result.get("answer", "抱歉，我无法回答这个问题。"),
@@ -403,7 +409,7 @@ async def ask_question(req: AskRequest):
             total=result.get("total"),
             page=result.get("page", req.page),
             page_size=result.get("page_size", req.page_size),
-            comparison_result=result.get("comparison_result"),
+            comparison_results=result.get("comparison_results"),
             metric_code=result.get("metric_code")
         )
 
@@ -527,104 +533,67 @@ class DrillDownRequest(BaseModel):
     current_group_by: Optional[str] = None
     page: int = 1
     page_size: int = 10
-    comparison_type: Optional[str] = None  # 环比: "环比", 同比: "同比"
+    comparison_types: Optional[List[str]] = None  # 支持多对比类型: ["同比", "环比"]
 
 
 @app.post("/api/v1/ask/drill_down")
 async def drill_down_question(req: DrillDownRequest):
-    """下钻维度查询"""
+    """下钻维度查询 - 使用 QueryBuilder"""
     from ai.sql_gen.generator import SQLGenerator
+    from ai.sql_gen.query_builder import QueryBuilder, QueryState, QueryDimension, TimeSpec, ComparisonSpec, DrillDownSpec, PaginationSpec
     from ai.client.metric_client import MetricClient
     import re
     import json
 
     try:
-        # 1. 从 current_sql 提取 table_name
-        sql = req.current_sql
-        match = re.search(r'FROM\s+([^\s;]+)', sql, re.IGNORECASE)
-        if not match:
-            return {"session_id": req.session_id, "answer": "无法解析 SQL 中的表名", "sql": None}
-        table_name = match.group(1)
+        logger.info(f"[drill_down] 收到请求: comparison_types={req.comparison_types}, metric_code={req.metric_code}")
+
+        # 1. 获取指标配置
+        metric_client = MetricClient()
+        all_metrics = metric_client.get_all_metrics()
+        target_metric = None
+        for m in all_metrics:
+            if m.get("metric_code") == req.metric_code:
+                target_metric = m
+                break
+
+        if not target_metric:
+            return {"session_id": req.session_id, "answer": f"未找到指标: {req.metric_code}", "sql": None}
+
+        starrocks_sql = target_metric.get("starrocks_sql", "") or ""
+        table_name = target_metric.get("starrocks_table", "")
 
         # 2. 获取维度配置
-        metric_client = MetricClient()
         dim_configs = metric_client.get_dimension_configs(table_name)
 
-        # 获取指标中文名称 - 通过 starrocks_sql 建立字段名到指标名的映射
-        metric_name_map = {}
-        try:
-            all_metrics = metric_client.get_all_metrics()
-            target_metric = None
-            # 找到当前指标
-            if req.metric_code:
-                for m in all_metrics:
-                    if m.get("metric_code") == req.metric_code:
-                        target_metric = m
-                        break
-            # 从 starrocks_sql 提取字段名并建立映射
-            if target_metric:
-                starrocks_sql = target_metric.get("starrocks_sql", "") or ""
-                # 匹配 "sum(xxx) as alias" 或 "xxx as alias" 或 "sum(xxx)"
-                # SQL关键字列表（排除这些）
-                sql_keywords = {'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'GROUP', 'BY', 'ORDER', 'LIMIT', 'OFFSET', 'HAVING', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'IN', 'NOT', 'NULL', 'AS', 'DISTINCT', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'UNION', 'ALL', 'DWS'}
-                # 只匹配 sum(xxx) as alias 这种模式，忽略其他
-                sum_alias_matches = re.findall(r'sum\s*\(\s*(\w+)\s*\)\s*as\s*`?(\w+)`?', starrocks_sql, re.IGNORECASE)
-                metric_name = target_metric.get("name", req.metric_code)
-                for orig_field, alias_field in sum_alias_matches:
-                    key = alias_field.upper()
-                    if key and key not in sql_keywords:
-                        metric_name_map[key] = metric_name
-            logger.info(f"[drill_down] metric_name_map={metric_name_map}, metric_code={req.metric_code}")
-        except Exception as e:
-            logger.warning(f"获取指标名称失败: {e}")
-
-        # 构建列名到中文维度名的映射（用于结果列名替换）
-        col_to_dim_name = {}
-        for cfg in dim_configs:
-            if cfg.get("status") == 1:
-                col_to_dim_name[cfg["column_name"]] = cfg["dimension_name"]
-
-        # 3. 找到选中维度的 column_name
+        # 构建 dimension_name -> column_name 映射
         dim_map = {}
         for cfg in dim_configs:
-            if cfg.get("status") == 1 and cfg.get("dimension_name") in req.dimension_names:
+            if cfg.get("status") == 1:
                 dim_map[cfg["dimension_name"]] = cfg["column_name"]
 
-        # 4. 改造 SQL
-        # 使用更可靠的方式：先找到 FROM 位置，然后找到 GROUP BY 位置（如果有）
-        # 这样可以正确处理 GROUP BY 后面有多个列的情况
-
-        # 找到 FROM 位置
-        from_match = re.search(r'\s+FROM\s+', sql, re.IGNORECASE)
-        if not from_match:
-            return {"session_id": req.session_id, "answer": "无法解析 SQL 中的 FROM", "sql": None}
-        from_pos = from_match.start()
-
-        # 找到 GROUP BY 位置（在 FROM 之后）
-        group_by_pos = -1
-        remaining_sql = sql[from_pos:]
-        group_by_match = re.search(r'\s+GROUP\s+BY\s+', remaining_sql, re.IGNORECASE)
-        if group_by_match:
-            group_by_pos = from_pos + group_by_match.start()
-
-        # 提取各部分
-        select_and_from = sql[:from_pos]  # SELECT ... FROM
-        after_from = sql[from_match.end():]  # 表名和之后的内容
-
-        if group_by_pos >= 0:
-            # 有 GROUP BY：提取表名+WHERE 和 GROUP BY 部分
-            table_and_where = sql[from_match.end():group_by_pos]
-            group_by_clause = sql[group_by_pos:]
+        # 3. 构建 QueryState
+        # 提取时间范围从 current_sql
+        date_match = re.search(r"FDATE\s*>=\s*'(\d{4}-\d{2}-\d{2})'\s+AND\s+FDATE\s*<=\s*'(\d{4}-\d{2}-\d{2})'", req.current_sql, re.IGNORECASE)
+        if date_match:
+            time_start = date_match.group(1)
+            time_end = date_match.group(2)
         else:
-            # 没有 GROUP BY
-            table_and_where = after_from
-            group_by_clause = ""
+            from datetime import datetime, timedelta
+            time_end = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            time_start = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")
 
-        # 清理 table_and_where 中的 LIMIT/OFFSET（如果有的话）
-        table_and_where = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', table_and_where, flags=re.IGNORECASE).strip()
-        table_and_where = re.sub(r'\s+OFFSET\s+\d+', '', table_and_where, flags=re.IGNORECASE).strip()
+        # 4. 使用 QueryBuilder 解析 starrocks_sql 获取 field_mapping
+        builder = QueryBuilder()
+        field_mapping = builder._parse_starrocks_sql(starrocks_sql)
 
-        # 构建新的维度列（去重）
+        # 5. 提取原有的 GROUP BY 列（从 current_sql）
+        current_group_match = re.search(r'GROUP\s+BY\s+(.+?)(?:\s+ORDER|\s+HAVING|\s+LIMIT|\s+OFFSET|$)', req.current_sql, re.IGNORECASE | re.DOTALL)
+        original_group_by = []
+        if current_group_match:
+            original_group_by = [c.strip() for c in current_group_match.group(1).split(',')]
+
+        # 6. 构建下钻规格
         new_dim_columns = []
         for dim_name in req.dimension_names:
             if dim_name in dim_map:
@@ -635,56 +604,62 @@ async def drill_down_question(req: DrillDownRequest):
         if not new_dim_columns:
             return {"session_id": req.session_id, "answer": "未找到有效的维度列", "sql": None}
 
-        # 分析 SELECT 部分，提取列名
-        select_match = re.match(r'SELECT\s+(.+)', select_and_from, re.IGNORECASE)
-        if not select_match:
-            return {"session_id": req.session_id, "answer": "无法解析 SELECT", "sql": None}
-        select_content = select_match.group(1).strip()
+        drill_down_spec = DrillDownSpec(
+            add_dimensions=new_dim_columns,
+            original_group_by=original_group_by,
+            original_sql=req.current_sql
+        )
 
-        # 判断是否有聚合函数
-        has_aggregate = any(kw in select_content.upper() for kw in ['SUM(', 'COUNT(', 'AVG(', 'MAX(', 'MIN('])
+        # 7. 构建 QueryState
+        query_state = QueryState(
+            session_id=req.session_id,
+            intent="drill_down",
+            metric={
+                "code": req.metric_code,
+                "name": target_metric.get("name", ""),
+                "starrocks_table": table_name,
+                "starrocks_sql": starrocks_sql
+            },
+            time=TimeSpec(
+                type="date_range",
+                start=time_start,
+                end=time_end
+            ),
+            dimensions=[
+                QueryDimension(type=col, column=name, field=col, value=None)
+                for name, col in dim_map.items()
+                if col in original_group_by
+            ],
+            pagination=PaginationSpec(page=req.page, page_size=req.page_size),
+            drill_down=drill_down_spec
+        )
 
-        # 检查原 SELECT 中是否已包含这些维度列
-        existing_cols = [c.strip().split()[0] for c in select_content.split(',')]  # 去掉 AS 别名
-        cols_to_add = [col for col in new_dim_columns if col not in existing_cols]
+        # 8. 使用 QueryBuilder 构建 SQL
+        result = builder.build_sql(query_state)
+        new_sql = result["sql"]
+        thinking_steps = result.get("thinking_steps", [])
 
-        # 构建新的 SELECT
-        if has_aggregate:
-            if cols_to_add:
-                new_select = f"SELECT {', '.join(cols_to_add)}, {select_content}"
-            else:
-                new_select = f"SELECT {select_content}"
-        else:
-            if cols_to_add:
-                new_select = f"SELECT {', '.join(cols_to_add)}, {select_content}"
-            else:
-                new_select = f"SELECT {select_content}"
+        logger.info(f"[drill_down] QueryBuilder 生成的 SQL: {new_sql}")
 
-        # 构建新的 GROUP BY（使用所有维度列，不只是新增的）
-        agg_funcs = ['SUM(', 'COUNT(', 'AVG(', 'MAX(', 'MIN(']
-        group_by_cols = []
-        for col in select_content.split(','):
-            col_stripped = col.strip()
-            col_upper = col_stripped.upper()
-            if any(agg in col_upper for agg in agg_funcs):
-                continue
-            col_name = col_stripped.split()[0]  # 去掉 AS 别名
-            if col_name.upper() not in ['FROM', 'WHERE', 'GROUP', 'ORDER', 'LIMIT', '']:
-                if col_name not in group_by_cols:
-                    group_by_cols.append(col_name)
-        for col in cols_to_add:
-            if col not in group_by_cols:
-                group_by_cols.append(col)
+        # 构建列名到中文维度名的映射（用于结果列名替换）
+        col_to_dim_name = {}
+        for cfg in dim_configs:
+            if cfg.get("status") == 1:
+                col_to_dim_name[cfg["column_name"]] = cfg["dimension_name"]
 
-        # 组合新的 SQL
-        new_sql = f"{new_select} FROM {table_and_where}"
-        if group_by_cols:
-            new_sql = f"{new_sql} GROUP BY {', '.join(group_by_cols)}"
+        # 获取指标中文名称 - 通过 starrocks_sql 建立字段名到指标名的映射
+        metric_name_map = {}
+        try:
+            sum_alias_matches = re.findall(r'sum\s*\(\s*(\w+)\s*\)\s*as\s*`?(\w+)`?', starrocks_sql, re.IGNORECASE)
+            metric_name = target_metric.get("name", req.metric_code)
+            for orig_field, alias_field in sum_alias_matches:
+                key = alias_field.upper()
+                if key:
+                    metric_name_map[key] = metric_name
+        except Exception as e:
+            logger.warning(f"获取指标名称失败: {e}")
 
-        # 添加分页 LIMIT（最大1000条）
-        page_size = min(req.page_size, 1000)
-        offset = (req.page - 1) * page_size
-        new_sql = f"{new_sql} LIMIT {page_size} OFFSET {offset}"
+        logger.info(f"[drill_down] metric_name_map={metric_name_map}")
 
         # 5. 执行查询
         sql_generator = SQLGenerator()
@@ -712,117 +687,116 @@ async def drill_down_question(req: DrillDownRequest):
             data_list = []
 
         # 6.5 对比计算（环比上月/同比去年）- T+1数据逻辑
-        comparison_result_data = None
-        # 如果没有传入 comparison_type，但从 SQL 中能提取到时间，推断对比类型
-        # 如果时间是3月（本月是4月），推断为同比去年3月
-        if not req.comparison_type and data_list:
-            date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", sql)
-            if date_match:
-                current_month = int(date_match.group(2))
-                if current_month in [1, 2, 3]:  # 1-3月，推断为同比（因为去年同期数据可能更完整）
-                    req.comparison_type = "同比"
-                    logger.info(f"[drill_down] 自动推断 comparison_type: {req.comparison_type} (当前月份 {current_month})")
+        # 注意：下钻操作不自动推断对比类型，只有用户明确要求时才对比
+        comparison_results_list = []
+        comparison_types = req.comparison_types or []
 
-        if req.comparison_type and data_list:
-            logger.info(f"[drill_down] 开始对比计算: comparison_type={req.comparison_type}, data_list长度={len(data_list)}")
-            # 从当前SQL中提取时间条件，确定当前周期
-            # T+1: 今天是4月2号，能查到的数据是4月1号的
-            # 环比上月: 3月1号 (上月第一天)
-            # 同比去年: 去年4月1号 (去年同月第一天)
+        logger.info(f"[drill_down] 对比计算判断: comparison_types={comparison_types} (type={type(comparison_types)}), data_list长度={len(data_list) if data_list else 0}")
+
+        if comparison_types and data_list:
+            logger.info(f"[drill_down] 开始对比计算: comparison_types={comparison_types}, data_list长度={len(data_list)}")
             from datetime import datetime, timedelta
             import calendar
+            from calendar import monthrange
 
-            # 从SQL中提取日期
-            date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", sql)
+            # 从SQL中提取日期（只提取一次）
+            date_match = re.search(r"(\d{4})-(\d{2})-(\d{2})", new_sql)
             if date_match:
                 current_year, current_month, current_day = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
                 # T+1: 当前数据实际是昨天
                 current_date = datetime(current_year, current_month, current_day) - timedelta(days=1)
                 logger.info(f"[drill_down] 提取的日期: {current_year}-{current_month:02d}-{current_day:02d}, 减去T+1后天: {current_date}")
             else:
-                # 默认为昨天
                 current_date = datetime.now() - timedelta(days=1)
                 logger.info(f"[drill_down] 无法提取日期，使用默认: {current_date}")
 
-            # 计算对比周期
-            if req.comparison_type == "环比":
-                # 环比上月: 取上月第一天
-                if current_date.month == 1:
-                    comp_year = current_date.year - 1
-                    comp_month = 12
-                else:
-                    comp_year = current_date.year
-                    comp_month = current_date.month - 1
-                comp_day = 1  # 月份第一天
-            else:
-                # 同比去年: 取去年同月第一天
-                comp_year = current_date.year - 1
-                comp_month = current_date.month
-                comp_day = 1  # 月份第一天
+            # 遍历每个对比类型
+            for comp_type in comparison_types:
+                try:
+                    logger.info(f"[drill_down] 处理对比类型: {comp_type}")
 
-            comparison_date = f"{comp_year}-{comp_month:02d}-{comp_day:02d}"
-            # 对比周期的结束日期：使用原始结束日期的日部分，但年份改为对比年份
-            from calendar import monthrange
-            comp_month_days = monthrange(comp_year, comp_month)[1]
-            original_end_day = current_date.day  # 原始结束日期的日
-            comp_end_day = min(original_end_day, comp_month_days)  # 不能超过对比月的最大天数
-            comparison_end_date = f"{comp_year}-{comp_month:02d}-{comp_end_day:02d}"
+                    # 计算对比周期
+                    if comp_type == "环比":
+                        # 环比上月: 取上月第一天
+                        if current_date.month == 1:
+                            comp_year = current_date.year - 1
+                            comp_month = 12
+                        else:
+                            comp_year = current_date.year
+                            comp_month = current_date.month - 1
+                        comp_day = 1
+                    else:
+                        # 同比去年: 取去年同月第一天
+                        comp_year = current_date.year - 1
+                        comp_month = current_date.month
+                        comp_day = 1
 
-            # 构建对比SQL: 把开始时间改为对比周期，把结束时间改为对比周期的结束
-            comparison_sql = re.sub(
-                r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
-                f"\\1 >= '{comparison_date}'",
-                new_sql,
-                flags=re.IGNORECASE
-            )
-            comparison_sql = re.sub(
-                r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
-                f"\\1 <= '{comparison_end_date}'",
-                comparison_sql,
-                flags=re.IGNORECASE
-            )
-            # 移除 LIMIT/OFFSET（保留完整的对比周期数据，不要 LIMIT 1）
-            comparison_sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', comparison_sql, flags=re.IGNORECASE)
-            comparison_sql = re.sub(r'\s+OFFSET\s+\d+', '', comparison_sql, flags=re.IGNORECASE)
+                    comparison_date = f"{comp_year}-{comp_month:02d}-{comp_day:02d}"
+                    comp_month_days = monthrange(comp_year, comp_month)[1]
+                    original_end_day = current_date.day
+                    comp_end_day = min(original_end_day, comp_month_days)
+                    comparison_end_date = f"{comp_year}-{comp_month:02d}-{comp_end_day:02d}"
 
-            logger.info(f"[drill_down] 对比SQL: {comparison_sql}")
+                    # 构建对比SQL
+                    comparison_sql = re.sub(
+                        r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+                        f"\\1 >= '{comparison_date}'",
+                        new_sql,
+                        flags=re.IGNORECASE
+                    )
+                    comparison_sql = re.sub(
+                        r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+                        f"\\1 <= '{comparison_end_date}'",
+                        comparison_sql,
+                        flags=re.IGNORECASE
+                    )
+                    comparison_sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', comparison_sql, flags=re.IGNORECASE)
+                    comparison_sql = re.sub(r'\s+OFFSET\s+\d+', '', comparison_sql, flags=re.IGNORECASE)
 
-            # 执行对比查询
-            try:
-                comp_result = await sql_generator.execute(comparison_sql, {})
-                logger.info(f"[drill_down] 对比查询结果: {comp_result}")
-                comp_data_list = []
-                if isinstance(comp_result, dict):
-                    comp_data_list = comp_result.get("data", {}).get("data", []) if isinstance(comp_result.get("data"), dict) else []
-                    logger.info(f"[drill_down] 提取的comp_data_list长度: {len(comp_data_list)}")
-                elif isinstance(comp_result, list):
-                    comp_data_list = comp_result
-                    logger.info(f"[drill_down] comp_result是list，长度: {len(comp_data_list)}")
+                    logger.info(f"[drill_down] 对比SQL ({comp_type}): {comparison_sql}")
 
-                if comp_data_list:
-                    # 用维度列作为key，建立对比数据的索引
+                    # 执行对比查询
+                    comp_result = await sql_generator.execute(comparison_sql, {})
+                    comp_data_list = []
+                    if isinstance(comp_result, dict):
+                        comp_data_list = comp_result.get("data", {}).get("data", []) if isinstance(comp_result.get("data"), dict) else []
+                    elif isinstance(comp_result, list):
+                        comp_data_list = comp_result
+
+                    if not comp_data_list:
+                        logger.info(f"[drill_down] {comp_type} 对比数据为空")
+                        continue
+
+                    # 用原始 GROUP BY 列作为key，建立对比数据的索引
+                    # 从 current_sql 中提取 GROUP BY 列
+                    group_by_match = re.search(r'GROUP BY\s+(.+?)(?:\s+ORDER|\s+LIMIT|\s+OFFSET|$)', new_sql, re.IGNORECASE)
+                    if not group_by_match:
+                        logger.warning("[drill_down] 无法从SQL提取GROUP BY列，跳过对比计算")
+                        continue
+                    group_by_cols = [col.strip().strip('`') for col in group_by_match.group(1).split(',')]
+                    logger.info(f"[drill_down] 提取的GROUP BY列: {group_by_cols}")
+
+                    # 构建对比数据的索引（使用原始GROUP BY列）
                     comp_index = {}
                     for row in comp_data_list:
-                        # 构建维度key
                         dim_key_parts = []
-                        for dim_name in req.dimension_names:
-                            if dim_name in dim_map and dim_map[dim_name] in row:
-                                dim_key_parts.append(f"{dim_map[dim_name]}:{row.get(dim_map[dim_name])}")
+                        for col in group_by_cols:
+                            if col in row:
+                                dim_key_parts.append(f"{col}:{row.get(col)}")
                         if dim_key_parts:
                             dim_key = "|".join(dim_key_parts)
                             comp_index[dim_key] = row
 
-                    # 为每个当前行匹配对比数据
+                    # 为每个当前行匹配对比数据（使用原始GROUP BY列）
                     for row in data_list:
                         dim_key_parts = []
-                        for dim_name in req.dimension_names:
-                            if dim_name in dim_map and dim_map[dim_name] in row:
-                                dim_key_parts.append(f"{dim_map[dim_name]}:{row.get(dim_map[dim_name])}")
+                        for col in group_by_cols:
+                            if col in row:
+                                dim_key_parts.append(f"{col}:{row.get(col)}")
                         if dim_key_parts:
                             dim_key = "|".join(dim_key_parts)
                             if dim_key in comp_index:
                                 comp_row = comp_index[dim_key]
-                                # 提取指标值 - 修复: 大小写不匹配问题
                                 row_upper_keys = {k.upper(): k for k in row.keys()}
                                 comp_upper_keys = {k.upper(): k for k in comp_row.keys()}
                                 for metric_col in metric_name_map.keys():
@@ -837,8 +811,8 @@ async def drill_down_question(req: DrillDownRequest):
                                                 comp_num = float(str(comp_val).replace(",", ""))
                                                 if comp_num != 0:
                                                     change_rate = (current_num - comp_num) / comp_num * 100
-                                                    # 使用中文列名，根据 comparison_type 决定前缀
-                                                    if req.comparison_type == "同比":
+                                                    # 根据对比类型添加列
+                                                    if comp_type == "同比":
                                                         row["去年同期"] = comp_val
                                                         row["同比变化率"] = round(change_rate, 2)
                                                     else:
@@ -848,10 +822,9 @@ async def drill_down_question(req: DrillDownRequest):
                                                 pass
                                         break
 
-                    # 计算总体对比 - 累加所有行的指标值
+                    # 计算总体对比
                     total_current = 0
                     total_comp = 0
-                    # 修复: 大小写不匹配问题 - 将 row 的 key 转为大写后匹配
                     for row in data_list:
                         row_upper_keys = {k.upper(): k for k in row.keys()}
                         for metric_col in metric_name_map.keys():
@@ -861,7 +834,7 @@ async def drill_down_question(req: DrillDownRequest):
                                     total_current += float(str(row.get(original_key, 0)).replace(",", ""))
                                 except (ValueError, TypeError):
                                     pass
-                                break  # 每个row找到一个metric col即可
+                                break
 
                     for row in comp_data_list:
                         row_upper_keys = {k.upper(): k for k in row.keys()}
@@ -872,21 +845,24 @@ async def drill_down_question(req: DrillDownRequest):
                                     total_comp += float(str(row.get(original_key, 0)).replace(",", ""))
                                 except (ValueError, TypeError):
                                     pass
-                                break  # 每个row找到一个metric col即可
+                                break
 
-                    comparison_result_data = {
-                        "comparison_type": req.comparison_type,
+                    comparison_result_item = {
+                        "comparison_type": comp_type,
                         "comparison_date": comparison_date,
                         "current_total": total_current,
                         "comparison_total": total_comp,
                     }
                     if total_comp != 0:
                         total_change_rate = (total_current - total_comp) / total_comp * 100
-                        comparison_result_data["change_rate"] = round(total_change_rate, 2)
-                        comparison_result_data["total_change_rate"] = round(total_change_rate, 2)
-                    logger.info(f"[drill_down] 对比结果: {comparison_result_data}")
-            except Exception as e:
-                logger.error(f"[drill_down] 对比计算失败: {e}")
+                        comparison_result_item["change_rate"] = round(total_change_rate, 2)
+                        comparison_result_item["total_change_rate"] = round(total_change_rate, 2)
+
+                    comparison_results_list.append(comparison_result_item)
+                    logger.info(f"[drill_down] {comp_type} 对比结果: {comparison_result_item}")
+
+                except Exception as e:
+                    logger.error(f"[drill_down] {comp_type} 对比计算失败: {e}")
 
         # 7. 获取剩余可下钻维度（排除已选的）
         remaining_dims = [
@@ -904,41 +880,18 @@ async def drill_down_question(req: DrillDownRequest):
         # 提取总数
         total = _extract_result_total(result)
 
-        # 替换 result_data 中的列名为中文名称（维度名或指标名）
+        # 替换 result_data 中的列名为中文名称（维度名或指标名），并统一列顺序
         if data_list:
-            renamed_data_list = []
-            for row in data_list:
-                new_row = {}
-                for k, v in row.items():
-                    # 跳过对比相关字段（稍后单独处理）
-                    if k.endswith('_comparison_value') or k.endswith('_change_rate'):
-                        new_row[k] = v
-                    # 替换维度列名为中文维度名
-                    elif k in col_to_dim_name:
-                        new_row[col_to_dim_name[k]] = v
-                    # 替换指标列名为中文指标名（大小写不敏感）
-                    elif k.upper() in metric_name_map:
-                        new_row[metric_name_map[k.upper()]] = v
-                    else:
-                        new_row[k] = v
-
-                logger.info(f"[drill_down] col_to_dim_name={col_to_dim_name}, metric_name_map={metric_name_map}")
-                logger.info(f"[drill_down] new_row after rename: {new_row}")
-
-                # 固定列顺序：保持原始顺序，追加对比列
-                comparison_cols = ['去年同期', '同比变化率']
-                final_row = {}
-                # 先添加已处理的列（保持原始顺序）
-                for k, v in new_row.items():
-                    if k not in comparison_cols:
-                        final_row[k] = v
-                # 追加对比列
-                for col in comparison_cols:
-                    if col in new_row:
-                        final_row[col] = new_row[col]
-                renamed_data_list.append(final_row)
-            logger.info(f"[drill_down] final_row order: {list(final_row.keys())}")
-            data_list = renamed_data_list
+            # 使用 ResultFormatter 统一处理列识别、rename、排序
+            formatter = ResultFormatter()
+            formatter.dimension_resolver = DimensionResolver()
+            metric_name = target_metric.get("name", req.metric_code or "")
+            data_list = formatter.normalize_result_columns(
+                result_data=data_list,
+                metric_name=metric_name,
+                generated_sql=new_sql
+            )
+            logger.info(f"[drill_down] normalize_result_columns done, first row keys: {list(data_list[0].keys()) if data_list else 'empty'}")
 
         # 构建返回
         response = {
@@ -950,12 +903,13 @@ async def drill_down_question(req: DrillDownRequest):
             "result_data": data_list[:20] if data_list else None,
             "total": total,
             "page": req.page,
-            "page_size": page_size,
-            "metric_code": req.metric_code
+            "page_size": req.page_size,
+            "metric_code": req.metric_code,
+            "thinking_steps": thinking_steps
         }
 
-        if comparison_result_data:
-            response["comparison_result"] = comparison_result_data
+        if comparison_results_list:
+            response["comparison_results"] = comparison_results_list
 
         # 保存下钻结果到 Redis/PostgreSQL
         save_message_to_go(
@@ -963,7 +917,7 @@ async def drill_down_question(req: DrillDownRequest):
             response.get("answer", ""),
             response.get("sql"),
             result_data=response.get("result_data"),
-            comparison_result=response.get("comparison_result"),
+            comparison_results=response.get("comparison_results"),
             drill_down_dims=response.get("drill_down_dims"),
             breadcrumbs=response.get("breadcrumbs"),
             metric_code=response.get("metric_code")
@@ -1083,12 +1037,12 @@ async def reload_config():
         # 重新初始化 RuleEngine
         conversation_nodes.rule_engine = RuleEngine()
 
-        # 清除 IntentNode 的公式语法配置缓存
-        from ai.graph.nodes import IntentNode
-        if hasattr(IntentNode, '_formula_syntax_loaded'):
-            IntentNode._formula_syntax_loaded = False
-        if hasattr(IntentNode, '_formula_syntax_cache'):
-            IntentNode._formula_syntax_cache = []
+        # 清除 ConversationNodes 的公式语法配置缓存
+        from ai.graph.nodes import ConversationNodes
+        if hasattr(ConversationNodes, '_formula_syntax_loaded'):
+            ConversationNodes._formula_syntax_loaded = False
+        if hasattr(ConversationNodes, '_formula_syntax_cache'):
+            ConversationNodes._formula_syntax_cache = []
 
         logger.info("指标配置已重新加载")
         return {"success": True, "message": "配置已重新加载"}

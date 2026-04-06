@@ -95,14 +95,14 @@
             <span class="engine-label">引擎:</span>
             <button
               class="engine-btn"
-              :class="{ active: engineType === 'legacy' }"
-              @click="setEngineType('legacy')"
-            >Legacy</button>
-            <button
-              class="engine-btn"
               :class="{ active: engineType === 'langgraph' }"
               @click="setEngineType('langgraph')"
             >LangGraph</button>
+            <button
+              class="engine-btn"
+              :class="{ active: engineType === 'llm' }"
+              @click="setEngineType('llm')"
+            >LLM</button>
           </div>
           <button class="action-btn" @click="showPreferencesPanel = true" title="偏好设置">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -287,15 +287,30 @@
                     <thead>
                       <tr>
                         <th v-for="(value, key) in (msg.result_data[0] || (msg.result_data.data && msg.result_data.data[0]) || {})" :key="key">{{ key }}</th>
-                        <!-- 当行数据中没有对比相关列时，才显示API级别的对比列 -->
-                        <th v-if="msg.comparison_result && !hasRowComparison(msg)">{{ msg.comparison_result.comparison_type === '同比' ? '同比变化率' : '环比变化率' }}</th>
+                        <!-- 当行数据中没有对比相关列时，遍历 comparison_results 显示多组对比列 -->
+                        <template v-if="!hasRowComparison(msg) && msg.comparison_results && msg.comparison_results.length > 0">
+                          <th v-for="comp in msg.comparison_results" :key="'th-' + comp.comparison_type">
+                            {{ comp.comparison_type === '同比' ? '同比变化率' : '环比变化率' }}
+                          </th>
+                        </template>
+                        <!-- 兼容旧的单 comparison_result 格式 -->
+                        <th v-else-if="msg.comparison_result && !hasRowComparison(msg)">{{ msg.comparison_result.comparison_type === '同比' ? '同比变化率' : '环比变化率' }}</th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-for="(row, rowIdx) in (msg.result_data.data || msg.result_data)" :key="rowIdx">
-                        <td v-for="(value, key) in row" :key="key" v-html="formatCellValue(value, key)"></td>
-                        <!-- 当行数据中没有对比相关列时，才显示API级别的对比值 -->
-                        <td v-if="msg.comparison_result && !hasRowComparison(msg)">
+                        <td v-for="(value, key) in row" :key="key" v-html="formatCellValue(value, key, msg)"></td>
+                        <!-- 当行数据中没有对比相关列时，遍历 comparison_results 显示多组对比值 -->
+                        <template v-if="!hasRowComparison(msg) && msg.comparison_results && msg.comparison_results.length > 0">
+                          <td v-for="comp in msg.comparison_results" :key="'td-' + comp.comparison_type">
+                            <span :style="{ color: comp.change_rate >= 0 ? '#67c23a' : '#f56c6c', fontWeight: 'bold' }">
+                              {{ comp.change_rate >= 0 ? '↑' : '↓' }}
+                              {{ Math.abs(comp.change_rate).toFixed(2) }}%
+                            </span>
+                          </td>
+                        </template>
+                        <!-- 兼容旧的单 comparison_result 格式 -->
+                        <td v-else-if="msg.comparison_result && !hasRowComparison(msg)">
                           <span :style="{ color: msg.comparison_result.change_rate >= 0 ? '#67c23a' : '#f56c6c', fontWeight: 'bold' }">
                             {{ msg.comparison_result.change_rate >= 0 ? '↑' : '↓' }}
                             {{ Math.abs(msg.comparison_result.change_rate).toFixed(2) }}%
@@ -574,7 +589,7 @@ let debounceTimer
 const currentMetricCode = ref('')
 const currentSQL = ref('')
 const currentGroupBy = ref('')
-const engineType = ref(localStorage.getItem('engine_type') || 'langgraph')  // 引擎类型: legacy 或 langgraph
+const engineType = ref(localStorage.getItem('engine_type') || 'langgraph')  // 引擎类型: langgraph 或 llm
 const drillHistory = ref([])  // 下钻历史，用于返回 { sql, groupBy, breadcrumbs, result_data, ... }
 
 // Avatar configuration
@@ -733,7 +748,8 @@ async function loadSession(id) {
         sql: m.sql,
         created_at: m.created_at,
         result_data: m.result_data || null,
-        comparison_result: m.comparison_result || null,
+        comparison_results: m.comparison_result || m.comparison_results || null,
+        comparison_result: m.comparison_result || m.comparison_results || null,
         drill_down_dims: m.drill_down_dims || null,
         breadcrumbs: m.breadcrumbs || null,
         metric_code: m.metric_code || null,
@@ -788,35 +804,40 @@ async function resendMessage() {
       engine_type: engineType.value
     })
 
-    if (res.data) {
-      if (!sessionId.value && res.data.session_id) {
-        sessionId.value = res.data.session_id
+    if (res) {
+      if (!sessionId.value && res.session_id) {
+        sessionId.value = res.session_id
         localStorage.setItem('ask_session_id', sessionId.value)
         await loadSessionHistory()
       }
 
-      const metricCode = extractMetricCode(res.data)
-      const sql = res.data.sql || ''
+      const metricCode = extractMetricCode(res)
+      const sql = res.sql || ''
       if (metricCode) currentMetricCode.value = metricCode
       if (sql) currentSQL.value = sql
 
+      // 解析 result_data（Go 返回 JSON 字符串，前端需 parse）
+      let resultData = res.result_data
+      if (typeof resultData === 'string') {
+        try { resultData = JSON.parse(resultData) } catch { resultData = null }
+      }
       messages.value.push({
         role: 'assistant',
-        content: res.data.answer,
-        sql: res.data.sql,
-        result_data: res.data.result_data || null,
-        comparison_result: res.data.comparison_result || null,
-        drill_down_dims: res.data.drill_down_dims || [],
-        breadcrumbs: res.data.breadcrumbs || [],
+        content: res.answer,
+        sql: res.sql,
+        result_data: resultData || null,
+        comparison_result: res.comparison_result || null,
+        drill_down_dims: res.drill_down_dims || [],
+        breadcrumbs: res.breadcrumbs || [],
         created_at: new Date().toISOString(),
         thinking_expanded: false,
-        thinking_steps: res.data.thinking_steps || [],
-        needs_clarification: res.data.needs_clarification || false,
-        clarification_message: res.data.clarification_message || null,
-        clarification_type: res.data.clarification_type || null,
-        matched_metrics: res.data.matched_metrics || [],
-        dimension_value_candidates: res.data.dimension_value_candidates || [],
-        dimension_value_matched_text: res.data.dimension_value_matched_text || ''
+        thinking_steps: res.thinking_steps || [],
+        needs_clarification: res.needs_clarification || false,
+        clarification_message: res.clarification_message || null,
+        clarification_type: res.clarification_type || null,
+        matched_metrics: res.matched_metrics || [],
+        dimension_value_candidates: res.dimension_value_candidates || [],
+        dimension_value_matched_text: res.dimension_value_matched_text || ''
       })
     }
   } catch (e) {
@@ -891,39 +912,44 @@ async function handleSend() {
       engine_type: engineType.value
     })
 
-    if (res.data) {
-      console.log('AI 响应 dimension_value_candidates:', res.data.dimension_value_candidates)
-      console.log('AI 响应 dimension_value_matched_text:', res.data.dimension_value_matched_text)
-      console.log('AI 响应 needs_clarification:', res.data.needs_clarification)
-      if (!sessionId.value && res.data.session_id) {
-        sessionId.value = res.data.session_id
+    if (res) {
+      console.log('AI 响应 dimension_value_candidates:', res.dimension_value_candidates)
+      console.log('AI 响应 dimension_value_matched_text:', res.dimension_value_matched_text)
+      console.log('AI 响应 needs_clarification:', res.needs_clarification)
+      if (!sessionId.value && res.session_id) {
+        sessionId.value = res.session_id
         localStorage.setItem('ask_session_id', sessionId.value)
         await loadSessionHistory()
       }
 
       // 保存 metric_code 和 sql（从 thinking_steps 或响应中提取）
-      const metricCode = extractMetricCode(res.data)
-      const sql = res.data.sql || ''
+      const metricCode = extractMetricCode(res)
+      const sql = res.sql || ''
       if (metricCode) currentMetricCode.value = metricCode
       if (sql) currentSQL.value = sql
 
+      // 解析 result_data（Go 返回 JSON 字符串，前端需 parse）
+      let resultData = res.result_data
+      if (typeof resultData === 'string') {
+        try { resultData = JSON.parse(resultData) } catch { resultData = null }
+      }
       messages.value.push({
         role: 'assistant',
-        content: res.data.answer,
-        sql: res.data.sql,
-        result_data: res.data.result_data || null,
-        comparison_result: res.data.comparison_result || null,
-        drill_down_dims: res.data.drill_down_dims || [],
-        breadcrumbs: res.data.breadcrumbs || [],
+        content: res.answer,
+        sql: res.sql,
+        result_data: resultData || null,
+        comparison_result: res.comparison_result || null,
+        drill_down_dims: res.drill_down_dims || [],
+        breadcrumbs: res.breadcrumbs || [],
         created_at: new Date().toISOString(),
         thinking_expanded: false,
-        thinking_steps: res.data.thinking_steps || [],
-        needs_clarification: res.data.needs_clarification || false,
-        clarification_message: res.data.clarification_message || null,
-        clarification_type: res.data.clarification_type || null,
-        matched_metrics: res.data.matched_metrics || [],
-        dimension_value_candidates: res.data.dimension_value_candidates || [],
-        dimension_value_matched_text: res.data.dimension_value_matched_text || ''
+        thinking_steps: res.thinking_steps || [],
+        needs_clarification: res.needs_clarification || false,
+        clarification_message: res.clarification_message || null,
+        clarification_type: res.clarification_type || null,
+        matched_metrics: res.matched_metrics || [],
+        dimension_value_candidates: res.dimension_value_candidates || [],
+        dimension_value_matched_text: res.dimension_value_matched_text || ''
       })
     }
   } catch (e) {
@@ -1036,7 +1062,7 @@ function selectDimensionValueCandidate(idx, dimValue) {
 function setEngineType(type) {
   engineType.value = type
   localStorage.setItem('engine_type', type)
-  ElMessage.success(`已切换到 ${type === 'legacy' ? 'Legacy' : 'LangGraph'} 引擎`)
+  ElMessage.success(`已切换到 ${type === 'langgraph' ? 'LangGraph' : 'LLM'} 引擎`)
 }
 
 async function handleCommand(command) {
@@ -1099,14 +1125,25 @@ function isWarningContent(content) {
   return warningKeywords.some(keyword => content.includes(keyword))
 }
 
-function formatCellValue(value, key) {
+// 从维度配置获取维度列名（不应该添加千分位）
+function getDimensionColumnNames(drillDownDims) {
+  if (!drillDownDims || !Array.isArray(drillDownDims)) return new Set()
+  return new Set(drillDownDims.map(d => d.dimension_name).filter(Boolean))
+}
+
+function formatCellValue(value, key, msg) {
   if (value === null || value === undefined) return '-'
+  // 从 drill_down_dims 获取维度列名（不应该添加千分位）
+  const dimensionColNames = getDimensionColumnNames(msg?.drill_down_dims)
+  const isDimensionCol = dimensionColNames.has(key)
   // 检查是否为对比变化率列
   const isComparisonCol = key === '同比变化率' || key === '环比变化率'
   if (!isComparisonCol) {
     // 普通列
     if (typeof value === 'string') {
       if (value.includes(',')) return value
+      // 维度列不添加千分位
+      if (isDimensionCol) return value
       const num = parseFloat(value)
       if (!isNaN(num)) {
         return new Intl.NumberFormat('zh-CN', {
@@ -1116,6 +1153,8 @@ function formatCellValue(value, key) {
       }
     }
     if (typeof value === 'number') {
+      // 维度列不添加千分位
+      if (isDimensionCol) return value
       return new Intl.NumberFormat('zh-CN', {
         minimumFractionDigits: 0,
         maximumFractionDigits: 2
@@ -1232,7 +1271,7 @@ function clearDimSelection(msg) {
   selectedDims.value[index] = []
 }
 
-async function handleDrillDown(msg, comparisonType = null) {
+async function handleDrillDown(msg, comparisonTypes = null) {
   const index = messages.value.indexOf(msg)
   const selected = selectedDims.value[index] || []
   if (selected.length === 0) {
@@ -1241,16 +1280,23 @@ async function handleDrillDown(msg, comparisonType = null) {
   }
 
   // 如果没有指定对比类型，根据用户消息内容判断
-  if (!comparisonType) {
+  if (!comparisonTypes) {
     // 先检查当前消息内容是否包含环比/同比关键词
     const msgContent = msg.content || ''
-    if (msgContent.includes('环比')) {
-      comparisonType = '环比'
-    } else if (msgContent.includes('同比')) {
-      comparisonType = '同比'
-    } else if (msg.comparison_result) {
-      // 都没有则继承旧的对比类型
-      comparisonType = msg.comparison_result.comparison_type
+    const hasYoy = msgContent.includes('同比') || msgContent.includes('去年同期')
+    const hasMom = msgContent.includes('环比') || msgContent.includes('上月')
+
+    if (hasYoy && hasMom) {
+      comparisonTypes = ['同比', '环比']
+    } else if (hasYoy) {
+      comparisonTypes = ['同比']
+    } else if (hasMom) {
+      comparisonTypes = ['环比']
+    } else if (msg.comparison_results && msg.comparison_results.length > 0) {
+      // 继承旧的对比类型（全部）
+      comparisonTypes = msg.comparison_results.map(c => c.comparison_type)
+    } else {
+      comparisonTypes = []
     }
   }
 
@@ -1262,7 +1308,7 @@ async function handleDrillDown(msg, comparisonType = null) {
     result_data: msg.result_data,
     drill_down_dims: msg.drill_down_dims,
     content: msg.content,
-    comparison_result: msg.comparison_result
+    comparison_results: msg.comparison_results
   })
 
   loading.value = true
@@ -1273,22 +1319,22 @@ async function handleDrillDown(msg, comparisonType = null) {
       metric_code: msg.metric_code || currentMetricCode.value || '',
       current_sql: msg.sql || currentSQL.value || '',
       current_group_by: currentGroupBy.value,
-      comparison_type: comparisonType
+      comparison_types: comparisonTypes
     })
 
-    if (res.data) {
-      console.log('下钻响应:', res.data)
+    if (res) {
+      console.log('下钻响应:', res)
       // 保存下钻后的上下文
-      currentSQL.value = res.data.sql
-      currentGroupBy.value = res.data.breadcrumbs?.map(b => b.value).join(',') || ''
+      currentSQL.value = res.sql
+      currentGroupBy.value = res.breadcrumbs?.map(b => b.value).join(',') || ''
 
       // 更新当前消息，而不是创建新消息
-      msg.content = res.data.answer
-      msg.sql = res.data.sql
-      msg.result_data = res.data.result_data || null
-      msg.drill_down_dims = res.data.drill_down_dims || []
-      msg.breadcrumbs = res.data.breadcrumbs || []
-      msg.comparison_result = res.data.comparison_result || null
+      msg.content = res.answer
+      msg.sql = res.sql
+      msg.result_data = res.result_data || null
+      msg.drill_down_dims = res.drill_down_dims || []
+      msg.breadcrumbs = res.breadcrumbs || []
+      msg.comparison_results = res.comparison_results || null
       msg.thinking_expanded = false
       await scrollToBottom()
     }
@@ -1314,12 +1360,12 @@ async function handlePageChange(page, msg) {
       engine_type: engineType.value
     })
 
-    if (res.data) {
-      msg.result_data = res.data.result_data || null
-      msg.page = res.data.page
-      msg.page_size = res.data.page_size
-      msg.total = res.data.total
-      msg.sql = res.data.sql
+    if (res) {
+      msg.result_data = res.result_data || null
+      msg.page = res.page
+      msg.page_size = res.page_size
+      msg.total = res.total
+      msg.sql = res.sql
       await scrollToBottom()
     }
   } catch (e) {

@@ -3,15 +3,21 @@ LangGraph 对话节点 - 优化版
 """
 import re
 import os
+import asyncio
 import calendar
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List
 from ai.graph.state import ConversationState, IntentResult, SQLGenerationResult, ClarificationDecision, ThinkingStep, ConversationContext
 from ai.engine.rule_engine import RuleEngine
 from ai.engine.llm import LLMEngine
 from ai.sql_gen.generator import SQLGenerator
+from ai.sql_gen.query_builder import QueryBuilder, QueryState, QueryDimension, TimeSpec, ComparisonSpec, PaginationSpec
 from ai.client.metric_client import MetricClient
 from ai.client.dim_value_client import DimValueClient
 from ai.config.logging_config import get_logger
+from ai.graph._dimension_resolver import DimensionResolver
+from ai.graph._sql_builder import SQLBuilder
+from ai.graph._result_formatter import ResultFormatter
 
 logger = get_logger("ai.nodes")
 
@@ -36,6 +42,9 @@ class ConversationNodes:
         self.llm_engine = LLMEngine()
         self.sql_generator = SQLGenerator()
         self.metric_client = MetricClient()
+        self.dimension_resolver = DimensionResolver(metric_client=self.metric_client)
+        self.sql_builder = SQLBuilder(metric_client=self.metric_client, dimension_resolver=self.dimension_resolver)
+        self.result_formatter = ResultFormatter(metric_client=self.metric_client, dimension_resolver=self.dimension_resolver)
 
     def _add_thinking_step(self, state: ConversationState, step: str, status: str = "completed", content: str = None, llm_used: bool = False):
         """记录思考步骤"""
@@ -147,7 +156,11 @@ class ConversationNodes:
                     matched_intent = "query_value"
 
             # 如果 matched_intent 已确定（非短文本追问），走原有逻辑
-            if matched_intent and not (len(last_message.strip()) <= 4 and last_message.strip() in ["环比呢", "同比呢", "环比", "同比"]):
+            # 但如果消息中包含对比关键词，不在这里直接返回，而是继续到 Step 2 做完整识别
+            has_comparison_kw = any(kw in last_message for kw in ["同比", "环比", "对比", "比较", "去年同期", "上月同期", "比去年同期", "比上月"])
+            # 关键修复：如果消息同时有意图关键词和对比关键词（如"指标值，同比环比咋样"），
+            # 不能直接返回matched_intent，要让Step 2识别出query_comparison意图
+            if matched_intent and not (len(last_message.strip()) <= 4 and last_message.strip() in ["环比呢", "同比呢", "环比", "同比"]) and not (has_comparison_kw and matched_intent != "query_comparison"):
                 state.needs_clarification = False
                 state.clarification_type = None
                 state.clarification_message = None
@@ -276,7 +289,20 @@ class ConversationNodes:
                     state.matched_formula_syntax = formula_match
 
             # ========== Bug Fix 3: 置信度检查（formula_match 可以修正 intent） ==========
-            if intent_result.confidence < 0.4 and not formula_match and not has_explicit_time:
+            # 先检查是否包含对比关键词（需要在置信度检查之前处理）
+            has_comparison_kw = any(kw in last_message for kw in ["同比", "环比", "对比", "比较", "去年同期", "上月同期", "比去年同期", "比上月"])
+            # 如果有对比关键词，先覆盖 intent 为 query_comparison（即使置信度低）
+            if has_comparison_kw and intent_result.intent not in ["query_comparison", "query_trend"]:
+                logger.info(f"[intent_node] 检测到对比关键词，覆盖 intent: {intent_result.intent} → query_comparison")
+                intent_result.intent = "query_comparison"
+                final_intent = "query_comparison"  # 同时修改 final_intent
+                intent_result.confidence = max(intent_result.confidence, 0.5)  # 提高置信度
+            # 如果有对比关键词但没有明确时间，设置默认时间范围（昨天）以避免追问
+            if has_comparison_kw and not has_explicit_time and not intent_result.entities.get("time_range"):
+                intent_result.entities["time_range"] = "昨天"
+                logger.info(f"[intent_node] 对比关键词检测但无明确时间，设置默认时间范围: 昨天")
+            # 置信度检查：只有既没有 formula_match 也没有明确时间且没有对比关键词时才追问
+            if intent_result.confidence < 0.4 and not formula_match and not has_explicit_time and not has_comparison_kw:
                 state.needs_clarification = True
                 state.clarification_type = "intent"
                 state.clarification_message = "抱歉，我没理解您的意思。您是想查询指标值、趋势、还是对比数据呢？"
@@ -294,10 +320,16 @@ class ConversationNodes:
             # 补充排名维度信息（检测"最高的+维度词"模式，如"最高的品类"）
             # 当公式语法匹配到排名意图时，自动提取分组维度
             if not intent_result.entities.get("dimension") and not intent_result.entities.get("category"):
-                detected_dim = self._extract_ranking_dimension(last_message, final_intent)
+                detected_dim = self.dimension_resolver.extract_ranking_dimension(last_message, final_intent)
                 if detected_dim:
                     intent_result.entities["dimension"] = detected_dim
                     logger.debug(f"[intent_node] 检测到排名维度: {detected_dim}")
+
+            # ========== 再次检查对比关键词（用于确保最终 intent 正确）==========
+            # 注意：此时 has_comparison_kw 已在前面定义并处理过，这里仅用于日志
+            if has_comparison_kw and final_intent not in ["query_comparison"]:
+                logger.info(f"[intent_node] 检测到对比关键词，override intent: {final_intent} → query_comparison")
+                final_intent = "query_comparison"
 
         except Exception as e:
             logger.error(f"[intent_node] LLM 意图识别失败: {e}")
@@ -477,11 +509,72 @@ class ConversationNodes:
         # 只检查片段是否完全等于时间词（不是包含关系）
         return text in time_words
 
+    def query_state_node(self, state: ConversationState) -> Dict[str, Any]:
+        """
+        QueryState 生成节点 - LLM 生成结构化查询描述
+
+        使用 LLM 将用户问题转换为 QueryState JSON，然后补充 metric 元数据
+        """
+        last_message = state.messages[-1].content if state.messages else ""
+
+        # 调用 LLM 生成 QueryState
+        context = None
+        # 如果有上一轮的 QueryState，传入上下文
+        if hasattr(state, '_query_state') and state._query_state:
+            context = state._query_state
+
+        query_state = self.llm_engine.generate_query_state(
+            question=last_message,
+            session_id=state.session_id,
+            context=context
+        )
+
+        if not query_state:
+            self._add_thinking_step(state, "QueryState 生成", "failed", "LLM 生成 QueryState 失败")
+            return {"needs_clarification": True, "clarification_message": "无法理解您的问题，请换一种方式描述"}
+
+        # 记录思考步骤
+        self._add_thinking_step(state, "QueryState 生成", "completed",
+            f"意图: {query_state.get('intent')}, 指标: {query_state.get('metric', {}).get('name', '未知')}",
+            llm_used=True)
+
+        # 保存 QueryState 到 state
+        state._query_state = query_state
+
+        # 补充 metric 元数据（从 metric_client 获取）
+        metric_code = query_state.get("metric", {}).get("code")
+        if metric_code:
+            metric = self.metric_client.get_metric_by_code(metric_code)
+            if metric:
+                query_state["metric"]["starrocks_table"] = metric.get("starrocks_table")
+                query_state["metric"]["starrocks_sql"] = metric.get("starrocks_sql")
+                query_state["metric"]["unit"] = metric.get("unit")
+
+        # 转换 metric 为 QueryMetric 格式
+        metric_info = query_state.get("metric", {})
+        if metric_info.get("starrocks_sql"):
+            # 从 starrocks_sql 解析字段
+            from ai.sql_gen.query_builder import QueryBuilder
+            builder = QueryBuilder()
+            field_mapping = builder._parse_starrocks_sql(metric_info["starrocks_sql"])
+            for f in field_mapping.get("select_fields", []):
+                if f.get("aggregation"):
+                    query_state.setdefault("metrics", []).append({
+                        "name": f["alias"],
+                        "display_name": f["alias"],
+                        "aggregation": f["aggregation"],
+                        "field": f["field"],
+                        "alias": f["alias"]
+                    })
+
+        return {"query_state": query_state}
+
     def entity_node(self, state: ConversationState) -> Dict[str, Any]:
         """
         实体链接节点 - 增强版
         支持多轮上下文继承
         """
+        logger.info(f"[entity_node] START session_id={getattr(state, 'session_id', None)}")
         entities = state.entities.copy()
 
         # ========== 获取对话上下文 ==========
@@ -722,14 +815,38 @@ class ConversationNodes:
             entity_content += "（LLM辅助识别）"
         self._add_thinking_step(state, "实体识别", "completed", entity_content)
 
-        # ========== 维度值识别 ==========
-        # 从用户消息中提取可能的维度值
+        # ========== 维度值识别（并发优化） ==========
+        # 优化：若 metric_code 已确定，说明指标已识别，此时：
+        # 1. 排名/分组查询（如"最高的二级品类"）不需要从文本搜索维度值
+        # 2. 除非用户明确提到特定维度值（如"茅台的销售额"），否则跳过搜索
+        # 只有未识别指标时才需要从文本猜测维度值
+        if entities.get("metric_code"):
+            logger.info(f"[entity_node] metric_code已确定({entities.get('metric_code')})，跳过维度值搜索")
+            logger.info(f"[entity_node] RETURN")
+            return {"entities": entities}
+
         dim_value_client = DimValueClient()
         unmatched_texts = self._extract_potential_dim_values(last_message, entities)
         logger.info(f"[entity_node] 维度值提取结果: unmatched_texts={unmatched_texts}, metric_name={entities.get('metric_name', '')}")
 
-        for text in unmatched_texts:
-            candidates = dim_value_client.search_dimension_values(text, limit=3)
+        # 并发搜索所有候选维度值（避免48次串行HTTP调用）
+        candidate_results: List[tuple] = []
+        if unmatched_texts:
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {
+                    executor.submit(dim_value_client.search_dimension_values, text, 3): text
+                    for text in unmatched_texts
+                }
+                for future in as_completed(futures):
+                    text = futures[future]
+                    try:
+                        candidates = future.result()
+                    except Exception:
+                        candidates = []
+                    candidate_results.append((text, candidates))
+
+        # 按提取顺序处理结果（保持优先级）
+        for text, candidates in candidate_results:
             if candidates:
                 # 优先使用精确匹配
                 exact_matches = [c for c in candidates if c.get("match_type") == "exact"]
@@ -762,8 +879,10 @@ class ConversationNodes:
                         state.clarification_message = f"您说的是哪个维度：{[c['dimension_value'] for c in candidates]}？"
                         state.dimension_value_candidates = candidates  # 保存候选列表供后续解析
                         state.dimension_value_matched_text = text  # 保存匹配的原始文本（如"1011"）
+                        logger.info(f"[entity_node] RETURN(dim_val_clar)")
                         return {"entities": entities}
 
+        logger.info(f"[entity_node] RETURN")
         return {"entities": entities}
 
     def clarification_node(self, state: ConversationState) -> Dict[str, Any]:
@@ -778,7 +897,16 @@ class ConversationNodes:
         time_info = state.entities.get("time_info")  # 完整时间信息
 
         # [DEBUG] clarification 时间检查日志
-        logger.info(f"[clarification_node] time检查 | metric_name={metric_name} | time_range={time_range} | time_info={time_info}")
+        logger.info(f"[clarification_node] time检查 | metric_name={metric_name} | time_range={time_range} | time_info={time_info} | current_intent={state.current_intent}")
+
+        # 如果是 query_comparison 意图但缺少时间，设置默认时间范围（昨天）以继续执行
+        if state.current_intent == "query_comparison" and not time_range and not time_info:
+            logger.info(f"[clarification_node] query_comparison意图但缺少时间，设置默认时间范围: 昨天")
+            return {
+                "needs_clarification": False,
+                "applied_defaults": {"time_range": "昨天"},
+                "skip_clarification_reason": "query_comparison意图使用默认时间",
+            }
 
         # 确定缺失字段
         missing_fields = []
@@ -1289,6 +1417,160 @@ class ConversationNodes:
 
         return None
 
+    def sql_build_node(self, state: ConversationState) -> Dict[str, Any]:
+        """
+        SQL 构建节点 - 使用 QueryBuilder 替代 _build_value_sql
+        实现 LangGraph 多轮能力 + QueryBuilder 确定性 SQL
+
+        流程:
+        1. 从 entities 构建 QueryState
+        2. 调用 QueryBuilder.build_sql()
+        3. 后处理（SKU占位符移除等）
+        """
+        metric_code = state.entities.get("metric_code")
+        metric_id = state.entities.get("metric_id")
+        metric_name = state.entities.get("metric_name")
+        starrocks_sql = state.entities.get("starrocks_sql")
+        starrocks_table = state.entities.get("starrocks_table")
+        time_info = state.entities.get("time_info")  # 来自 TimeParser 的完整时间信息
+        time_range = state.entities.get("time_range")
+        dimension = state.entities.get("dimension")  # GROUP BY 维度
+
+        logger.info(f"[sql_build_node] metric={metric_name}({metric_code}), time_info={time_info}, dimension={dimension}, starrocks_table={starrocks_table}")
+
+        # 提取维度参数（用于验证）
+        dimensions = self._extract_sql_dimensions(state.entities)
+
+        # 如果没有 starrocks_sql 但有 metric_code，尝试获取
+        if not starrocks_sql and metric_code:
+            try:
+                metric_info = self.metric_client.get_metric_by_code(metric_code)
+                if metric_info:
+                    starrocks_sql = metric_info.get("starrocks_sql", "")
+                    starrocks_table = metric_info.get("starrocks_table", "")
+                    logger.info(f"[sql_build_node] 从 metric_code 获取到 starrocks_sql: {repr(starrocks_sql)[:80] if starrocks_sql else 'None'}")
+            except Exception as e:
+                logger.warning(f"[sql_build_node] 获取 metric_info 失败: {e}")
+
+        # 如果还是没有 starrocks_sql，降级到规则引擎
+        if not starrocks_sql:
+            logger.info("[sql_build_node] 无 starrocks_sql，降级到规则引擎")
+            return self._build_value_sql(state)
+
+        # 校验维度是否在 dimensions 表配置中
+        dims_valid, error_msg = self._validate_extracted_dimensions(state)
+        if not dims_valid:
+            state.needs_clarification = True
+            state.clarification_type = "invalid_dimension"
+            state.clarification_message = error_msg
+            return {
+                "needs_clarification": True,
+                "clarification_message": error_msg,
+                "clarification_type": "invalid_dimension",
+            }
+
+        # 补充 metric 元数据（从 starrocks_sql 解析 table_name）
+        if not starrocks_table and starrocks_sql:
+            table_match = re.search(r'FROM\s+([^\s;]+)', starrocks_sql, re.IGNORECASE)
+            if table_match:
+                starrocks_table = table_match.group(1)
+
+        # 构建 TimeSpec
+        if time_info:
+            time_spec = TimeSpec(
+                type=time_info.get("type", "date_range"),
+                start=time_info.get("start"),
+                end=time_info.get("end"),
+                original_expr=time_info.get("original_expr") or time_range
+            )
+        else:
+            time_spec = TimeSpec(type="date_range", original_expr=time_range or "last_7_days")
+
+        # 构建 dimensions（需要映射中文维度名到数据库列名）
+        query_dimensions = []
+        if dimension and starrocks_table:
+            # 从维度配置获取实际的列名
+            dim_configs = self._get_table_dimensions_cached(starrocks_table)
+            logger.info(f"[sql_build_node] dim_configs={dim_configs}, dimension={dimension}")
+            mapped_dim = dimension
+            # 模糊匹配：用户说"品类"应该匹配"三级品类"
+            # 收集所有匹配项，优先选最长的（最具体的）
+            candidates = []
+            for dim_name in dim_configs:
+                if dimension in dim_name or dim_name in dimension:
+                    candidates.append(dim_name)
+            if candidates:
+                matched_dim = max(candidates, key=len)  # 选最长的
+            # 再次尝试：如果 dim_name 是 dimension 的子串
+            if not matched_dim:
+                for dim_name in dim_configs:
+                    if dim_name in dimension:
+                        matched_dim = dim_name
+                        break
+            if matched_dim:
+                mapped_dim = dim_configs[matched_dim].get("column_name", matched_dim)
+            else:
+                mapped_dim = dimension  # fallback
+            query_dimensions.append(QueryDimension(
+                type=dimension,
+                column=dimension,
+                field=mapped_dim,
+                value=None
+            ))
+
+        # 构建 QueryState
+        query_state = QueryState(
+            version="1.0",
+            session_id=state.session_id,
+            intent=state.current_intent or "query_value",
+            confidence=0.9,
+            metric={
+                "code": metric_code or "",
+                "name": metric_name or "",
+                "starrocks_table": starrocks_table or "",
+                "starrocks_sql": starrocks_sql or "",
+            },
+            time=time_spec,
+            dimensions=query_dimensions,
+            pagination=PaginationSpec(
+                page=getattr(state, 'page', 1),
+                page_size=min(getattr(state, 'page_size', 10), 1000)
+            ),
+            comparison=ComparisonSpec(
+                enabled=state.current_intent in ["query_comparison", "query_trend"],
+                types=["同比", "环比"] if state.current_intent == "query_comparison" else []
+            )
+        )
+
+        # 调用 QueryBuilder
+        builder = QueryBuilder()
+        result = builder.build_sql(query_state)
+
+        generated_sql = result.get("sql", "")
+        thinking_steps = result.get("thinking_steps", [])
+
+        # 后处理：SKU 占位符移除
+        sku_value = state.entities.get("sku")
+        if not sku_value and generated_sql:
+            generated_sql = re.sub(r'\s*AND\s+sku\s*=\s*[\'"]?\{?SKU\}?[\'"]?', '', generated_sql, flags=re.IGNORECASE)
+            generated_sql = re.sub(r'\s*AND\s+sku\s*=\s*\$\{SKU\}', '', generated_sql, flags=re.IGNORECASE)
+            generated_sql = generated_sql.rstrip()
+
+        # 记录思考步骤
+        for step in thinking_steps:
+            self._add_thinking_step(state, step.get("step", ""), step.get("status", "completed"), step.get("detail", ""))
+
+        # 记录 SQL 生成步骤
+        self._add_thinking_step(state, "sql_gen", "completed",
+            f"使用 QueryBuilder 生成 SQL，指标：{metric_name or '未知指标'}")
+
+        return {
+            "generated_sql": generated_sql,
+            "sql_params": {"metric_id": metric_id, "metric_code": metric_code},
+            "needs_clarification": False,
+            "thinking_steps": thinking_steps,
+        }
+
     # 维度配置缓存（避免每次查询都调 API）
     _table_dimensions_cache: Dict[str, Dict[str, Dict]] = {}
 
@@ -1617,13 +1899,15 @@ class ConversationNodes:
                 if dimension in dim_configs:
                     matched_dim = dimension
                 else:
-                    # 模糊匹配：用户说"品类"应该匹配"三级品类"
+                    # 模糊匹配：收集所有匹配项，优先选最长的（最具体的）
+                    # 例如 "品类" 匹配 "一级品类"/"二级品类"/"三级品类"，选最长的
+                    candidates = []
                     for dim_name in dim_configs:
-                        # 检查任意一方是否包含另一方
                         if dimension in dim_name or dim_name in dimension:
-                            matched_dim = dim_name
-                            break
-                    # 再次尝试：如果 dim_name 是 dimension 的子串（如"三级品类"包含"品类"）
+                            candidates.append(dim_name)
+                    if candidates:
+                        matched_dim = max(candidates, key=len)  # 选最长的
+                    # 再次尝试：如果 dim_name 是 dimension 的子串
                     if not matched_dim:
                         for dim_name in dim_configs:
                             if dim_name in dimension:
@@ -1835,12 +2119,26 @@ class ConversationNodes:
             match = re.search(pattern, text)
             if match:
                 extracted_dim = match.group(1)
-                # 检查是否匹配已知的维度词
+
+                # Step 1: 先检测 extracted_dim 本身是否是"二级品类"/"三级品类"等多级具体维度词
+                # 匹配 "(一|二|三|四)级+品类" 等多级维度模式（优先级最高）
+                multi_level_match = re.match(r'^(一|二|三|四)级(品类|品牌|类目)', extracted_dim)
+                if multi_level_match:
+                    logger.debug(f"[_extract_ranking_dimension] 检测到多级维度: {extracted_dim}")
+                    return extracted_dim  # 直接返回具体维度词，如"二级品类"
+
+                # Step 2: 精确匹配 extracted_dim 是否是已知维度类型变体
+                # （按长度降序，确保"品类"不错误吞掉"二级品类"）
+                all_variants = []
                 for dim_type, dim_variants in dimension_words.items():
                     for variant in dim_variants:
-                        if variant in extracted_dim or extracted_dim in variant:
-                            logger.debug(f"[_extract_ranking_dimension] 检测到排名维度: {dim_type}")
-                            return dim_type
+                        all_variants.append((len(variant), variant, dim_type))
+                all_variants.sort(key=lambda x: -x[0])  # 长度降序
+
+                for _, variant, dim_type in all_variants:
+                    if variant in extracted_dim or extracted_dim in variant:
+                        logger.debug(f"[_extract_ranking_dimension] 检测到排名维度: {dim_type} (匹配变体: {variant})")
+                        return dim_type
 
         # 备选：直接检测常见的维度词是否出现在"最高的"后面
         # 有些用户可能说"品类最高的"（维度词在"最高的"前面）
@@ -1948,13 +2246,13 @@ class ConversationNodes:
 
     async def comparison_node(self, state: ConversationState) -> Dict[str, Any]:
         """
-        对比计算节点 - 处理同比环比计算
+        对比计算节点 - 处理同比环比计算（支持同时计算同比和环比）
 
         当意图为 query_comparison 时：
         1. 获取当前查询结果（当前周期值）
-        2. 根据对比类型和时间范围计算对比周期
-        3. 查询对比周期的值
-        4. 计算涨跌幅
+        2. 检测需要计算的对比类型（同比、环比）
+        3. 对每种对比类型计算周期、查询对比值、计算涨跌幅
+        4. 将所有对比结果存入 comparison_results 列表
         """
         # 只有 query_comparison 意图才需要对比计算
         if state.current_intent != "query_comparison":
@@ -1969,28 +2267,40 @@ class ConversationNodes:
         # 获取当前查询结果的数值
         current_value = self._extract_metric_value(state.sql_result)
         logger.info(f"[comparison] current_value={current_value}")
+        # 获取单位
+        unit = state.entities.get("unit", "")
+        logger.info(f"[comparison] unit={unit}")
         if current_value is None:
             logger.info("[comparison] 无法提取当前值，跳过")
             return {"skip_comparison": True}
 
-        # 从用户消息中判断是对比类型
+        # 从用户消息中判断对比类型（支持同时计算同比和环比）
         last_message = state.messages[-1].content if state.messages else ""
-        comparison_type = "环比" if "环比" in last_message else "同比"
+        has_yoy = any(kw in last_message for kw in ["同比", "去年同期", "比去年同期"])
+        has_mom = any(kw in last_message for kw in ["环比", "上月", "比上月"])
+        comparison_types = []
+        if has_yoy:
+            comparison_types.append("同比")
+        if has_mom:
+            comparison_types.append("环比")
+        if not comparison_types:
+            # 默认使用同比
+            comparison_types = ["同比"]
+        logger.info(f"[comparison] 检测到对比类型: {comparison_types}")
 
         # 从 time_info 中提取时间范围
         time_info = state.entities.get("time_info", {})
         time_range = state.entities.get("time_range", {})
 
-        # 优先用 time_info 的 start/end
-        if time_info:
+        # 优先用 time_info 的 start/end（time_info 是字典）
+        start_date = None
+        end_date = None
+        if time_info and isinstance(time_info, dict):
             start_date = time_info.get("start")
             end_date = time_info.get("end")
-        elif time_range:
+        elif time_range and isinstance(time_range, dict):
             start_date = time_range.get("start")
             end_date = time_range.get("end")
-        else:
-            start_date = None
-            end_date = None
 
         logger.info(f"[comparison] time_info={time_info}, start_date={start_date}, end_date={end_date}")
 
@@ -2000,131 +2310,254 @@ class ConversationNodes:
             logger.info(f"[comparison] 返回: {result}")
             return result
 
-        # 计算对比周期
+        # 解析日期
         import re
         from datetime import datetime
         try:
-            # 解析开始和结束日期
             start_dt = datetime.strptime(start_date[:10], "%Y-%m-%d")
             end_dt = datetime.strptime(end_date[:10], "%Y-%m-%d")
-
             # 判断原始时间范围是否是完整月份（结束日期是该月最后一天）
             is_full_month = end_dt.day == calendar.monthrange(end_dt.year, end_dt.month)[1]
             logger.info(f"[comparison] is_full_month={is_full_month} (end_dt.day={end_dt.day})")
-
-            if comparison_type == "环比":
-                # 环比：上月同日（保持日期天数一致）
-                if start_dt.month == 1:
-                    comp_start_year = start_dt.year - 1
-                    comp_start_month = 12
-                else:
-                    comp_start_year = start_dt.year
-                    comp_start_month = start_dt.month - 1
-
-                if end_dt.month == 1:
-                    comp_end_year = end_dt.year - 1
-                    comp_end_month = 12
-                else:
-                    comp_end_year = end_dt.year
-                    comp_end_month = end_dt.month - 1
-
-                if is_full_month:
-                    # 整月查询：起始日期保持，结束日期用对比月月末
-                    comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
-                    comp_end_day = calendar.monthrange(comp_end_year, comp_end_month)[1]
-                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{comp_end_day:02d}"
-                else:
-                    # 非整月（如4月2日）：保持原始日期不变
-                    comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
-                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{end_dt.day:02d}"
-            else:
-                # 同比：去年同期
-                comp_start_year = start_dt.year - 1
-                comp_end_year = end_dt.year - 1
-                if is_full_month:
-                    # 整月查询：起始日期保持，结束日期用对比月月末
-                    comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
-                    comp_end_day = calendar.monthrange(comp_end_year, end_dt.month)[1]
-                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{comp_end_day:02d}"
-                else:
-                    # 非整月（如4月2日）：保持原始日期不变
-                    comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
-                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{end_dt.day:02d}"
         except Exception as e:
-            logger.error(f"[comparison] 日期计算失败: {str(e)}")
+            logger.error(f"[comparison] 日期解析失败: {str(e)}")
             return {"skip_comparison": True}
 
-        logger.info(f"[comparison] comparison_type={comparison_type}, comparison_start={comparison_start}, comparison_end={comparison_end}")
-
-        # 构建对比SQL（替换时间条件）
+        # 构建对比SQL（替换时间条件）- 为每种对比类型生成
         original_sql = state.generated_sql
         if not original_sql or original_sql == "METADATA_QUERY":
             logger.info("[comparison] original_sql无效，跳过")
             return {"skip_comparison": True}
 
-        # 替换开始日期 (处理 >= 和 = 两种格式)
-        # FDATE >= '2026-01-01' 或 FDATE = '2026-01-01'
-        # 注意：使用 lambda 避免 f-string 中 \1 的转义问题
-        comparison_sql = re.sub(
-            r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
-            lambda m: f"{m.group(1)} >= '{comparison_start}'",
-            original_sql,
-            flags=re.IGNORECASE
-        )
-        # 替换结束日期
-        comparison_sql = re.sub(
-            r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
-            lambda m: f"{m.group(1)} <= '{comparison_end}'",
-            comparison_sql,
-            flags=re.IGNORECASE
-        )
-
-        # 移除 LIMIT 和 OFFSET（用于对比查询）
-        comparison_sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', comparison_sql, flags=re.IGNORECASE)
-        comparison_sql = re.sub(r'\s+OFFSET\s+\d+', '', comparison_sql, flags=re.IGNORECASE)
-        logger.info(f"[comparison] 生成的对比SQL: {comparison_sql}")
-
-        try:
-            logger.info(f"[comparison] 对比SQL: {comparison_sql}")
-            # 执行对比查询
-            comparison_result = await self.sql_generator.execute(
-                sql=comparison_sql,
-                params=state.sql_params
+        def build_comparison_sql(comparison_start: str, comparison_end: str) -> str:
+            """构建对比SQL"""
+            sql = re.sub(
+                r"(\w+)\s*>=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+                lambda m: f"{m.group(1)} >= '{comparison_start}'",
+                original_sql,
+                flags=re.IGNORECASE
             )
-            logger.info(f"[comparison] 对比查询结果: {comparison_result}")
+            sql = re.sub(
+                r"(\w+)\s*<=\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?",
+                lambda m: f"{m.group(1)} <= '{comparison_end}'",
+                sql,
+                flags=re.IGNORECASE
+            )
+            # 移除 LIMIT 和 OFFSET
+            sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', sql, flags=re.IGNORECASE)
+            sql = re.sub(r'\s+OFFSET\s+\d+', '', sql, flags=re.IGNORECASE)
+            return sql
 
-            comparison_value = self._extract_metric_value(comparison_result)
-            logger.info(f"[comparison] 提取的对比值: {comparison_value}")
+        def calculate_comparison_period(comp_type: str, start_dt: datetime, end_dt: datetime, is_full_month: bool) -> tuple:
+            """计算对比周期（开始日期，结束日期）"""
+            if comp_type == "环比":
+                # 环比：上月同日
+                if start_dt.month == 1:
+                    comp_start_year, comp_start_month = start_dt.year - 1, 12
+                else:
+                    comp_start_year, comp_start_month = start_dt.year, start_dt.month - 1
 
-            if comparison_value is not None and comparison_value != 0:
-                # 计算涨跌幅
-                change_rate = (current_value - comparison_value) / comparison_value * 100
+                if end_dt.month == 1:
+                    comp_end_year, comp_end_month = end_dt.year - 1, 12
+                else:
+                    comp_end_year, comp_end_month = end_dt.year, end_dt.month - 1
 
-                state.comparison_result = {
-                    "current_value": current_value,
-                    "comparison_value": comparison_value,
-                    "comparison_date": f"{comparison_start} 至 {comparison_end}",
-                    "comparison_type": comparison_type,
-                    "change_rate": change_rate,
-                    "comparison_sql": comparison_sql,
-                }
-
-                self._add_thinking_step(state, "对比计算", "completed",
-                    f"当前值={current_value}，{comparison_type}={comparison_value}，"
-                    f"涨跌幅={change_rate:+.2f}%")
-
-                result = {"comparison_result": state.comparison_result}
-                logger.info(f"[comparison] 成功返回: {result}")
-                return result
+                if is_full_month:
+                    comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
+                    comp_end_day = calendar.monthrange(comp_end_year, comp_end_month)[1]
+                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{comp_end_day:02d}"
+                else:
+                    comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
+                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{end_dt.day:02d}"
             else:
-                self._add_thinking_step(state, "对比计算", "completed", "对比数据为空")
-                logger.info("[comparison] 对比数据为空，跳过")
-                return {"skip_comparison": True}
+                # 同比：去年同期
+                comp_start_year, comp_end_year = start_dt.year - 1, end_dt.year - 1
+                if is_full_month:
+                    comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
+                    comp_end_day = calendar.monthrange(comp_end_year, end_dt.month)[1]
+                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{comp_end_day:02d}"
+                else:
+                    comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
+                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{end_dt.day:02d}"
 
-        except Exception as e:
-            logger.error(f"[comparison] 查询对比数据失败: {str(e)}")
-            self._add_thinking_step(state, "对比计算", "error", f"对比查询失败: {str(e)}")
-            logger.info(f"[comparison] 异常跳过: {str(e)}")
+            return comparison_start, comparison_end
+
+        # 执行每种对比计算（并发优化）
+        comparison_results = []
+        thinking_parts = []
+
+        # 提取当前查询的data_list（用于多行对比匹配）
+        data_list = self._extract_data_list(state.sql_result)
+        logger.info(f"[comparison] 当前查询数据列表长度: {len(data_list) if data_list else 0}")
+
+        # 从原始SQL提取GROUP BY列（用于多行对比匹配）
+        group_by_col = None
+        group_by_match = re.search(r'GROUP BY\s+([^\s,]+)', state.generated_sql or '', re.IGNORECASE)
+        if group_by_match:
+            group_by_col = group_by_match.group(1).strip('`')
+            logger.info(f"[comparison] 提取的GROUP BY列: {group_by_col}")
+
+        # Step 1: 构建所有对比SQL
+        comparison_tasks = []
+        for comp_type in comparison_types:
+            comparison_start, comparison_end = calculate_comparison_period(comp_type, start_dt, end_dt, is_full_month)
+            comparison_sql = build_comparison_sql(comparison_start, comparison_end)
+            comparison_tasks.append({
+                "comp_type": comp_type,
+                "comparison_start": comparison_start,
+                "comparison_end": comparison_end,
+                "comparison_sql": comparison_sql,
+            })
+
+        # Step 2: 并发执行所有对比SQL
+        async def execute_single_comparison(task):
+            comp_sql = task["comparison_sql"]
+            comp_type = task["comp_type"]
+            logger.info(f"[comparison] {comp_type} SQL: {comp_sql}")
+            result = await self.sql_generator.execute(sql=comp_sql, params=state.sql_params)
+            return task, result
+
+        # 并发执行
+        import asyncio
+        results = await asyncio.gather(*[execute_single_comparison(t) for t in comparison_tasks], return_exceptions=True)
+
+        # Step 3: 处理每个对比结果
+        for result_item in results:
+            if isinstance(result_item, Exception):
+                logger.error(f"[comparison] 对比SQL执行失败: {str(result_item)}")
+                continue
+
+            task, comp_result = result_item
+            comp_type = task["comp_type"]
+            comparison_start = task["comparison_start"]
+            comparison_end = task["comparison_end"]
+            comparison_sql = task["comparison_sql"]
+
+            try:
+                logger.info(f"[comparison] {comp_type} 查询结果: {comp_result}")
+
+                # 提取对比数据列表（用于多行匹配）
+                comp_data_list = self._extract_data_list(comp_result)
+                logger.info(f"[comparison] {comp_type} 对比数据列表长度: {len(comp_data_list) if comp_data_list else 0}")
+
+                if comp_data_list:
+                    # 构建group key -> row 的映射（用于多行匹配）
+                    comp_data_map = {}
+                    metric_col = None
+                    # 优先使用 metric_name 从 state.entities 匹配列名（支持中文列名）
+                    metric_name = state.entities.get("metric_name", "")
+                    logger.info(f"[comparison] metric_name from entities: {metric_name}")
+
+                    # 从 data_list（当前数据）检测 metric_col
+                    if not metric_col and data_list:
+                        first_row = data_list[0]
+                        # 直接用 metric_name 匹配（最准确）
+                        if metric_name and metric_name in first_row:
+                            metric_col = metric_name
+                            logger.info(f"[comparison] 使用 metric_name 作为 metric_col: {metric_col}")
+                        else:
+                            # 回退：从第一行取非 group_by 列
+                            for k in first_row.keys():
+                                if group_by_col and k.upper() == group_by_col.upper():
+                                    continue
+                                # 跳过已知的对比列名模式
+                                if any(p in k for p in ['同比', '环比', '去年同期', '上月同期']):
+                                    continue
+                                metric_col = k
+                                logger.info(f"[comparison] 从 data_list 检测到 metric_col: {metric_col}")
+                                break
+
+                    # 如果 data_list 没找到，从 comp_data_list 检测
+                    if not metric_col:
+                        for row in comp_data_list:
+                            if group_by_col and group_by_col in row:
+                                key = row.get(group_by_col)
+                                comp_data_map[key] = row
+                            # 提取指标列名（用于计算变化率）
+                            if metric_col is None:
+                                for k in row.keys():
+                                    if k.upper() not in (group_by_col.upper(),) if group_by_col else True:
+                                        # 跳过已知的对比列名模式
+                                        if any(p in k for p in ['同比', '环比', '去年同期', '上月同期']):
+                                            continue
+                                        metric_col = k
+                                        logger.info(f"[comparison] 从 comp_data_list 检测到 metric_col: {metric_col}")
+                                        break
+                    else:
+                        # metric_col 已从 data_list 找到，同时构建 comp_data_map
+                        for row in comp_data_list:
+                            if group_by_col and group_by_col in row:
+                                key = row.get(group_by_col)
+                                comp_data_map[key] = row
+
+                    # 计算每个group key的对比值和变化率
+                    for row in data_list:
+                        row_key = row.get(group_by_col) if group_by_col else None
+                        comp_row = comp_data_map.get(row_key) if row_key else None
+
+                        if comp_row and metric_col:
+                            current_metric_val = self._extract_metric_value_from_row(row, metric_col)
+                            comp_metric_val = self._extract_metric_value_from_row(comp_row, metric_col)
+
+                            if current_metric_val is not None and comp_metric_val is not None and comp_metric_val != 0:
+                                change_rate = (current_metric_val - comp_metric_val) / comp_metric_val * 100
+                                # 添加对比列到当前行
+                                if comp_type == "同比":
+                                    row["去年同期"] = self._format_metric_value(comp_metric_val, unit)
+                                    row["同比变化率"] = round(change_rate, 2)
+                                else:
+                                    row["上月同期"] = self._format_metric_value(comp_metric_val, unit)
+                                    row["环比变化率"] = round(change_rate, 2)
+                            else:
+                                # 找不到对比数据或数据无效，也要加占位列保持每行列数一致
+                                if comp_type == "同比":
+                                    row["去年同期"] = None
+                                    row["同比变化率"] = None
+                                else:
+                                    row["上月同期"] = None
+                                    row["环比变化率"] = None
+                        else:
+                            # 找不到匹配的SKU，加占位列保持每行列数一致
+                            if comp_type == "同比":
+                                row["去年同期"] = None
+                                row["同比变化率"] = None
+                            else:
+                                row["上月同期"] = None
+                                row["环比变化率"] = None
+
+                    # 计算总体对比（用于摘要）
+                    total_comp = sum(self._extract_metric_value_from_row(row, metric_col) or 0 for row in comp_data_list)
+                    total_current = sum(self._extract_metric_value_from_row(row, metric_col) or 0 for row in data_list)
+
+                    comparison_results.append({
+                        "current_value": total_current,
+                        "comparison_value": total_comp,
+                        "comparison_date": f"{comparison_start} 至 {comparison_end}",
+                        "comparison_type": comp_type,
+                        "change_rate": (total_current - total_comp) / total_comp * 100 if total_comp != 0 else 0,
+                        "comparison_sql": comparison_sql,
+                        "group_by_col": group_by_col,
+                        "comp_data_map": {str(k): v for k, v in comp_data_map.items()}  # key转字符串
+                    })
+                    thinking_parts.append(f"{comp_type}={total_comp}（{(total_current - total_comp) / total_comp * 100:+.2f}%）" if total_comp != 0 else f"{comp_type}=0")
+                    logger.info(f"[comparison] {comp_type} 计算成功: 总计={total_comp}, 涨跌幅={(total_current - total_comp) / total_comp * 100:+.2f}%")
+                else:
+                    logger.info(f"[comparison] {comp_type} 对比数据为空，跳过")
+
+            except Exception as e:
+                logger.error(f"[comparison] {comp_type} 计算失败: {str(e)}")
+                continue
+
+        if comparison_results:
+            state.comparison_results = comparison_results
+            self._add_thinking_step(state, "对比计算", "completed",
+                f"当前值={current_value}，" + "，".join(thinking_parts))
+            result = {"comparison_results": comparison_results}
+            logger.info(f"[comparison] 成功返回 {len(comparison_results)} 个对比结果: {result}")
+            return result
+        else:
+            self._add_thinking_step(state, "对比计算", "completed", "所有对比数据为空")
+            logger.info("[comparison] 所有对比数据为空，跳过")
             return {"skip_comparison": True}
 
     def _extract_metric_value(self, sql_result: Dict) -> Optional[float]:
@@ -2182,6 +2615,61 @@ class ConversationNodes:
                     continue
 
         return None
+
+    def _extract_data_list(self, sql_result: Dict) -> Optional[List[Dict]]:
+        """从SQL查询结果中提取数据列表（用于多行匹配）"""
+        if not sql_result:
+            return None
+        data = sql_result.get("data")
+        if not data:
+            return None
+        # 处理嵌套结构
+        if isinstance(data, dict):
+            if "data" in data:
+                inner = data["data"]
+                if isinstance(inner, list):
+                    return inner
+                elif isinstance(inner, dict):
+                    return [inner]
+            return [data]
+        elif isinstance(data, list):
+            return data
+        return None
+
+    def _extract_metric_value_from_row(self, row: Dict, metric_col: str) -> Optional[float]:
+        """从单行数据中提取指标数值"""
+        if not row or not metric_col:
+            return None
+        # 大小写不敏感匹配
+        row_upper = {k.upper(): k for k in row.keys()}
+        actual_col = row_upper.get(metric_col.upper())
+        if not actual_col:
+            return None
+        val = row.get(actual_col)
+        if val is None:
+            return None
+        try:
+            if isinstance(val, str):
+                return float(val.replace(",", "").strip())
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
+    def _format_metric_value(self, val: float, unit: str = "") -> str:
+        """格式化指标数值显示"""
+        if val is None:
+            return "N/A"
+        try:
+            if unit == "%":
+                return f"{val:.2f}%"
+            elif unit in ("元", "万美元", "亿美元"):
+                return f"¥{val:,.2f}"
+            elif abs(val) >= 10000:
+                return f"{val:,.2f}"
+            else:
+                return f"{val:,.2f}"
+        except:
+            return str(val)
 
     def response_node(self, state: ConversationState) -> Dict[str, Any]:
         """
@@ -2262,6 +2750,7 @@ class ConversationNodes:
 
         # 获取查询结果
         sql_result = getattr(state, 'sql_result', None)
+        logger.info(f"[response_node] ENTRY sql_result type={type(sql_result)}, keys={sql_result.keys() if isinstance(sql_result, dict) else 'N/A'}, data_count={len(sql_result.get('data',[])) if isinstance(sql_result, dict) else 'N/A'}")
 
         # 多个指标匹配的情况
         if isinstance(sql_result, dict) and sql_result.get("type") == "list":
@@ -2322,27 +2811,56 @@ class ConversationNodes:
                         "needs_clarification": needs_clar,
                     }
                 elif data:
-                    # 有数据，调用 LLM 生成自然语言回答
+                    # 有数据，生成自然语言回答
                     metric_name = state.entities.get("metric_name", "该指标")
                     unit = state.entities.get("unit", "")
+                    comparison_results = getattr(state, 'comparison_results', None)
                     logger.info(f"[response_node] metric_name={metric_name}, entities={state.entities}")
-                    answer = self.llm_engine.generate_response(
-                        question=state.messages[-1].content if state.messages else "",
-                        sql=state.generated_sql or "",
-                        result=data,
-                        metric_name=metric_name,
-                        unit=unit,
+
+                    # 简单查询用模板生成回答，复杂查询才调用 LLM
+                    rows = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                    is_simple = (
+                        (comparison_results is None or len(comparison_results) == 0) and
+                        len(rows) <= 3 and
+                        state.current_intent not in ("query_trend", "query_ranking")
                     )
 
-                    # 如果有对比计算结果，添加到 result_data 每行
-                    comparison_result = getattr(state, 'comparison_result', None)
-                    if comparison_result:
-                        comp_type = comparison_result.get("comparison_type", "对比")
-                        comp_date = comparison_result.get("comparison_date", "")
-                        comp_value = comparison_result.get("comparison_value", 0)
-                        change_rate = comparison_result.get("change_rate", 0)
-                        current_value = comparison_result.get("current_value", 0)
+                    if is_simple:
+                        # 简单模板生成（避免 LLM 调用耗时）
+                        row = rows[0] if rows else {}
+                        metric_col = None
+                        group_by_col = None
+                        for k in row.keys():
+                            if k not in (group_by_col,) if group_by_col else True:
+                                if not any(p in k for p in ['同比', '环比', '去年同期', '上月同期']):
+                                    metric_col = k
+                                    break
+                        metric_val = row.get(metric_col) if metric_col else None
+                        if metric_val is not None:
+                            if isinstance(metric_val, (int, float)):
+                                if unit == "%":
+                                    answer = f"**{metric_name}**为 {metric_val:.2f}%"
+                                elif unit in ("元", "万美元", "亿美元"):
+                                    answer = f"**{metric_name}**为 ¥{metric_val:,.2f}"
+                                else:
+                                    answer = f"**{metric_name}**为 {metric_val:,.2f}"
+                            else:
+                                answer = f"**{metric_name}**为 {metric_val}"
+                        else:
+                            answer = f"**{metric_name}**查询完成，共 {len(rows)} 条数据"
+                    else:
+                        # 复杂查询调用 LLM 生成自然语言
+                        answer = self.llm_engine.generate_response(
+                            question=state.messages[-1].content if state.messages else "",
+                            sql=state.generated_sql or "",
+                            result=data,
+                            metric_name=metric_name,
+                            unit=unit,
+                        )
 
+                    # 如果有对比计算结果，添加到 result_data 每行
+                    comparison_results = getattr(state, 'comparison_results', None)
+                    if comparison_results:
                         # 格式化数值
                         def format_value(val, unit):
                             if isinstance(val, (int, float)):
@@ -2354,50 +2872,70 @@ class ConversationNodes:
                                     return f"{val:,.2f}"
                             return str(val)
 
-                        current_str = format_value(current_value, unit)
-                        comp_str = f"{int(comp_value):,}" if isinstance(comp_value, (int, float)) and comp_value == int(comp_value) else format_value(comp_value, unit)
-
-                        # 添加到 result_data 每行（用于前端表格展示）
-                        # 处理 Go 返回的嵌套格式: {"count": N, "data": [...]} 或直接的 list/dict
+                        # 处理 result_data 格式
                         rows_to_process = data
                         if isinstance(data, dict):
                             if "data" in data:
-                                # Go 返回的嵌套格式，解开外层包装
                                 rows_to_process = data["data"]
                             else:
-                                # 单行 dict 结果，包装成 list
                                 rows_to_process = [data]
-                        # rows_to_process 现在应该是 list
+
+                        # 添加对比列到每行（如果 comparison_node 已经处理过则跳过）
                         if isinstance(rows_to_process, list):
                             for row in rows_to_process:
                                 if isinstance(row, dict):
-                                    if comp_type == "同比":
-                                        row["去年同期"] = comp_str
-                                    else:
-                                        row["上月同期"] = comp_str
-                        # 更新 data 为处理后的结果（返回扁平数组供 API 使用）
+                                    # 跳过已经处理过的行（comparison_node 已添加每行各自的对比值）
+                                    if "同比变化率" in row or "环比变化率" in row:
+                                        continue
+                                    for comp in comparison_results:
+                                        comp_type = comp.get("comparison_type", "对比")
+                                        comp_value = comp.get("comparison_value", 0)
+                                        change_rate = comp.get("change_rate", 0)
+                                        comp_str = f"{int(comp_value):,}" if isinstance(comp_value, (int, float)) and comp_value == int(comp_value) else format_value(comp_value, unit)
+                                        if comp_type == "同比":
+                                            row["去年同期"] = comp_str
+                                            row["同比变化率"] = round(change_rate, 2)
+                                        else:
+                                            row["上月同期"] = comp_str
+                                            row["环比变化率"] = round(change_rate, 2)
+
+                        # 更新 data
                         if isinstance(data, dict) and "data" in data:
-                            # 原为嵌套格式，解包后返回内层扁平数组
                             data = rows_to_process
                         else:
                             data = rows_to_process
 
+                        # 生成对比摘要
+                        if comparison_results:
+                            answer += f"\n\n📊 **对比结果**\n"
+                            answer += f"| 指标 | 数值 |\n"
+                            answer += f"|------|------|\n"
 
-                        if comp_type == "同比":
-                            comp_period = f"去年同期（{comp_date[:7]}）" if comp_date else "去年同期"
-                        else:
-                            comp_period = f"上月同期（{comp_date[:7]}）" if comp_date else "上月同期"
+                            # 第一行：当期值
+                            first_comp = comparison_results[0]
+                            current_value = first_comp.get("current_value", 0)
+                            unit_for_display = unit
+                            current_str = format_value(current_value, unit_for_display)
+                            answer += f"| {metric_name}（当期） | {current_str} |\n"
 
-                        change_emoji = "↑" if change_rate > 0 else ("↓" if change_rate < 0 else "→")
-                        change_color = "上涨" if change_rate > 0 else ("下跌" if change_rate < 0 else "持平")
+                            # 后续行：各种对比
+                            for comp in comparison_results:
+                                comp_type = comp.get("comparison_type", "对比")
+                                comp_value = comp.get("comparison_value", 0)
+                                comp_date = comp.get("comparison_date", "")
+                                change_rate = comp.get("change_rate", 0)
+                                comp_str = f"{int(comp_value):,}" if isinstance(comp_value, (int, float)) and comp_value == int(comp_value) else format_value(comp_value, unit_for_display)
 
-                        # 对比摘要（可选，保留在 answer 里供参考）
-                        answer += f"\n\n📊 **对比结果**\n"
-                        answer += f"| 指标 | 数值 |\n"
-                        answer += f"|------|------|\n"
-                        answer += f"| {metric_name}（当期） | {current_str} |\n"
-                        answer += f"| {comp_period} | {comp_str} |\n"
-                        answer += f"| {comp_type}变化 | {change_emoji} {abs(change_rate):.2f}%（{change_color}）|\n"
+                                if comp_type == "同比":
+                                    comp_period = f"去年同期（{comp_date[:7]}）" if comp_date else "去年同期"
+                                else:
+                                    comp_period = f"上月同期（{comp_date[:7]}）" if comp_date else "上月同期"
+
+                                change_emoji = "↑" if change_rate > 0 else ("↓" if change_rate < 0 else "→")
+                                change_color = "上涨" if change_rate > 0 else ("下跌" if change_rate < 0 else "持平")
+
+                                answer += f"| {comp_period} | {comp_str} |\n"
+                                answer += f"| {comp_type}变化 | {change_emoji} {abs(change_rate):.2f}%（{change_color}）|\n"
 
                     # 保存当前指标/时间到上下文
                     self._update_context(state, state.entities)
@@ -2415,12 +2953,25 @@ class ConversationNodes:
                     result_data = data
                     if isinstance(data, dict) and "data" in data:
                         result_data = data["data"]
+
+                    # 重排列顺序：维度列 → 指标值列 → 对比列 → 占比/毛利率
+                    if isinstance(result_data, list) and result_data:
+                        # 使用 ResultFormatter 统一处理列识别、rename、排序
+                        generated_sql = getattr(state, 'generated_sql', '') or ''
+                        metric_name = state.entities.get("metric_name", "")
+                        result_data = self.result_formatter.normalize_result_columns(
+                            result_data=result_data,
+                            metric_name=metric_name,
+                            generated_sql=generated_sql
+                        )
+                        logger.info(f"[response_node] AFTER normalize result_data[0]={result_data[0] if result_data else 'empty'}")
+
                     return {
                         "answer": answer,
                         "suggest_questions": self._generate_suggestions(state),
                         "needs_clarification": False,
                         "result_data": result_data,
-                        "comparison_result": getattr(state, 'comparison_result', None),
+                        "comparison_results": getattr(state, 'comparison_results', None),
                     }
 
         # 没有结果

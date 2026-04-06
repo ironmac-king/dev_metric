@@ -1,19 +1,29 @@
 """
 SQL 生成器 - 优化版
-支持元数据查询和数值查询
+支持元数据查询和数值查询，带缓存
 """
 from typing import Dict, Any, Optional
 import httpx
+from ai.sql_gen.cache import get_sql_cache
 
 
 class SQLGenerator:
     """SQL 生成和执行"""
 
-    def __init__(self, api_base: str = "http://localhost:8080"):
+    def __init__(self, api_base: str = "http://localhost:8080", use_cache: bool = True):
         self.api_base = api_base
+        self.use_cache = use_cache
+        self._cache = get_sql_cache()
 
     async def execute(self, sql: str, params: Dict[str, Any]) -> Any:
-        """执行 SQL 查询（StarRocks）"""
+        """执行 SQL 查询（StarRocks），带缓存"""
+        # 检查缓存
+        if self.use_cache:
+            cached_result = self._cache.get(sql)
+            if cached_result is not None:
+                return cached_result
+
+        # 执行查询
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.api_base}/api/v1/query/execute",
@@ -22,7 +32,13 @@ class SQLGenerator:
             )
             if response.status_code != 200:
                 raise Exception(f"查询失败: {response.text}")
-            return response.json()
+            result = response.json()
+
+        # 写入缓存
+        if self.use_cache:
+            self._cache.set(sql, result)
+
+        return result
 
     def query_metadata(self, metric_name: str = None, metric_code: str = None) -> Dict[str, Any]:
         """查询指标元数据（从 PostgreSQL）"""

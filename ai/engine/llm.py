@@ -2,6 +2,7 @@
 LLM 引擎 - 调用腾讯云 DeepSeek
 """
 import os
+import re
 from typing import Optional, Dict, Any, List
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -28,6 +29,50 @@ load_dotenv()
 
 class LLMEngine:
     """LLM 引擎"""
+
+    # Function Calling Schema - 用于意图识别和实体提取
+    INTENT_RECOGNITION_FUNCTION = {
+        "name": "recognize_intent",
+        "description": "从用户问题中识别意图和提取实体，用于业务指标查询场景",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": "意图类型",
+                    "enum": ["query_value", "query_trend", "query_comparison", "query_metadata",
+                             "query_ranking", "query_ratio", "query_retention", "greeting", "thanks", "bye", "unknown"]
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "置信度 0-1",
+                    "minimum": 0,
+                    "maximum": 1
+                },
+                "metric_name": {
+                    "type": "string",
+                    "description": "识别的指标名称，如'销售额'、'广告转化率'、'访客数'"
+                },
+                "time_range": {
+                    "type": "string",
+                    "description": "时间范围，如'近30天'、'本月'、'上周'"
+                },
+                "dimension": {
+                    "type": "string",
+                    "description": "维度粒度，如'日'、'月'、'品类'、'品牌'（用于 GROUP BY 分组）"
+                },
+                "dimension_values": {
+                    "type": "string",
+                    "description": "具体维度值，如'GROUP_3=有线网卡'、'region=华东'"
+                },
+                "top_n": {
+                    "type": "integer",
+                    "description": "Top N 排名数量，如 10 表示前 10 名"
+                }
+            },
+            "required": ["intent", "confidence"]
+        }
+    }
 
     def __init__(self):
         self._config = None
@@ -129,62 +174,101 @@ class LLMEngine:
             )
 
     def recognize_intent_enhanced(self, text: str, inherited_entities: dict = None) -> IntentResult:
-        """增强的意图识别 - 支持多轮上下文"""
-        inherited = ""
+        """
+        增强的意图识别 - 使用 Function Calling 替代 Prompt 解析
+
+        通过 tools 参数直接获取结构化输出，避免 JSON 解析错误
+        """
+        # 构建继承上下文的提示
+        inherited_context = ""
         if inherited_entities:
             metric = inherited_entities.get("inherited_metric")
             if metric:
-                inherited = f"\n上下文信息：用户正在查询指标「{metric}」，可继承此指标"
+                inherited_context = f"\n（上下文：用户正在查询指标「{metric}」，可继承此指标）"
 
-        # 从 PromptManager 获取 NL2Structure Prompt
-        prompt_manager = get_prompt_manager()
-        base_prompt = prompt_manager.get_nl2structure_prompt()
+        # 系统提示
+        system_prompt = """你是一个专业的业务指标查询助手，擅长从用户的自然语言中准确提取结构化信息。
 
-        prompt = f"""{base_prompt}
+【指标知识】
+- 常见指标：销售额、订单量、访客数、广告转化率、页面访问量、加购率、客单价
+- 指标编号格式：MKI-02-0001（格式：MKI-领域-序号）
+- 指标域：营销域、服务域、用户域
+- 维度类型：日、月、年（时间维度）、品类、品牌、渠道、地区、平台（业务维度）
 
-用户问题：「{text}」{inherited}
+【意图类型】
+- query_value: 查询指标数值（如"销售额是多少"、"近30天访客数"）
+- query_trend: 查询指标趋势（如"销售额趋势"、"走势怎么样"）
+- query_comparison: 对比分析（如"环比"、"同比"、"对比"）
+- query_metadata: 查询元数据（如"业务口径"、"技术口径"、"定义"）
+- query_ranking: 排名分析（如"最高的品类"、"前10名品牌"）
+- query_ratio: 占比分析（如"占比"、"比例"）
+- greeting: 打招呼
+- thanks: 感谢
+- bye: 告别
 
-请只输出JSON格式。"""
+【重要】
+- 如果用户提到"各平台"、"各地区"、"各品类"等多维度分组需求，在 dimension 字段填入对应的维度类型
+- 如果用户提到"第一名"、"前10"、"最高的"等排名需求，设置 top_n 参数
+- 时间表达优先使用标准描述如"近30天"、"本月"、"上周"
+"""
 
         try:
+            # 使用纯文本 Prompt + JSON 解析（腾讯云 DeepSeek 不支持 Function Calling）
+            user_content = f"""用户问题：「{text}」{inherited_context}
+
+请以 JSON 格式返回识别结果，格式如下：
+{{"intent": "意图", "confidence": 0.0-1.0, "metric_name": "指标名称", "time_range": "时间范围", "dimension": "维度", "dimension_values": "维度值", "top_n": 数字}}
+
+只返回 JSON，不要其他内容。"""
+
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
                 temperature=0.1,
-                max_tokens=200,
+                max_tokens=300,
             )
+
             content = response.choices[0].message.content.strip()
+            logger.debug(f"[recognize_intent_enhanced] LLM 返回: {content}")
 
-            # 尝试解析 JSON
+            # 解析 JSON
             import json
-            try:
-                # 提取 JSON 部分
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0]
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0]
+            # 提取 JSON 部分（可能包含在 ```json ``` 中）
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
 
-                result = json.loads(content)
-                return IntentResult(
-                    intent=result.get("intent", "unknown"),
-                    confidence=result.get("confidence", 0.7),
-                    entities={
-                        "metric_name": result.get("metric_name"),
-                        "time_range": result.get("time_range"),
-                        **result.get("entities", {})
-                    }
-                )
-            except json.JSONDecodeError:
-                # JSON 解析失败，用简单方式提取
-                return self._parse_intent_fallback(text, inherited_entities)
+            result = json.loads(content)
 
-        except Exception as e:
-            logger.error(f"LLM 增强意图识别失败: {e}")
+            # 构建 entities
+            entities = {}
+            if result.get("metric_name"):
+                entities["metric_name"] = result["metric_name"]
+            if result.get("time_range"):
+                entities["time_range"] = result["time_range"]
+            if result.get("dimension"):
+                entities["dimension"] = result["dimension"]
+            if result.get("dimension_values"):
+                entities["dimension_values"] = result["dimension_values"]
+            if result.get("top_n"):
+                entities["top_n"] = result["top_n"]
+
             return IntentResult(
-                intent="query_value",
-                confidence=0.5,
-                entities={}
+                intent=result.get("intent", "unknown"),
+                confidence=result.get("confidence", 0.7),
+                entities=entities
             )
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"[recognize_intent_enhanced] JSON 解析失败: {e}，降级处理")
+            return self._parse_intent_fallback(text, inherited_entities)
+        except Exception as e:
+            logger.error(f"[recognize_intent_enhanced] LLM 调用失败: {e}")
+            return self._parse_intent_fallback(text, inherited_entities)
 
     def expand_followup_question(self, text: str, inherited_metric: str, inherited_time: str = None, comparison_type: str = None) -> str:
         """
@@ -963,6 +1047,65 @@ class LLMEngine:
         except Exception as e:
             logger.info(f"[LLMEngine] LLM 调用失败: {e}")
             return ""
+
+    def generate_query_state(self, question: str, session_id: str = "", context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        LLM 生成 QueryState JSON
+
+        Args:
+            question: 用户问题
+            session_id: 会话 ID
+            context: 上下文信息（如上轮 QueryState）
+
+        Returns:
+            QueryState 字典
+        """
+        import json
+        from ai.engine.prompt_manager import get_prompt_manager
+
+        prompt_manager = get_prompt_manager()
+        base_prompt = prompt_manager.get_nl2querystate_prompt()
+
+        # 如果有上下文，添加到 prompt
+        context_info = ""
+        if context:
+            context_info = f"\n\n【上轮上下文】\n上轮 QueryState: {json.dumps(context, ensure_ascii=False, indent=2)}"
+            # 追问场景：用户可能只说了"环比呢"、"同比呢"
+            short_question_keywords = ["呢", "呢？", "？", "啊", "哦", "嗯", "再", "还"]
+            is_followup = len(question) < 10 or any(kw in question for kw in short_question_keywords)
+            if is_followup and context.get("metric"):
+                context_info += "\n注意：这是追问，上轮已有指标信息，请继承上轮的 metric 和 time"
+
+        prompt = f"""{base_prompt}{context_info}
+
+【用户问题】
+{question}
+
+请输出 JSON："""
+
+        logger.info(f"[LLMEngine] 生成 QueryState, question={question[:50]}")
+
+        response = self.call(prompt, temperature=0.3, max_tokens=3000)
+
+        if not response:
+            logger.warning("[LLMEngine] QueryState 生成失败，返回空")
+            return {}
+
+        # 解析 JSON
+        try:
+            # 尝试提取 JSON（可能包含在 ```json ``` 中）
+            json_match = re.search(r'```(?:json)?\s*([\s\S]+?)\s*```', response)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                json_str = response
+
+            query_state = json.loads(json_str)
+            logger.info(f"[LLMEngine] QueryState 生成成功: intent={query_state.get('intent')}")
+            return query_state
+        except json.JSONDecodeError as e:
+            logger.error(f"[LLMEngine] QueryState JSON 解析失败: {e}, response={response[:200]}")
+            return {}
 
     def generate_prompt_improvement(
         self,

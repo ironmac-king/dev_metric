@@ -14,7 +14,7 @@ class ConversationMessage(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     # 响应数据（仅 assistant 消息有）
     result_data: Optional[List[Dict[str, Any]]] = None
-    comparison_result: Optional[Dict[str, Any]] = None
+    comparison_results: Optional[List[Dict[str, Any]]] = None
     drill_down_dims: Optional[List[Dict[str, str]]] = None
     breadcrumbs: Optional[List[Dict[str, str]]] = None
 
@@ -68,7 +68,7 @@ class ConversationState(BaseModel):
     # ========== 多轮对话上下文继承 ==========
     conversation_context: Optional[ConversationContext] = None  # 对话上下文
     # ========== 对比计算结果（同比环比）==========
-    comparison_result: Optional[Dict[str, Any]] = None  # 对比计算结果
+    comparison_results: Optional[List[Dict[str, Any]]] = None  # 支持多个对比结果（同比+环比）
     # ========== 维度值频次学习 ==========
     selected_dimension_field: Optional[str] = None  # 用户选择的维度字段
     selected_dimension_value: Optional[str] = None  # 用户选择的维度值
@@ -76,6 +76,11 @@ class ConversationState(BaseModel):
     dimension_value_matched_text: Optional[str] = None  # 匹配维度值时的原始文本（如"1011"）
     # ========== 公式语法匹配结果 ==========
     matched_formula_syntax: Optional[Dict[str, Any]] = None  # 匹配到的公式语法配置
+    # ========== QueryState 相关 ==========
+    _query_state: Optional[Dict[str, Any]] = None  # LLM 生成的 QueryState JSON
+    # ========== response_node 结果缓存（避免重复执行）==========
+    result_data: Any = None  # 缓存查询结果
+    answer: Optional[str] = None  # 缓存生成的回答
 
 
 class IntentResult(BaseModel):

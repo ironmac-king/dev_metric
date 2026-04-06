@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,7 @@ func AskQuestion(c *gin.Context) {
 		SessionID string `json:"session_id"`
 		Page      int    `json:"page"`
 		PageSize  int    `json:"page_size"`
+		EngineType string `json:"engine_type"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -43,10 +45,11 @@ func AskQuestion(c *gin.Context) {
 	aiURL := fmt.Sprintf("http://localhost:8081/api/v1/ask")
 
 	payload := map[string]interface{}{
-		"question":   req.Question,
-		"session_id": req.SessionID,
-		"page":      req.Page,
-		"page_size": req.PageSize,
+		"question":    req.Question,
+		"session_id":  req.SessionID,
+		"page":       req.Page,
+		"page_size":  req.PageSize,
+		"engine_type": req.EngineType,
 	}
 	jsonData, _ := json.Marshal(payload)
 
@@ -62,44 +65,202 @@ func AskQuestion(c *gin.Context) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	var aiResp map[string]interface{}
-	json.Unmarshal(body, &aiResp)
+
+	// 只解析需要存数据库的字段
+	var pythonResp map[string]interface{}
+	json.Unmarshal(body, &pythonResp)
 
 	// 从 Python 响应获取 session_id，同步到 Go 数据库
-	if sessionID, ok := aiResp["session_id"].(string); ok && sessionID != "" {
+	if sessionID, ok := pythonResp["session_id"].(string); ok && sessionID != "" {
 		now := time.Now()
+		title := ""
+		if answer, ok := pythonResp["answer"].(string); ok {
+			title = answer
+		}
 		summary := model.AskSessionSummary{
 			SessionID:     sessionID,
-			Title:        aiResp["answer"].(string),
+			Title:        title,
 			FirstQuestion: req.Question,
 			MessageCount: 1,
 			UpdatedAt:    now,
 		}
-		// Upsert: 存在则更新，不存在则创建
 		postgres.Get().Where("session_id = ?", sessionID).Assign(summary).FirstOrCreate(&model.AskSessionSummary{})
 	}
 
-	response.Success(c, gin.H{
-		"session_id":                   aiResp["session_id"],
-		"answer":                      aiResp["answer"],
-		"suggest":                     aiResp["suggest"],
-		"sql":                         aiResp["sql"],
-		"thinking_steps":               aiResp["thinking_steps"],
-		"drill_down_dims":              aiResp["drill_down_dims"],
-		"breadcrumbs":                 aiResp["breadcrumbs"],
-		"result_data":                 aiResp["result_data"],
-		"total":                       aiResp["total"],
-		"page":                        aiResp["page"],
-		"page_size":                   aiResp["page_size"],
-		"needs_clarification":          aiResp["needs_clarification"],
-		"clarification_message":        aiResp["clarification_message"],
-		"clarification_type":           aiResp["clarification_type"],
-		"matched_metrics":             aiResp["matched_metrics"],
-		"comparison_result":           aiResp["comparison_result"],
-		"metric_code":                 aiResp["metric_code"],
-		"dimension_value_candidates":   aiResp["dimension_value_candidates"],
-		"dimension_value_matched_text": aiResp["dimension_value_matched_text"],
-	})
+	// 从原始 JSON 字节中直接提取 result_data（保持 Python 返回的原始列顺序）
+	var resultDataJSON []byte
+	bodyStr := string(body)
+	if idx := strings.Index(bodyStr, `"result_data":`); idx >= 0 {
+		start := idx + len(`"result_data":`)
+		for start < len(bodyStr) && (bodyStr[start] == ' ' || bodyStr[start] == '\t' || bodyStr[start] == '\n' || bodyStr[start] == '\r') {
+			start++
+		}
+		if start < len(bodyStr) {
+			depth := 0
+			inString := false
+			escape := false
+			dataStart := start
+			if bodyStr[start] == '[' {
+				for i := start; i < len(bodyStr); i++ {
+					ch := bodyStr[i]
+					if escape {
+						escape = false
+						continue
+					}
+					if ch == '\\' {
+						escape = true
+						continue
+					}
+					if ch == '"' {
+						inString = !inString
+						continue
+					}
+					if inString {
+						continue
+					}
+					if ch == '[' {
+						if depth == 0 {
+							dataStart = i
+						}
+						depth++
+					} else if ch == ']' {
+						depth--
+						if depth == 0 {
+							resultDataJSON = []byte(bodyStr[dataStart : i+1])
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 手动拼接 JSON 响应字符串，保证 key 顺序固定
+	// 顺序固定为: session_id, answer, suggest, sql, thinking_steps,
+	//   drill_down_dims, breadcrumbs, result_data, total, page,
+	//   page_size, needs_clarification, clarification_message, clarification_type,
+	//   matched_metrics, comparison_results, metric_code,
+	//   dimension_value_candidates, dimension_value_matched_text
+	var sb strings.Builder
+	sb.WriteString("{")
+	first := true
+	addField := func(key string, value interface{}) {
+		if !first {
+			sb.WriteString(",")
+		}
+		first = false
+		sb.WriteString(`"`)
+		sb.WriteString(key)
+		sb.WriteString(`":`)
+		if vb, err := json.Marshal(value); err == nil {
+			sb.Write(vb)
+		} else {
+			sb.WriteString("null")
+		}
+	}
+	// 逐字段添加（固定顺序）
+	if v := pythonResp["session_id"]; v != nil {
+		addField("session_id", v)
+	} else {
+		addField("session_id", "")
+	}
+	if v := pythonResp["answer"]; v != nil {
+		addField("answer", v)
+	} else {
+		addField("answer", "")
+	}
+	if v := pythonResp["suggest"]; v != nil {
+		addField("suggest", v)
+	} else {
+		addField("suggest", []string{})
+	}
+	if v := pythonResp["sql"]; v != nil {
+		addField("sql", v)
+	} else {
+		addField("sql", "")
+	}
+	if v := pythonResp["thinking_steps"]; v != nil {
+		addField("thinking_steps", v)
+	} else {
+		addField("thinking_steps", []interface{}{})
+	}
+	if v := pythonResp["drill_down_dims"]; v != nil {
+		addField("drill_down_dims", v)
+	} else {
+		addField("drill_down_dims", []interface{}{})
+	}
+	if v := pythonResp["breadcrumbs"]; v != nil {
+		addField("breadcrumbs", v)
+	} else {
+		addField("breadcrumbs", []interface{}{})
+	}
+	// result_data 使用原始 JSON（保持列顺序）
+	sb.WriteString(",\"result_data\":")
+	if len(resultDataJSON) > 0 {
+		sb.Write(resultDataJSON)
+	} else {
+		sb.WriteString("null")
+	}
+	if v := pythonResp["total"]; v != nil {
+		addField("total", v)
+	} else {
+		addField("total", 0)
+	}
+	if v := pythonResp["page"]; v != nil {
+		addField("page", v)
+	} else {
+		addField("page", 1)
+	}
+	if v := pythonResp["page_size"]; v != nil {
+		addField("page_size", v)
+	} else {
+		addField("page_size", 10)
+	}
+	if v := pythonResp["needs_clarification"]; v != nil {
+		addField("needs_clarification", v)
+	} else {
+		addField("needs_clarification", false)
+	}
+	if v := pythonResp["clarification_message"]; v != nil {
+		addField("clarification_message", v)
+	} else {
+		addField("clarification_message", nil)
+	}
+	if v := pythonResp["clarification_type"]; v != nil {
+		addField("clarification_type", v)
+	} else {
+		addField("clarification_type", nil)
+	}
+	if v := pythonResp["matched_metrics"]; v != nil {
+		addField("matched_metrics", v)
+	} else {
+		addField("matched_metrics", []interface{}{})
+	}
+	if v := pythonResp["comparison_results"]; v != nil {
+		addField("comparison_results", v)
+	} else {
+		addField("comparison_results", nil)
+	}
+	if v := pythonResp["metric_code"]; v != nil {
+		addField("metric_code", v)
+	} else {
+		addField("metric_code", "")
+	}
+	if v := pythonResp["dimension_value_candidates"]; v != nil {
+		addField("dimension_value_candidates", v)
+	} else {
+		addField("dimension_value_candidates", nil)
+	}
+	if v := pythonResp["dimension_value_matched_text"]; v != nil {
+		addField("dimension_value_matched_text", v)
+	} else {
+		addField("dimension_value_matched_text", "")
+	}
+	sb.WriteString("}")
+
+	c.Header("Content-Type", "application/json")
+	c.Status(http.StatusOK)
+	c.Writer.Write([]byte(sb.String()))
 }
 
 // GetAskHistory 获取对话历史
@@ -240,13 +401,14 @@ func ensureConfigLoaded() {
 // DrillDownQuestion 下钻维度查询
 func DrillDownQuestion(c *gin.Context) {
 	var req struct {
-		SessionID      string   `json:"session_id" binding:"required"`
-		DimensionNames []string `json:"dimension_names" binding:"required"`
-		MetricCode     string   `json:"metric_code"`
-		CurrentSQL     string   `json:"current_sql" binding:"required"`
-		CurrentGroupBy string   `json:"current_group_by"`
-		Page           int      `json:"page"`
-		PageSize       int      `json:"page_size"`
+		SessionID       string   `json:"session_id" binding:"required"`
+		DimensionNames  []string `json:"dimension_names" binding:"required"`
+		MetricCode      string   `json:"metric_code"`
+		CurrentSQL      string   `json:"current_sql" binding:"required"`
+		CurrentGroupBy  string   `json:"current_group_by"`
+		Page            int      `json:"page"`
+		PageSize        int      `json:"page_size"`
+		ComparisonTypes []string `json:"comparison_types"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -272,6 +434,7 @@ func DrillDownQuestion(c *gin.Context) {
 		"current_group_by":  req.CurrentGroupBy,
 		"page":            req.Page,
 		"page_size":       req.PageSize,
+		"comparison_types": req.ComparisonTypes,
 	}
 	jsonData, _ := json.Marshal(payload)
 
@@ -300,7 +463,7 @@ func DrillDownQuestion(c *gin.Context) {
 		"clarification_message":  aiResp["clarification_message"],
 		"clarification_type":     aiResp["clarification_type"],
 		"matched_metrics":       aiResp["matched_metrics"],
-		"comparison_result":     aiResp["comparison_result"],
+		"comparison_results":    aiResp["comparison_results"],
 		"metric_code":          aiResp["metric_code"],
 	})
 }
@@ -308,15 +471,15 @@ func DrillDownQuestion(c *gin.Context) {
 // SaveMessage 保存会话消息（Redis 缓存 + 异步落库 PostgreSQL）
 func SaveMessage(c *gin.Context) {
 	var req struct {
-		SessionID       string `json:"session_id" binding:"required"`
-		Role           string `json:"role" binding:"required"` // user / assistant
-		Content        string `json:"content" binding:"required"`
-		SQL            string `json:"sql"`
-		ResultData     string `json:"result_data"`
-		ComparisonResult string `json:"comparison_result"`
-		DrillDownDims  string `json:"drill_down_dims"`
-		Breadcrumbs    string `json:"breadcrumbs"`
-		MetricCode     string `json:"metric_code"`
+		SessionID        string `json:"session_id" binding:"required"`
+		Role            string `json:"role" binding:"required"` // user / assistant
+		Content         string `json:"content" binding:"required"`
+		SQL             string `json:"sql"`
+		ResultData      string `json:"result_data"`
+		ComparisonResults string `json:"comparison_results"`
+		DrillDownDims   string `json:"drill_down_dims"`
+		Breadcrumbs     string `json:"breadcrumbs"`
+		MetricCode      string `json:"metric_code"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -331,7 +494,7 @@ func SaveMessage(c *gin.Context) {
 		Content:         req.Content,
 		SQL:             req.SQL,
 		ResultData:      req.ResultData,
-		ComparisonResult: req.ComparisonResult,
+		ComparisonResults: req.ComparisonResults,
 		DrillDownDims:   req.DrillDownDims,
 		Breadcrumbs:     req.Breadcrumbs,
 		MetricCode:      req.MetricCode,
@@ -377,7 +540,7 @@ func GetMessages(c *gin.Context) {
 				"sql":                 msg.SQL,
 				"created_at":          msg.CreatedAt,
 				"result_data":         decodeJSON(msg.ResultData),
-				"comparison_result":   decodeJSON(msg.ComparisonResult),
+				"comparison_results":  decodeJSON(msg.ComparisonResults),
 				"drill_down_dims":    decodeJSON(msg.DrillDownDims),
 				"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 				"metric_code":         msg.MetricCode,
@@ -406,7 +569,7 @@ func GetMessages(c *gin.Context) {
 			"sql":                 msg.SQL,
 			"created_at":          msg.CreatedAt,
 			"result_data":         decodeJSON(msg.ResultData),
-			"comparison_result":   decodeJSON(msg.ComparisonResult),
+			"comparison_results":  decodeJSON(msg.ComparisonResults),
 			"drill_down_dims":    decodeJSON(msg.DrillDownDims),
 			"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 			"metric_code":         msg.MetricCode,
