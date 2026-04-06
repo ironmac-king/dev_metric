@@ -14,13 +14,35 @@ logger = get_logger("ai.rule_engine")
 class RuleEngine:
     """规则引擎 - 支持数据库配置的模板匹配 + ML增强"""
 
+    # 类级缓存，防止多次初始化（防止模块重载导致重复初始化）
+    _initialized = False
+    _shared_metrics: Dict[str, Dict] = {}
+    _shared_business_terms: Dict[str, Dict] = {}
+    _shared_intent_patterns: List[Dict] = []
+    _shared_sql_templates: Dict[str, str] = {}
+
     def __init__(self, api_base: str = "http://localhost:8080", use_ml: bool = True):
         self.api_base = api_base
+        self.use_ml = use_ml
+        # 如果已经初始化过，直接使用类级缓存
+        if RuleEngine._initialized:
+            self.metric_templates = RuleEngine._shared_metrics
+            self.business_terms = RuleEngine._shared_business_terms
+            self.intent_patterns = RuleEngine._shared_intent_patterns
+            self.sql_templates = RuleEngine._shared_sql_templates
+            self.ml_classifier = None
+            self.ml_extractor = None
+            self.ml_similarity = None
+            self._dimension_cache: Dict[str, Dict[str, str]] = {}
+            self._dimension_cache_time: float = 0
+            self._dimension_ttl: float = 3600
+            logger.info("[RuleEngine] 使用已缓存的配置（模块已加载）")
+            return
+
         self.metric_templates: Dict[str, Dict] = {}
         self.business_terms: Dict[str, Dict] = {}  # 业务术语映射
         self.intent_patterns: List[Dict] = []
         self.sql_templates: Dict[str, str] = {}
-        self.use_ml = use_ml
         self.ml_classifier = None
         self.ml_extractor = None
         self.ml_similarity = None
@@ -30,6 +52,14 @@ class RuleEngine:
         self._dimension_ttl: float = 3600  # 缓存1小时
         self._load_all()
         self._init_ml()
+
+        # 标记已初始化并缓存数据
+        RuleEngine._initialized = True
+        RuleEngine._shared_metrics = self.metric_templates
+        RuleEngine._shared_business_terms = self.business_terms
+        RuleEngine._shared_intent_patterns = self.intent_patterns
+        RuleEngine._shared_sql_templates = self.sql_templates
+        logger.info("[RuleEngine] 首次初始化完成，数据已缓存")
 
     def _load_all(self):
         """加载所有配置"""
@@ -661,9 +691,17 @@ class RuleEngine:
                 # 判断用户意图：是想了解术语含义，还是想查数据
                 # 问"是什么"、"定义"、"含义" → 查术语解释
                 # 问"数据"、"多少"、"怎么查" → 查相关指标
+
+                # 【重要】如果用户同时问了指标相关的问题（如"销售额"、"访问量"、
+                # "排名"、"最高"等），说明用户是想查数据，不是问术语定义
+                # 例如："销售额最高的SKU是啥" → 不是问 SKU 定义，而是问哪个 SKU 销售额最高
+                data_related_keywords = ["销售额", "访问量", "销量", "订单", "转化", "排名", "最高", "最低", "最多", "最少", "前几", "第几", "第一名"]
+                is_data_query = any(kw in text for kw in data_related_keywords)
+
                 is_definition_query = any(word in text for word in ["是什么", "定义", "含义", "解释", "啥", "什么意思", "由来"])
 
-                if is_definition_query:
+                # 只有当用户明确问术语定义，且没有同时问数据问题时，才返回术语解释
+                if is_definition_query and not is_data_query:
                     return {
                         "is_business_term": True,
                         "term": term,

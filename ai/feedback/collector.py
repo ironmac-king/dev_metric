@@ -111,12 +111,12 @@ class FeedbackCollector:
                 record.feedback_source,
                 record.feedback,
                 record.fail_reason,
-                record.context_snapshot,
+                json.dumps(record.context_snapshot, ensure_ascii=False) if record.context_snapshot else None,
                 record.raw_llm_output,
                 record.clarification_type,
                 record.clarification_question,
                 record.user_response,
-                record.missing_fields,
+                json.dumps(record.missing_fields, ensure_ascii=False) if record.missing_fields else None,
                 record.metric_id,
                 record.created_at or datetime.now().isoformat()
             ))

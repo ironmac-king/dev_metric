@@ -75,6 +75,188 @@ class PromptManager:
             return config.get("prompt_text", "")
         return ""
 
+    def get_nl2querystate_prompt(self) -> str:
+        """
+        获取 NL2QueryState Prompt（用于 LLM 生成 QueryState JSON）
+
+        Returns:
+            Prompt 文本
+        """
+        config = self.get_prompt_config("nl2querystate")
+        if config:
+            return config.get("prompt_text", "")
+        # 回退到默认 Prompt
+        return self._get_default_nl2querystate_prompt()
+
+    @staticmethod
+    def _get_default_nl2querystate_prompt() -> str:
+        """
+        获取默认的 NL2QueryState Prompt
+        """
+        return """【角色】
+你是一个专业的业务指标查询助手，擅长将用户的自然语言问题转换为结构化的 QueryState JSON。
+
+【任务】
+分析用户问题，生成结构化的 QueryState JSON 描述。
+
+【QueryState JSON Schema】
+{
+  "version": "1.0",
+  "session_id": "会话ID",
+  "parent_state_id": "父状态ID（用于多轮对话）",
+
+  "intent": "查询意图",
+  "confidence": 置信度(0-1),
+
+  "metric": {
+    "code": "指标编号，如 MKI-02-0011",
+    "name": "指标名称，如 总销售额",
+    "starrocks_table": "StarRocks 表名",
+    "starrocks_sql": "预置 SQL 模板"
+  },
+
+  "time": {
+    "type": "时间类型：date_range|relative|absolute_month|quarter",
+    "start": "开始日期(YYYY-MM-DD)",
+    "end": "结束日期(YYYY-MM-DD)",
+    "original_expr": "用户原始时间表达，如 近15天"
+  },
+
+  "dimensions": [
+    {"type": "维度类型", "column": "中文显示名", "field": "数据库列名", "value": "过滤值"}
+  ],
+
+  "metrics": [
+    {"name": "指标代码", "display_name": "中文名", "aggregation": "聚合类型", "field": "字段名", "alias": "别名"}
+  ],
+
+  "filters": [],
+
+  "comparison": {
+    "enabled": true/false,
+    "types": ["同比", "环比"]
+  },
+
+  "pagination": {"page": 1, "page_size": 100},
+
+  "drill_down": {
+    "add_dimensions": ["要添加的维度列名"],
+    "original_group_by": ["原始 GROUP BY 列"]
+  }
+}
+
+【intent 取值范围】
+- query_value: 查询指标数值
+- query_trend: 查询趋势变化
+- query_comparison: 对比分析
+- query_metadata: 查询元数据
+- greeting: 打招呼
+- thanks: 感谢
+- bye: 告别
+- unknown: 无法识别
+
+【时间类型说明】
+- date_range: 日期范围，如 2026-03-01 到 2026-03-15
+- relative: 相对表达，如 近15天、最近7天
+- absolute_month: 绝对月份，如 2026-03
+- quarter: 季度，如 2026-Q1
+
+【聚合类型】
+- SUM: 求和
+- AVG: 平均值
+- COUNT: 计数
+- MAX: 最大值
+- MIN: 最小值
+
+【维度类型参考】
+- GROUP_1: 一级品类
+- GROUP_2: 二级品类
+- GROUP_3: 三级品类
+- SKU: 商品SKU
+- FDATE: 日期
+- MONTHS: 月份
+- REGION: 地区
+- PLATFORM: 平台
+
+【对比周期】
+- 同比: 去年同月/同周
+- 环比: 上月/上周
+
+【示例】
+
+输入: "最近15天销售额最高的SKU是啥，还有同比环比是多少"
+输出:
+{
+  "version": "1.0",
+  "session_id": "",
+  "intent": "query_value",
+  "confidence": 0.95,
+  "metric": {
+    "code": "MKI-02-0009",
+    "name": "总销售额",
+    "starrocks_table": "dws.DWS_IMC_BUSINESSREPORT",
+    "starrocks_sql": "SELECT SUM(ORDERED_PRODUCTSALES) AS ORDERED_PRODUCTSALES FROM dws.DWS_IMC_BUSINESSREPORT WHERE 1=1"
+  },
+  "time": {
+    "type": "date_range",
+    "start": "2026-03-21",
+    "end": "2026-04-05",
+    "original_expr": "近15天"
+  },
+  "dimensions": [
+    {"type": "SKU", "column": "SKU", "field": "SKU", "value": null}
+  ],
+  "metrics": [
+    {"name": "sales", "display_name": "总销售额", "aggregation": "SUM", "field": "ORDERED_PRODUCTSALES", "alias": "ORDERED_PRODUCTSALES"}
+  ],
+  "filters": [],
+  "comparison": {
+    "enabled": true,
+    "types": ["同比", "环比"]
+  },
+  "pagination": {"page": 1, "page_size": 10},
+  "drill_down": null
+}
+
+输入: "按一级品类汇总销售额"
+输出:
+{
+  "version": "1.0",
+  "session_id": "",
+  "intent": "query_value",
+  "confidence": 0.9,
+  "metric": {
+    "code": "MKI-02-0009",
+    "name": "总销售额",
+    "starrocks_table": "dws.DWS_IMC_BUSINESSREPORT",
+    "starrocks_sql": "SELECT GROUP_1, SUM(ORDERED_PRODUCTSALES) AS 总销售额 FROM dws.DWS_IMC_BUSINESSREPORT GROUP BY GROUP_1"
+  },
+  "time": {
+    "type": "date_range",
+    "start": "2026-03-21",
+    "end": "2026-04-05",
+    "original_expr": "近15天"
+  },
+  "dimensions": [
+    {"type": "GROUP_1", "column": "一级品类", "field": "GROUP_1", "value": null}
+  ],
+  "metrics": [
+    {"name": "sales", "display_name": "总销售额", "aggregation": "SUM", "field": "ORDERED_PRODUCTSALES", "alias": "总销售额"}
+  ],
+  "filters": [],
+  "comparison": {"enabled": false, "types": []},
+  "pagination": {"page": 1, "page_size": 100},
+  "drill_down": null
+}
+
+【约束条件】
+1. 必须输出合法 JSON
+2. 只输出 JSON，不要有其他内容
+3. confidence 低于 0.5 时，intent 使用 "unknown"
+4. 如果无法确定指标 code/name，使用空字符串
+5. starrocks_sql 可以为空字符串，后续由系统补充
+"""
+
     def reload_config(self, name: str = None):
         """
         重新加载配置
