@@ -299,7 +299,7 @@ const selectedIndex = ref(-1)
 const historyLoading = ref(false)
 const reportCache = new Map()
 const rawMarkdown = shallowRef('')  // 用 shallowRef 减少更新开销
-const outputMode = ref('non-stream')  // 'stream' | 'non-stream'
+const outputMode = ref('stream')  // 'stream' | 'non-stream' 默认流式输出
 
 const quickPrompts = [
   '分析近30天广告投放效果',
@@ -355,9 +355,13 @@ async function handleSend() {
 }
 
 async function handleNonStreamMode(text, aiMsgIndex) {
-  const response = await fetch('http://localhost:8081/api/v1/analysis/analyze', {
+  const token = localStorage.getItem('access_token') || ''
+  const response = await fetch('/api/v1/analysis/analyze', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
     body: JSON.stringify({ query: text, session_id: sessionId.value })
   })
 
@@ -397,9 +401,13 @@ async function handleNonStreamMode(text, aiMsgIndex) {
 
   // 保存到后端
   try {
-    const saveRes = await fetch('http://localhost:8080/api/v1/ask-analysis/logs', {
+    const token = localStorage.getItem('access_token') || ''
+    const saveRes = await fetch('/api/v1/ask-analysis/logs', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
       body: JSON.stringify({
         session_id: sessionId.value,
         question: text,
@@ -472,9 +480,13 @@ function patchMarkdown(text) {
 
 async function handleStreamMode(text, aiMsgIndex) {
   // 使用 fetch + ReadableStream 解析 SSE
-  const response = await fetch('http://localhost:8081/api/v1/analysis/stream', {
+  const token = localStorage.getItem('access_token') || ''
+  const response = await fetch('/api/v1/analysis/stream', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
     body: JSON.stringify({ query: text, session_id: sessionId.value })
   })
 
@@ -567,6 +579,9 @@ async function handleStreamMode(text, aiMsgIndex) {
           const chartData = JSON.parse(eventData)
           if (chartData.charts && chartData.charts.length > 0) {
             analysisCharts.value = chartData.charts
+            triggerRef(analysisCharts)
+            // 等 DOM 更新后初始化图表
+            nextTick(() => initCharts())
           }
           // 清理 markdown 中的 [[CHART_BLOCK]] 占位符
           fullContent = fullContent.replace(/\[\[CHART_BLOCK\]\]/g, '')
@@ -575,7 +590,7 @@ async function handleStreamMode(text, aiMsgIndex) {
           triggerRef(analysisResult)
           triggerRef(rawMarkdown)
         } catch (e) {
-          console.error('解析图表数据失败:', e)
+          console.error('解析图表数据失败:', e, 'raw data:', eventData.substring(0, 200))
         }
       } else if (lastEventType === 'done') {
         // 完成，清理可能残留的 [[CHART_BLOCK]] 占位符
@@ -613,8 +628,13 @@ async function handleStreamMode(text, aiMsgIndex) {
 
   // 保存到后端
   try {
-    const saveRes = await fetch('http://localhost:8080/api/v1/ask-analysis/logs', {
+    const token = localStorage.getItem('access_token') || ''
+    const saveRes = await fetch('/api/v1/ask-analysis/logs', {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId.value,
@@ -710,8 +730,10 @@ async function deleteMessage(idx) {
   // 如果有后端 ID，调用后端删除
   if (msgId) {
     try {
-      const res = await fetch(`http://localhost:8080/api/v1/ask-analysis/logs/${msgId}`, {
-        method: 'DELETE'
+      const token = localStorage.getItem('access_token') || ''
+      const res = await fetch(`/api/v1/ask-analysis/logs/${msgId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
       })
       const data = await res.json()
       if (data.code !== 0) {
@@ -750,7 +772,10 @@ async function selectReport(idx) {
     analysisResult.value = reportCache.get(msg.id)
   } else if (msg.id) {
     try {
-      const res = await fetch(`http://localhost:8080/api/v1/ask-analysis/logs/${msg.id}`)
+      const token = localStorage.getItem('access_token') || ''
+      const res = await fetch(`/api/v1/ask-analysis/logs/${msg.id}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
       const data = await res.json()
       if (data.code === 0 && data.data?.answer) {
         // 清理并渲染 markdown
@@ -802,7 +827,10 @@ async function loadHistory() {
 
   historyLoading.value = true
   try {
-    const res = await fetch(`http://localhost:8080/api/v1/ask-analysis/logs?session_id=${sessionId.value}`)
+    const token = localStorage.getItem('access_token') || ''
+    const res = await fetch(`/api/v1/ask-analysis/logs?session_id=${sessionId.value}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
     const data = await res.json()
     if (data.code === 0 && data.data?.list) {
       // 预渲染所有报告的 HTML
