@@ -446,6 +446,7 @@ class ConversationNodes:
         """
         import re
         metric_name = entities.get("metric_name", "") or ""
+        logger.info(f"[_extract_potential_dim_values] 输入: text={text}, metric_name={metric_name}")
 
         # 使用重叠匹配来提取所有可能的维度值
         # (?=...) 是 lookahead，不消耗字符，所以可以重叠匹配
@@ -453,11 +454,12 @@ class ConversationNodes:
 
         # 提取4-8字的完整维度值（更可能精确匹配）
         for length in [8, 7, 6, 5, 4]:
-            # 使用 lookahead 实现重叠匹配
-            pattern = re.compile(rf'(?=[\u4e00-\u9fa5]{{{length}}})[\u4e00-\u9fa5]')
+            # 使用重叠匹配提取固定长度的中文字符串
+            # 直接匹配 length 个连续汉字，match.group() 返回完整的 length 字符
+            pattern = re.compile(r'[\u4e00-\u9fa5]{' + str(length) + '}')
             for match in pattern.finditer(text):
-                start, _ = match.span()
-                segment = text[start:start + length]
+                segment = match.group()  # 直接获取匹配到的 length 个字符
+                start = match.start()
                 # 跳过时间词和指标名
                 if self._is_time_word(segment):
                     continue
@@ -469,10 +471,10 @@ class ConversationNodes:
         # 如果没有找到4-8字的词，尝试提取2-3字的短词
         if not results:
             for length in [3, 2]:
-                pattern = re.compile(rf'(?=[\u4e00-\u9fa5]{{{length}}})[\u4e00-\u9fa5]')
+                pattern = re.compile(r'[\u4e00-\u9fa5]{' + str(length) + '}')
                 for match in pattern.finditer(text):
-                    start, _ = match.span()
-                    segment = text[start:start + length]
+                    segment = match.group()
+                    start = match.start()
                     if self._is_time_word(segment):
                         continue
                     if segment in metric_name or metric_name in segment:
@@ -507,6 +509,7 @@ class ConversationNodes:
             if segment not in results:
                 results.append(segment)
 
+        logger.info(f"[_extract_potential_dim_values] 返回: results={results}")
         return results
 
     def _is_time_word(self, text: str) -> bool:
@@ -732,6 +735,29 @@ class ConversationNodes:
 
         entities.update(term_links)
 
+        # 处理 LLM 识别的 dimension_values（如 dimension_values='智能云存储'）
+        # 转换为具体的 dimension_field（如 GROUP_3='智能云存储'）
+        if entities.get("dimension_values") and not any(entities.get(k) for k in ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']):
+            dim_value = entities.get("dimension_values")
+            dim_type = entities.get("dimension")  # 如 "品类"
+            logger.info(f"[entity_node] LLM 识别到 dimension_values={dim_value}, dimension={dim_type}，搜索对应字段")
+            try:
+                dim_value_client = DimValueClient()
+                results = dim_value_client.search_dimension_values(dim_value, None, 3)
+                if results:
+                    # 优先精确匹配
+                    exact_matches = [r for r in results if r.get("match_type") == "exact"]
+                    if exact_matches:
+                        matched = exact_matches[0]
+                    else:
+                        matched = results[0]
+                    entities[matched["dimension_field"]] = matched["dimension_value"]
+                    entities.pop("dimension_values", None)  # 清除旧的
+                    entities.pop("dimension", None)  # 清除泛指的 dimension
+                    logger.info(f"[entity_node] dimension_values 转换: {matched['dimension_field']}={matched['dimension_value']}")
+            except Exception as e:
+                logger.warning(f"[entity_node] dimension_values 转换失败: {e}")
+
         # 识别"按X查看"模式，设置时间维度（用于 GROUP BY）
         dim_match = re.search(r"按([日月年天周])查看", last_message)
         if dim_match:
@@ -827,25 +853,23 @@ class ConversationNodes:
         self._add_thinking_step(state, "实体识别", "completed", entity_content)
 
         # ========== 维度值识别（并发优化） ==========
-        # 优化：若 metric_code 已确定，说明指标已识别，此时：
-        # 1. 排名/分组查询（如"最高的二级品类"）不需要从文本搜索维度值
-        # 2. 除非用户明确提到特定维度值（如"茅台的销售额"），否则跳过搜索
-        # 只有未识别指标时才需要从文本猜测维度值
-        if entities.get("metric_code"):
-            logger.info(f"[entity_node] metric_code已确定({entities.get('metric_code')})，跳过维度值搜索")
-            logger.info(f"[entity_node] RETURN")
-            return {"entities": entities}
-
-        dim_value_client = DimValueClient()
+        # 提取未匹配的文本用于搜索维度值
         unmatched_texts = self._extract_potential_dim_values(last_message, entities)
         logger.info(f"[entity_node] 维度值提取结果: unmatched_texts={unmatched_texts}, metric_name={entities.get('metric_name', '')}")
 
+        # 若 metric_code 已确定但没有未匹配文本，跳过维度值搜索
+        if entities.get("metric_code") and not unmatched_texts:
+            logger.info(f"[entity_node] metric_code已确定但无未匹配文本，跳过维度值搜索")
+            logger.info(f"[entity_node] RETURN")
+            return {"entities": entities}
+
         # 并发搜索所有候选维度值（避免48次串行HTTP调用）
         candidate_results: List[tuple] = []
+        dim_value_client = DimValueClient()
         if unmatched_texts:
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {
-                    executor.submit(dim_value_client.search_dimension_values, text, 3): text
+                    executor.submit(dim_value_client.search_dimension_values, text, None, 3): text
                     for text in unmatched_texts
                 }
                 for future in as_completed(futures):
@@ -865,11 +889,16 @@ class ConversationNodes:
                     # 唯一精确匹配，直接使用
                     matched = exact_matches[0]
                     entities[matched["dimension_field"]] = matched["dimension_value"]
+                    # 清除泛指的 dimension，因为具体维度值已经确定
+                    # 避免 SQL 生成时同时执行 GROUP BY 和 WHERE
+                    entities.pop("dimension", None)
                     logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']} (精确匹配)")
                 elif len(candidates) == 1:
                     # 唯一匹配（可能是前缀或模糊），直接使用
                     matched = candidates[0]
                     entities[matched["dimension_field"]] = matched["dimension_value"]
+                    # 清除泛指的 dimension，因为具体维度值已经确定
+                    entities.pop("dimension", None)
                     logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']}")
                 else:
                     # 【重要】如果是排名查询（如"最高的XXX"），不应该追问维度值候选
@@ -1499,6 +1528,18 @@ class ConversationNodes:
 
         # 构建 dimensions（需要映射中文维度名到数据库列名）
         query_dimensions = []
+
+        # 如果已有具体的维度值（如 GROUP_3=智能云存储），跳过泛指的 dimension GROUP BY
+        # 避免同时出现 WHERE GROUP_3='智能云存储' 和 GROUP BY 品类
+        logger.info(f"[sql_build_node] dimension={dimension}, state.entities={state.entities}")
+        if dimension:
+            specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
+            has_specific_dim_value = any(state.entities.get(k) for k in specific_dim_keys)
+            logger.info(f"[sql_build_node] specific_dim_keys check: {[k for k in specific_dim_keys if state.entities.get(k)]}, has_specific_dim_value={has_specific_dim_value}")
+            if has_specific_dim_value:
+                logger.info(f"[sql_build_node] 已有具体维度值，跳过泛指的 dimension={dimension} GROUP BY")
+                dimension = None
+
         if dimension and starrocks_table:
             # 从维度配置获取实际的列名
             dim_configs = self._get_table_dimensions_cached(starrocks_table)
@@ -1528,6 +1569,37 @@ class ConversationNodes:
                 field=mapped_dim,
                 value=None
             ))
+
+        # 动态检查 entities 中的具体维度值（WHERE 条件）
+        # 从 dimension_configs 获取所有 column_name，遍历 state.entities 检查是否有匹配的 key
+        # 如果 starrocks_table 为空但 starrocks_sql 非空，尝试从 SQL 提取表名
+        table_for_dim = starrocks_table
+        if not table_for_dim and starrocks_sql:
+            from_match = re.search(r'FROM\s+([a-zA-Z0-9_.]+)', starrocks_sql, re.IGNORECASE)
+            if from_match:
+                table_for_dim = from_match.group(1).strip()
+                logger.info(f"[sql_build_node] 从 starrocks_sql 提取表名: {table_for_dim}")
+
+        logger.info(f"[sql_build_node] table_for_dim={table_for_dim}, starrocks_table={starrocks_table}")
+        if table_for_dim:
+            dim_configs = self._get_table_dimensions_cached(table_for_dim)
+            all_columns = [cfg["column_name"] for cfg in dim_configs.values()]  # 动态获取
+            logger.info(f"[sql_build_node] all_columns={all_columns}")
+            logger.info(f"[sql_build_node] state.entities keys={list(state.entities.keys())}")
+
+            for key, value in state.entities.items():
+                if key in all_columns and value:
+                    # 这是一个具体的维度值，添加为 WHERE 条件
+                    for dim_name, cfg in dim_configs.items():
+                        if cfg["column_name"] == key:
+                            query_dimensions.append(QueryDimension(
+                                type=dim_name,
+                                column=key,
+                                field=key,
+                                value=value
+                            ))
+                            logger.info(f"[sql_build_node] 添加维度值 WHERE 条件: {key}={value}")
+                            break
 
         # 构建 QueryState
         query_state = QueryState(

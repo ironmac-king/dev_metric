@@ -239,6 +239,17 @@ class QueryBuilder:
                 if placeholder in rendered:
                     rendered = rendered.replace(placeholder, f"'{dim.value}'")
 
+        # 3.5 如果维度有具体值但 SQL 里没有占位符，手动追加到 WHERE
+        for dim in query_state.dimensions:
+            if dim.value:
+                placeholder = f"{{{dim.type}}}"
+                if placeholder not in rendered:
+                    # 没有占位符，手动追加 WHERE 条件
+                    if "WHERE" in rendered.upper():
+                        rendered += f" AND {dim.field} = '{dim.value}'"
+                    else:
+                        rendered += f" WHERE {dim.field} = '{dim.value}'"
+
         # 4. 移除未替换的占位符
         import re
         rendered = re.sub(r'\{[^}]+\}', '', rendered)
