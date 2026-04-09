@@ -242,7 +242,10 @@ class LangGraphEngine(ConversationEngine):
         question: str,
         session_id: str,
         page: int = 1,
-        page_size: int = 10
+        page_size: int = 10,
+        user_id: str = "default",
+        dept_id: int = 0,
+        data_filter: str = ""
     ) -> Dict[str, Any]:
         """处理对话请求"""
         config = {"configurable": {"thread_id": session_id}}
@@ -292,6 +295,9 @@ class LangGraphEngine(ConversationEngine):
                     "dimension_value_matched_text": None,
                     "page": page,
                     "page_size": page_size,
+                    "user_id": user_id,
+                    "dept_id": dept_id,
+                    "data_filter": data_filter,
                 }
             else:
                 # 复用现有状态

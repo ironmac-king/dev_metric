@@ -254,7 +254,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import { askAPI } from '@/api'
@@ -273,6 +273,7 @@ const sessions = ref([])
 const showShortcutEditor = ref(false)
 const editingShortcuts = ref([])
 const trendChartRef = ref(null)
+let trendChartInstance = null
 
 const hotMetricsCount = computed(() => stats.value.hot_metrics?.length || 0)
 
@@ -313,10 +314,16 @@ async function loadData() {
 function renderTrendChart() {
   if (!trendChartRef.value) return
 
+  // 清理旧实例
+  if (trendChartInstance) {
+    trendChartInstance.dispose()
+    trendChartInstance = null
+  }
+
   if (!stats.value.trend_data?.length) {
     // 渲染空状态
-    const chart = echarts.init(trendChartRef.value)
-    chart.setOption({
+    trendChartInstance = echarts.init(trendChartRef.value)
+    trendChartInstance.setOption({
       title: {
         text: '暂无数据',
         left: 'center',
@@ -330,7 +337,7 @@ function renderTrendChart() {
     return
   }
 
-  const chart = echarts.init(trendChartRef.value)
+  trendChartInstance = echarts.init(trendChartRef.value)
 
   const dates = stats.value.trend_data.map(d => d.date?.slice(5) || '')
   const counts = stats.value.trend_data.map(d => d.query_count || 0)
@@ -372,7 +379,7 @@ function renderTrendChart() {
     }]
   }
 
-  chart.setOption(option)
+  trendChartInstance.setOption(option)
 }
 
 function goToChat() {
@@ -433,6 +440,13 @@ async function saveShortcuts() {
 
 onMounted(() => {
   loadData()
+})
+
+onUnmounted(() => {
+  if (trendChartInstance) {
+    trendChartInstance.dispose()
+    trendChartInstance = null
+  }
 })
 </script>
 

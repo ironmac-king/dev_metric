@@ -12,7 +12,10 @@ class ConversationEngine(ABC):
         question: str,
         session_id: str,
         page: int = 1,
-        page_size: int = 10
+        page_size: int = 10,
+        user_id: str = "default",
+        dept_id: int = 0,
+        data_filter: str = ""
     ) -> Dict[str, Any]:
         """
         处理对话请求，返回 AskResponse 格式的字典
@@ -22,6 +25,9 @@ class ConversationEngine(ABC):
             session_id: 会话 ID
             page: 页码
             page_size: 每页条数
+            user_id: 用户ID，用于日志隔离
+            dept_id: 部门ID，用于数据权限
+            data_filter: 自定义SQL WHERE条件
 
         Returns:
             {

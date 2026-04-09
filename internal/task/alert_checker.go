@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"dev_metric/internal/model"
 	"dev_metric/internal/notify"
 	"dev_metric/internal/repository/postgres"
@@ -61,19 +62,19 @@ func (ac *AlertChecker) checkRule(rule model.AlertRule) {
 	}
 
 	// 查询最新值
-	data, err := starrocks.Query(metric.StarRocksSQL)
+	data, err := starrocks.Query(context.Background(), metric.StarRocksSQL, rule.MetricID)
 	if err != nil {
 		logger.Error().Err(err).Uint("metric_id", rule.MetricID).Msg("查询指标数据失败")
 		return
 	}
 
-	if len(data) == 0 {
+	if len(data.Data) == 0 {
 		return
 	}
 
 	// 获取最新值
 	var latestValue float64
-	if v, ok := data[0]["value"].(float64); ok {
+	if v, ok := data.Data[0]["value"].(float64); ok {
 		latestValue = v
 	}
 

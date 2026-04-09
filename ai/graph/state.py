@@ -81,6 +81,10 @@ class ConversationState(BaseModel):
     # ========== response_node 结果缓存（避免重复执行）==========
     result_data: Any = None  # 缓存查询结果
     answer: Optional[str] = None  # 缓存生成的回答
+    # ========== 数据权限相关字段 ==========
+    user_id: str = "default"  # 用户ID
+    dept_id: int = 0  # 部门ID
+    data_filter: str = ""  # 自定义SQL WHERE条件
 
 
 class IntentResult(BaseModel):

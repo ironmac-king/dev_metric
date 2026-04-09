@@ -15,8 +15,12 @@ class SQLGenerator:
         self.use_cache = use_cache
         self._cache = get_sql_cache()
 
-    async def execute(self, sql: str, params: Dict[str, Any]) -> Any:
+    async def execute(self, sql: str, params: Dict[str, Any],
+                     dept_id: int = 0, data_filter: str = "") -> Any:
         """执行 SQL 查询（StarRocks），带缓存"""
+        # 应用数据权限过滤
+        sql = self.apply_data_filter(sql, dept_id, data_filter)
+
         # 检查缓存
         if self.use_cache:
             cached_result = self._cache.get(sql)
@@ -39,6 +43,45 @@ class SQLGenerator:
             self._cache.set(sql, result)
 
         return result
+
+    def apply_data_filter(self, sql: str, dept_id: int = 0, data_filter: str = "") -> str:
+        """
+        应用数据权限过滤：dept_id + 自定义 data_filter
+        拼接到 SQL WHERE 条件后面
+        """
+        filters = []
+
+        # 1. dept_id 强制过滤（如果存在）
+        if dept_id and dept_id > 0:
+            if "where" in sql.lower():
+                filters.append(f"dept_id = {dept_id}")
+            else:
+                filters.append(f"WHERE dept_id = {dept_id}")
+
+        # 2. 自定义 data_filter 条件
+        if data_filter and data_filter.strip():
+            # 安全检查：确保 data_filter 不包含危险关键字
+            dangerous = ["drop", "delete", "update", "insert", "truncate",
+                        "alter", "create", "grant", "revoke", "exec", "execute"]
+            filter_lower = data_filter.lower()
+            for kw in dangerous:
+                if kw in filter_lower:
+                    # 跳过危险filter，防止SQL注入
+                    return sql
+            filters.append(f"({data_filter})")
+
+        if not filters:
+            return sql
+
+        # 拼接到 SQL 末尾
+        if "where" in sql.lower():
+            return f"{sql} AND {' AND '.join(filters)}"
+        else:
+            # 没有 WHERE 子句，在 FROM 后面加 WHERE
+            parts = sql.split("FROM", 1)
+            if len(parts) == 2:
+                return f"{parts[0]}FROM{parts[1]} WHERE {' AND '.join(filters)}"
+        return sql
 
     def query_metadata(self, metric_name: str = None, metric_code: str = None) -> Dict[str, Any]:
         """查询指标元数据（从 PostgreSQL）"""

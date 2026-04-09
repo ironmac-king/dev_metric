@@ -4,6 +4,7 @@ import (
 	"dev_metric/internal/model"
 	"dev_metric/internal/repository/postgres"
 	"dev_metric/pkg/response"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -65,7 +66,7 @@ func GetDashboardStats(c *gin.Context) {
 // GetSessions 获取会话列表（卡片式）
 func GetSessions(c *gin.Context) {
 	db := postgres.Get()
-	userID := c.DefaultQuery("user_id", "default")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
 
 	var sessions []model.AskSessionSummary
 	db.Where("user_id = ?", userID).Order("updated_at DESC").Limit(50).Find(&sessions)
@@ -77,10 +78,11 @@ func GetSessions(c *gin.Context) {
 func StarSession(c *gin.Context) {
 	db := postgres.Get()
 	sessionID := c.Param("id")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
 
 	var session model.AskSessionSummary
-	if err := db.Where("session_id = ?", sessionID).First(&session).Error; err != nil {
-		response.Error(c, http.StatusNotFound, "会话不存在")
+	if err := db.Where("session_id = ? AND user_id = ?", sessionID, userID).First(&session).Error; err != nil {
+		response.Error(c, http.StatusNotFound, "会话不存在或无权限")
 		return
 	}
 
@@ -93,7 +95,7 @@ func StarSession(c *gin.Context) {
 // GetFavorites 获取收藏列表
 func GetFavorites(c *gin.Context) {
 	db := postgres.Get()
-	userID := c.DefaultQuery("user_id", "default")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
 
 	var favorites []model.AskFavorite
 	db.Where("user_id = ?", userID).Order("created_at DESC").Find(&favorites)
@@ -104,9 +106,9 @@ func GetFavorites(c *gin.Context) {
 // AddFavorite 添加收藏
 func AddFavorite(c *gin.Context) {
 	db := postgres.Get()
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
 
 	var req struct {
-		UserID      string `json:"user_id"`
 		SessionID   string `json:"session_id"`
 		QuestionText string `json:"question_text"`
 		AnswerText   string `json:"answer_text"`
@@ -118,12 +120,8 @@ func AddFavorite(c *gin.Context) {
 		return
 	}
 
-	if req.UserID == "" {
-		req.UserID = "default"
-	}
-
 	favorite := model.AskFavorite{
-		UserID:      req.UserID,
+		UserID:      userID,
 		SessionID:   req.SessionID,
 		QuestionText: req.QuestionText,
 		AnswerText:   req.AnswerText,
@@ -138,6 +136,14 @@ func AddFavorite(c *gin.Context) {
 func DeleteFavorite(c *gin.Context) {
 	db := postgres.Get()
 	id := c.Param("id")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
+
+	// 验证收藏属于当前用户
+	var favorite model.AskFavorite
+	if err := db.Where("id = ? AND user_id = ?", id, userID).First(&favorite).Error; err != nil {
+		response.Error(c, http.StatusNotFound, "收藏不存在或无权限")
+		return
+	}
 
 	if err := db.Delete(&model.AskFavorite{}, id).Error; err != nil {
 		response.Error(c, http.StatusInternalServerError, "删除失败")
@@ -150,7 +156,7 @@ func DeleteFavorite(c *gin.Context) {
 // GetPreferences 获取用户偏好
 func GetPreferences(c *gin.Context) {
 	db := postgres.Get()
-	userID := c.DefaultQuery("user_id", "default")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
 
 	var pref model.AskUserPreference
 	if err := db.Where("user_id = ?", userID).First(&pref).Error; err != nil {
@@ -171,7 +177,7 @@ func GetPreferences(c *gin.Context) {
 // UpdatePreferences 更新用户偏好
 func UpdatePreferences(c *gin.Context) {
 	db := postgres.Get()
-	userID := c.DefaultQuery("user_id", "default")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
 
 	var req struct {
 		Theme        string `json:"theme"`
@@ -217,7 +223,7 @@ func UpdatePreferences(c *gin.Context) {
 // GetRecentQuestions 获取最近提问
 func GetRecentQuestions(c *gin.Context) {
 	db := postgres.Get()
-	userID := c.DefaultQuery("user_id", "default")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
 	limit := c.DefaultQuery("limit", "10")
 
 	var sessions []model.AskSessionSummary

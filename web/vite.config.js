@@ -11,11 +11,26 @@ export default defineConfig({
   },
   server: {
     port: 3000,
-    host: '0.0.0.0',  // 允许用本地IP访问
+    host: '0.0.0.0',  // 监听所有网络接口，允许其他电脑访问
     proxy: {
       '/api': {
         target: 'http://localhost:8080',
-        changeOrigin: true
+        changeOrigin: true,
+        // 显式转发 Authorization header
+        onProxyReq: (proxyReq, req) => {
+          if (req.headers['authorization']) {
+            proxyReq.setHeader('authorization', req.headers['authorization'])
+          }
+        },
+        // 禁用代理缓冲，实现实时流式
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            // 确保 SSE 流不被缓冲
+            if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
+              proxyRes.headers['x-accel-buffering'] = 'no'
+            }
+          })
+        }
       }
     }
   }

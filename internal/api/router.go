@@ -80,8 +80,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			feedback.GET("/by-type", handler.GetFeedbackByType)
 		}
 
-		// 智能问数 API
+		// 智能问数 API（需要认证）
 		ask := v1.Group("/ask")
+		ask.Use(middleware.AuthMiddleware())
 		{
 			ask.POST("", handler.AskQuestion)
 			ask.GET("/history", handler.GetAskHistory)
@@ -92,6 +93,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.POST("/messages", handler.SaveMessage)
 			ask.GET("/messages", handler.GetMessages)
 			ask.DELETE("/messages", handler.DeleteMessages)
+			ask.GET("/last-result", handler.GetLastResult)
 
 			// Dashboard 相关
 			ask.GET("/dashboard/stats", handler.GetDashboardStats)
@@ -111,12 +113,22 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.DELETE("/shortcuts/:id", handler.DeleteShortcut)
 		}
 
-		// 问数分析 API
+		// 问数分析 API（需要认证）
 		askAnalysis := v1.Group("/ask-analysis")
+		askAnalysis.Use(middleware.AuthMiddleware())
+
+		// 决策分析 API（需要认证）
+		analysis := v1.Group("/analysis")
+		analysis.Use(middleware.AuthMiddleware())
 		{
-			askAnalysis.POST("/log", handler.CreateAnalysisLog)
+			analysis.POST("/analyze", handler.AnalysisQuestion)
+			analysis.POST("/stream", handler.AnalysisStream)
+		}
+		{
+			askAnalysis.POST("/logs", handler.CreateAnalysisLog)
 			askAnalysis.GET("/logs", handler.GetAnalysisLogs)
 			askAnalysis.GET("/logs/:id", handler.GetAnalysisLog)
+			askAnalysis.DELETE("/logs/:id", handler.DeleteAnalysisLog)
 		}
 
 		// 指标元数据 API（供 AI 服务调用）
@@ -173,6 +185,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			// 向量获取 API（供 Python AI 服务调用）
 			nlp.GET("/vectors/intents", handler.GetIntentVectors)
 			nlp.GET("/vectors/metrics", handler.GetMetricVectors)
+
+			// Embedding 生成 API（供 Python AI 服务调用）
+			nlp.POST("/generate-embeddings", handler.GenerateEmbeddings)
 		}
 
 		// 意图反馈
@@ -237,6 +252,33 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			auth.POST("/refresh", handler.RefreshToken)
 			auth.POST("/logout", handler.Logout)
 		}
+
+		// 用户管理（需要认证+管理员）
+		users := v1.Group("/users")
+		users.Use(middleware.AuthMiddleware(), middleware.RequireRole("admin"))
+		{
+			users.GET("", handler.ListUsers)
+			users.GET("/:id", handler.GetUser)
+			users.POST("", handler.CreateUser)
+			users.PUT("/:id", handler.UpdateUser)
+			users.DELETE("/:id", handler.DeleteUser)
+		}
+
+		// 角色权限管理（需要认证+管理员）
+		roles := v1.Group("/roles")
+		roles.Use(middleware.AuthMiddleware(), middleware.RequireRole("admin"))
+		{
+			roles.GET("", handler.ListRoles)
+			roles.GET("/all-menus", handler.GetAllMenus)
+			roles.GET("/:name/menus", handler.GetRoleMenus)
+			roles.PUT("/:name/menus", handler.UpdateRoleMenus)
+			roles.POST("", handler.CreateRole)
+			roles.PUT("/role/:role_id", handler.UpdateRole)
+			roles.DELETE("/role/:role_id", handler.DeleteRole)
+		}
+
+		// 当前用户菜单权限（需要认证）
+		v1.GET("/my-menus", handler.GetCurrentUserMenus)
 	}
 
 	// 初始化数据库

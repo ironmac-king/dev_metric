@@ -40,6 +40,11 @@ const routes = [
         component: () => import('../views/AskAnalysis.vue')
       },
       {
+        path: 'analysis',
+        name: 'Analysis',
+        component: () => import('../views/AnalysisPage.vue')
+      },
+      {
         path: 'ai-assistant',
         name: 'AIAssistant',
         component: () => import('../views/components/AskDashboard.vue')
@@ -73,6 +78,16 @@ const routes = [
         path: 'prompt-config',
         name: 'PromptConfig',
         component: () => import('../views/PromptConfig.vue')
+      },
+      {
+        path: 'user-management',
+        name: 'UserManagement',
+        component: () => import('../views/UserManagement.vue')
+      },
+      {
+        path: 'role-permission',
+        name: 'RolePermission',
+        component: () => import('../views/RolePermission.vue')
       }
     ]
   }
@@ -81,6 +96,21 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(),
   routes
+})
+
+// 路由守卫：检查登录状态
+router.beforeEach((to, from, next) => {
+  const token = localStorage.getItem('access_token')
+  // 不需要登录的路径
+  const whiteList = ['/login']
+  if (!token && !whiteList.includes(to.path)) {
+    next('/login')
+  } else if (to.path === '/login' && token) {
+    // 已登录访问登录页，跳转到首页
+    next('/dashboard')
+  } else {
+    next()
+  }
 })
 
 export default router

@@ -11,6 +11,7 @@ type PromptConfig struct {
 	Description string    `json:"description" gorm:"type:text"`
 	PromptText  string    `json:"prompt_text" gorm:"type:text"`
 	Variables   string    `json:"variables" gorm:"type:jsonb"` // JSON array: ["intent", "metric_name"]
+	Category    string    `json:"category" gorm:"size:32;default:general"` // nl2structure/sql_generation/decision_analysis/general
 	Version     int       `json:"version" gorm:"default:1"`
 	Status      int16     `json:"status" gorm:"default:1"` // 1=启用 0=停用
 	CreatedAt   time.Time `json:"created_at"`

@@ -82,6 +82,8 @@ class AskRequest(BaseModel):
     page_size: int = 10
     engine_type: Optional[str] = "langgraph"  # "langgraph" | "llm"
     user_id: Optional[str] = "default"  # 用户ID，用于日志隔离
+    dept_id: Optional[int] = 0  # 部门ID，用于数据权限
+    data_filter: Optional[str] = ""  # 自定义SQL WHERE条件
 
 
 class ThinkingStepResponse(BaseModel):
@@ -281,7 +283,10 @@ async def ask_question(req: AskRequest):
             question=req.question,
             session_id=session_id,
             page=req.page,
-            page_size=req.page_size
+            page_size=req.page_size,
+            user_id=req.user_id,
+            dept_id=req.dept_id,
+            data_filter=req.data_filter
         )
 
         # 异步写入分析日志（不阻塞响应）
@@ -1103,6 +1108,10 @@ def load_semantic_vectors():
     semantic_search.ensure_loaded()
     logger.info("语义向量加载完成")
 
+
+# 注册决策分析路由
+from ai.analysis import router as analysis_router
+app.include_router(analysis_router)
 
 if __name__ == "__main__":
     import uvicorn

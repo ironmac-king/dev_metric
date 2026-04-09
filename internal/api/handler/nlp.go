@@ -411,3 +411,38 @@ func generateEmbeddingsBatch(texts []string) (map[string][]float64, error) {
 
 	return vectors, nil
 }
+
+// GenerateEmbeddings 对外提供的embedding生成接口（供Python AI服务调用）
+func GenerateEmbeddings(c *gin.Context) {
+	var req struct {
+		Texts []string `json:"texts"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+
+	if len(req.Texts) == 0 {
+		response.Success(c, []map[string]interface{}{})
+		return
+	}
+
+	vectors, err := generateEmbeddingsBatch(req.Texts)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, fmt.Sprintf("生成embedding失败: %v", err))
+		return
+	}
+
+	// 转换为响应格式
+	result := make([]map[string]interface{}, 0, len(req.Texts))
+	for _, text := range req.Texts {
+		if vec, ok := vectors[text]; ok {
+			result = append(result, map[string]interface{}{
+				"text":      text,
+				"embedding": vec,
+			})
+		}
+	}
+
+	response.Success(c, result)
+}

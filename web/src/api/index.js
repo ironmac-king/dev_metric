@@ -134,6 +134,31 @@ export const authAPI = {
   logout: () => api.post('/auth/logout')
 }
 
+// 用户管理 API
+export const userAPI = {
+  list: () => api.get('/users'),
+  get: (id) => api.get(`/users/${id}`),
+  create: (data) => api.post('/users', data),
+  update: (id, data) => api.put(`/users/${id}`, data),
+  delete: (id) => api.delete(`/users/${id}`)
+}
+
+// 角色权限 API
+export const roleAPI = {
+  list: () => api.get('/roles'),
+  getAllMenus: () => api.get('/roles/all-menus'),
+  getMenus: (roleName) => api.get(`/roles/${roleName}/menus`),
+  updateMenus: (roleName, menus) => api.put(`/roles/${roleName}/menus`, { menus }),
+  create: (data) => api.post('/roles', data),
+  update: (id, data) => api.put(`/roles/role/${id}`, data),
+  delete: (id) => api.delete(`/roles/role/${id}`)
+}
+
+// 当前用户菜单权限
+export const menuAPI = {
+  getMyMenus: () => api.get('/my-menus')
+}
+
 // Prompt 配置 API
 export const promptConfigAPI = {
   list: () => api.get('/prompt-configs'),

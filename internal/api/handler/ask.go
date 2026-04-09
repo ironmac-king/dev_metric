@@ -12,11 +12,32 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+// GetUserIDFromContext 从 gin.Context 获取当前用户ID
+func GetUserIDFromContext(c *gin.Context) uint {
+	if userID, exists := c.Get("user_id"); exists {
+		if id, ok := userID.(uint); ok {
+			return id
+		}
+	}
+	return 0
+}
+
+// GetUserRoleFromContext 从 gin.Context 获取当前用户角色
+func GetUserRoleFromContext(c *gin.Context) string {
+	if role, exists := c.Get("role"); exists {
+		if r, ok := role.(string); ok {
+			return r
+		}
+	}
+	return ""
+}
 
 // AskQuestion 智能问数 - 调用 Python AI 服务
 func AskQuestion(c *gin.Context) {
@@ -41,12 +62,27 @@ func AskQuestion(c *gin.Context) {
 		req.PageSize = 10
 	}
 
+	// 获取当前用户ID
+	userID := GetUserIDFromContext(c)
+
+	// 获取用户的 dept_id 和 data_filter
+	var user model.User
+	var deptID int
+	var dataFilter string
+	if err := postgres.Get().First(&user, userID).Error; err == nil {
+		deptID = user.DeptID
+		dataFilter = user.DataFilter
+	}
+
 	// 调用 Python AI 服务
 	aiURL := fmt.Sprintf("http://localhost:8081/api/v1/ask")
 
 	payload := map[string]interface{}{
 		"question":    req.Question,
 		"session_id":  req.SessionID,
+		"user_id":    strconv.FormatUint(uint64(userID), 10),
+		"dept_id":    deptID,
+		"data_filter": dataFilter,
 		"page":       req.Page,
 		"page_size":  req.PageSize,
 		"engine_type": req.EngineType,
@@ -271,8 +307,11 @@ func GetAskHistory(c *gin.Context) {
 		return
 	}
 
-	// 调用 Python AI 服务
-	resp, err := http.Get(fmt.Sprintf("http://localhost:8081/api/v1/ask/history?session_id=%s", sessionID))
+	// 获取当前用户ID
+	userID := GetUserIDFromContext(c)
+
+	// 调用 Python AI 服务（传递 user_id 用于隔离）
+	resp, err := http.Get(fmt.Sprintf("http://localhost:8081/api/v1/ask/history?session_id=%s&user_id=%d", sessionID, userID))
 	if err != nil {
 		response.Success(c, gin.H{
 			"session_id": sessionID,
@@ -446,26 +485,11 @@ func DrillDownQuestion(c *gin.Context) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	var aiResp map[string]interface{}
-	json.Unmarshal(body, &aiResp)
 
-	response.Success(c, gin.H{
-		"session_id":             aiResp["session_id"],
-		"answer":                aiResp["answer"],
-		"sql":                   aiResp["sql"],
-		"drill_down_dims":        aiResp["drill_down_dims"],
-		"breadcrumbs":           aiResp["breadcrumbs"],
-		"result_data":           aiResp["result_data"],
-		"total":                 aiResp["total"],
-		"page":                  aiResp["page"],
-		"page_size":             aiResp["page_size"],
-		"needs_clarification":    aiResp["needs_clarification"],
-		"clarification_message":  aiResp["clarification_message"],
-		"clarification_type":     aiResp["clarification_type"],
-		"matched_metrics":       aiResp["matched_metrics"],
-		"comparison_results":    aiResp["comparison_results"],
-		"metric_code":          aiResp["metric_code"],
-	})
+	// 直接返回 Python 服务的原始响应（与 AskQuestion 保持一致）
+	c.Header("Content-Type", "application/json")
+	c.Status(http.StatusOK)
+	c.Writer.Write(body)
 }
 
 // SaveMessage 保存会话消息（Redis 缓存 + 异步落库 PostgreSQL）
@@ -609,4 +633,64 @@ func DeleteMessages(c *gin.Context) {
 	}()
 
 	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+// GetLastResult 获取最近一次问数结果（供决策分析模块调用）
+func GetLastResult(c *gin.Context) {
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		response.Error(c, response.CodeBadRequest, "session_id 不能为空")
+		return
+	}
+
+	ctx := context.Background()
+
+	// 优先从 Redis 获取最近一条 assistant 消息
+	cacheKey := fmt.Sprintf("ask:messages:%s", sessionID)
+	var messages []model.AskMessage
+	if err := cache.GetJSON(ctx, cacheKey, &messages); err != nil || len(messages) == 0 {
+		// Redis 没有，从 PostgreSQL 读取
+		var dbMessages []model.AskMessage
+		postgres.Get().Where("session_id = ? AND role = ?", sessionID, "assistant").
+			Order("created_at DESC").Limit(1).Find(&dbMessages)
+		if len(dbMessages) == 0 {
+			response.Error(c, 404, "未找到问数记录")
+			return
+		}
+		messages = dbMessages
+	} else {
+		// 从 Redis 消息中筛选最后一条 assistant 消息
+		var lastAssistant *model.AskMessage
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role == "assistant" {
+				lastAssistant = &messages[i]
+				break
+			}
+		}
+		if lastAssistant == nil {
+			response.Error(c, 404, "未找到问数记录")
+			return
+		}
+		messages = []model.AskMessage{*lastAssistant}
+	}
+
+	// 取最后一条 assistant 消息
+	lastMsg := messages[len(messages)-1]
+
+	// 提取指标 code（可能多个，用逗号分隔）
+	metricCode := lastMsg.MetricCode
+
+	// 解析 result_data
+	var resultData interface{}
+	if lastMsg.ResultData != "" {
+		json.Unmarshal([]byte(lastMsg.ResultData), &resultData)
+	}
+
+	// 返回结果
+	response.Success(c, gin.H{
+		"metric_code":  metricCode,
+		"result_data":  resultData,
+		"sql":          lastMsg.SQL,
+		"created_at":   lastMsg.CreatedAt,
+	})
 }

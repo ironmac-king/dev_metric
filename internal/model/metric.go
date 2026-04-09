@@ -150,7 +150,8 @@ type User struct {
 	PasswordHash string    `json:"-" gorm:"size:256"`
 	Dept         string    `json:"dept" gorm:"size:128"`
 	DeptID       int       `json:"dept_id" gorm:"index"`
-	Role         string    `json:"role" gorm:"size:32"`  // admin/user
+	Role         string    `json:"role" gorm:"size:32"`       // admin/user
+	DataFilter   string    `json:"data_filter" gorm:"size:512"` // 自定义SQL WHERE条件，用于数据权限
 	Status       int16     `json:"status" gorm:"default:1"`
 	CreatedAt    time.Time `json:"created_at"`
 }
@@ -385,6 +386,7 @@ type AskAnalysisLog struct {
 	UserID       string    `json:"user_id" gorm:"size:64;index;default:'default'"` // 用户ID
 	SessionID    string    `json:"session_id" gorm:"size:64;index"`                // 会话ID
 	Question     string    `json:"question" gorm:"type:text"`                     // 用户问题
+	Answer       string    `json:"answer" gorm:"type:text"`                       // 完整回答/报告
 	Intent       string    `json:"intent" gorm:"size:32"`                        // 识别的意图
 	Success      bool      `json:"success"`                                       // 是否成功
 	FailStage    string    `json:"fail_stage" gorm:"size:32"`                  // 失败阶段: intent/entity/sql/execute

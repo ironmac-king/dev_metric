@@ -311,11 +311,22 @@ class ConversationNodes:
                 return {"current_intent": None, "entities": intent_result.entities}
 
             # 补充 top_n 排名信息（检测"前三"、"前十"、"前13"等模式）
-            if not intent_result.entities.get("top_n"):
-                top_n = self._extract_top_n(last_message)
-                if top_n:
-                    intent_result.entities["top_n"] = top_n
-                    logger.debug(f"[intent_node] 检测到 top_n: {top_n}")
+            # 规则引擎优先：当检测到"最高的"（无具体数字）模式时，即使 LLM 返回 top_n=1 也用规则引擎结果覆盖
+            rule_top_n = self._extract_top_n(last_message)
+            logger.info(f"[intent_node] _extract_top_n('{last_message}') = {rule_top_n}")
+
+            llm_top_n = intent_result.entities.get("top_n")
+            # 规则引擎检测到"最高的"无具体数字（默认10），但LLM返回top_n=1，用规则引擎覆盖
+            if rule_top_n and rule_top_n == 10 and llm_top_n == 1:
+                intent_result.entities["top_n"] = rule_top_n
+                self._add_thinking_step(state, "排名信息", "completed",
+                    f"LLM top_n=1 不合理，用规则引擎覆盖为 {rule_top_n}")
+                logger.info(f"[intent_node] LLM top_n=1 不合理，覆盖为 {rule_top_n}")
+            elif not llm_top_n and rule_top_n:
+                intent_result.entities["top_n"] = rule_top_n
+                self._add_thinking_step(state, "排名信息", "completed",
+                    f"检测到 top_n: {rule_top_n}，将添加排序")
+                logger.debug(f"[intent_node] 检测到 top_n: {rule_top_n}")
 
             # 补充排名维度信息（检测"最高的+维度词"模式，如"最高的品类"）
             # 当公式语法匹配到排名意图时，自动提取分组维度
@@ -1556,6 +1567,17 @@ class ConversationNodes:
             generated_sql = re.sub(r'\s*AND\s+sku\s*=\s*\$\{SKU\}', '', generated_sql, flags=re.IGNORECASE)
             generated_sql = generated_sql.rstrip()
 
+        # 处理 ORDER BY（当有 top_n 排名需求时）
+        top_n = state.entities.get("top_n")
+        if top_n and top_n > 0 and "ORDER BY" not in generated_sql.upper():
+            # 获取指标列名（用于 ORDER BY）
+            metric_col = "ORDERED_PRODUCTSALES"  # 默认指标列
+            col_match = re.search(r'(sum|avg)\s*\(\s*(\w+)\s*\)', generated_sql, re.IGNORECASE)
+            if col_match:
+                metric_col = col_match.group(2)
+            generated_sql = generated_sql.rstrip() + f" ORDER BY {metric_col} DESC"
+            logger.info(f"[sql_build_node] 添加 ORDER BY {metric_col} DESC for top_n={top_n}")
+
         # 记录思考步骤
         for step in thinking_steps:
             self._add_thinking_step(state, step.get("step", ""), step.get("status", "completed"), step.get("detail", ""))
@@ -1967,6 +1989,7 @@ class ConversationNodes:
 
         # === 5. 处理 top N 排名 ===
         top_n = entities.get("top_n")
+        logger.info(f"[_apply_dimensions_to_sql] top_n={top_n}, entities keys={list(entities.keys())}")
         if top_n:
             # 获取指标列名（用于 ORDER BY）
             metric_col = "SESSIONS_TOTAL"  # 默认指标列
@@ -1978,12 +2001,16 @@ class ConversationNodes:
 
             # === 修复：支持多列 GROUP BY ===
             group_cols = []  # 改为列表，支持多列
-            group_match = re.search(r'GROUP\s+BY\s+([\w,\s]+?)(?=\s*(?:ORDER|GROUP|LIMIT|$))', adjusted_sql, re.IGNORECASE)
+            # 支持反引号``、方括号[]、无引号等多种 GROUP BY 列名格式
+            group_match = re.search(r'GROUP\s+BY\s+([\w`\[\],\s]+?)(?=\s*(?:ORDER|GROUP|LIMIT|$))', adjusted_sql, re.IGNORECASE)
             if group_match:
                 group_by_clause = group_match.group(1)
-                # 解析所有列（逗号分隔）
+                # 解析所有列（逗号分隔），并去除反引号、方括号等
+                import re as re_module
                 for col in group_by_clause.split(','):
                     col = col.strip()
+                    # 去除反引号、方括号
+                    col = re_module.sub(r'[` \[\]]', '', col)
                     if col:
                         group_cols.append(col)
 
@@ -2038,7 +2065,7 @@ class ConversationNodes:
         return result
 
     def _extract_top_n(self, text: str) -> Optional[int]:
-        """从文本中提取 top N 排名信息（如"前三"、"前十"、"前13名"、"十三级"、"最高的10个"等）"""
+        """从文本中提取 top N 排名信息（如"前三"、"前十"、"前13名"、"十三级"、"最高的10个"、"最高的"等）"""
         import re
         # 中文数字映射
         chinese_nums = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '零': 0}
@@ -2066,6 +2093,11 @@ class ConversationNodes:
                     for c in num_str[1:]:
                         result += chinese_nums.get(c, 0)
                     return result if result > 10 else chinese_nums.get(num_str, 0)
+
+        # 检查"最高的"不带数字的情况，默认返回10
+        if re.search(r'最高的(?!\d)', text):  # 最高的后面不跟数字
+            return 10
+
         return None
 
     def _extract_ranking_dimension(self, text: str, intent: str) -> Optional[str]:
@@ -2227,7 +2259,9 @@ class ConversationNodes:
             try:
                 result = await self.sql_generator.execute(
                     sql=state.generated_sql,
-                    params=state.sql_params
+                    params=state.sql_params,
+                    dept_id=getattr(state, 'dept_id', 0),
+                    data_filter=getattr(state, 'data_filter', '')
                 )
                 state.sql_result = result
                 # 记录思考步骤：数据查询
@@ -2884,8 +2918,8 @@ class ConversationNodes:
                         if isinstance(rows_to_process, list):
                             for row in rows_to_process:
                                 if isinstance(row, dict):
-                                    # 跳过已经处理过的行（comparison_node 已添加每行各自的对比值）
-                                    if "同比变化率" in row or "环比变化率" in row:
+                                    # 跳过已经处理过且值有效的行（comparison_node 已添加每行各自的对比值）
+                                    if row.get("同比变化率") is not None or row.get("环比变化率") is not None:
                                         continue
                                     for comp in comparison_results:
                                         comp_type = comp.get("comparison_type", "对比")

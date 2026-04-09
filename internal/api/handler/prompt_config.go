@@ -19,8 +19,13 @@ import (
 
 // ListPromptConfigs 获取Prompt配置列表
 func ListPromptConfigs(c *gin.Context) {
+	category := c.Query("category")
 	var configs []model.PromptConfig
-	postgres.Get().Order("id ASC").Find(&configs)
+	query := postgres.Get().Order("id ASC")
+	if category != "" {
+		query = query.Where("category = ?", category)
+	}
+	query.Find(&configs)
 	response.Success(c, configs)
 }
 

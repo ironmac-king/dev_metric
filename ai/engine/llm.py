@@ -1214,6 +1214,105 @@ NL2Structure Prompt 用于将用户自然语言转换为结构化数据，输出
             logger.info(f"[LLMEngine] 维度纠错建议生成失败: {e}")
             return ""
 
+    async def stream(self, prompt: str, temperature: float = 0.7, max_tokens: int = 2000):
+        """
+        流式 LLM 调用（用于 SSE 输出）
+
+        Args:
+            prompt: 提示词
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+
+        Yields:
+            str: LLM 返回的文本片段
+        """
+        try:
+            # OpenAI SDK 的流式调用
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True
+            )
+
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        except Exception as e:
+            try:
+                logger.info(f"[LLMEngine] 流式 LLM 调用失败: {e}")
+            except Exception:
+                pass  # 忽略日志编码错误
+            try:
+                error_str = str(e)
+                yield f"LLM 调用出错: {error_str}"
+            except Exception:
+                yield "LLM 调用出错: (编码错误无法显示)"
+
+    async def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 4000) -> str:
+        """
+        非流式 LLM 调用（一次性返回完整结果）
+
+        Args:
+            prompt: 提示词
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+
+        Returns:
+            str: LLM 返回的完整文本
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            try:
+                logger.info(f"[LLMEngine] LLM 调用失败: {e}")
+            except Exception:
+                pass
+            raise e
+
+
+class CircuitBreaker:
+    """熔断器"""
+
+    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.last_failure_time = None
+        self.state = "closed"  # closed, open, half_open
+
+    def call(self, func, *args, **kwargs):
+        """带熔断的调用"""
+        if self.state == "open":
+            raise Exception("LLM 服务暂时不可用，请稍后再试")
+
+        try:
+            result = func(*args, **kwargs)
+            self.on_success()
+            return result
+        except Exception as e:
+            self.on_failure()
+            raise e
+
+    def on_success(self):
+        """成功回调"""
+        self.failures = 0
+        self.state = "closed"
+
+    def on_failure(self):
+        """失败回调"""
+        self.failures += 1
+        if self.failures >= self.failure_threshold:
+            self.state = "open"
+
 
 class CircuitBreaker:
     """熔断器"""

@@ -16,6 +16,7 @@ func CreateAnalysisLog(c *gin.Context) {
 		UserID       string `json:"user_id"`
 		SessionID    string `json:"session_id"`
 		Question     string `json:"question"`
+		Answer       string `json:"answer"`
 		Intent       string `json:"intent"`
 		Success      bool   `json:"success"`
 		FailStage    string `json:"fail_stage"`
@@ -38,6 +39,7 @@ func CreateAnalysisLog(c *gin.Context) {
 		UserID:        req.UserID,
 		SessionID:     req.SessionID,
 		Question:      req.Question,
+		Answer:        req.Answer,
 		Intent:        req.Intent,
 		Success:       req.Success,
 		FailStage:     req.FailStage,
@@ -121,4 +123,22 @@ func GetAnalysisLog(c *gin.Context) {
 	}
 
 	response.Success(c, log)
+}
+
+// DeleteAnalysisLog 删除日志
+func DeleteAnalysisLog(c *gin.Context) {
+	id := c.Param("id")
+	var log model.AskAnalysisLog
+
+	if err := postgres.Get().First(&log, id).Error; err != nil {
+		response.Error(c, response.CodeNotFound, "日志不存在")
+		return
+	}
+
+	if err := postgres.Get().Delete(&log).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "删除失败")
+		return
+	}
+
+	response.Success(c, gin.H{"deleted": true})
 }
