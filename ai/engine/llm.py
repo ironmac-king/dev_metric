@@ -210,6 +210,23 @@ class LLMEngine:
 - 如果用户提到"各平台"、"各地区"、"各品类"等多维度分组需求，在 dimension 字段填入对应的维度类型
 - 如果用户提到"第一名"、"前10"、"最高的"等排名需求，设置 top_n 参数
 - 时间表达优先使用标准描述如"近30天"、"本月"、"上周"
+
+【区分维度类型和维度值】
+- 维度类型是分类名，如"品类"、"平台"、"渠道"，出现在 dimension 字段
+- 维度值是具体名称，如"智能云存储"、"天猫"、"京东"，出现在 dimension_values 字段
+
+【Few-shot 示例】
+用户问题：「今年智能云存储销售额是多少」
+返回：{"intent": "query_value", "metric_name": "销售额", "time_range": "今年", "dimension": "品类", "dimension_values": "智能云存储"}
+
+用户问题：「天猫平台的订单量」
+返回：{"intent": "query_value", "metric_name": "订单量", "dimension": "平台", "dimension_values": "天猫"}
+
+用户问题：「各品类销售额是多少」
+返回：{"intent": "query_value", "metric_name": "销售额", "dimension": "品类", "dimension_values": null}
+
+用户问题：「今年京东渠道的转化率」
+返回：{"intent": "query_value", "metric_name": "转化率", "time_range": "今年", "dimension": "渠道", "dimension_values": "京东"}
 """
 
         try:

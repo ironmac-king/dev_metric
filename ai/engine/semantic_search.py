@@ -26,6 +26,8 @@ class SemanticSearch:
         self._intent_types: Dict[str, str] = {}  # text -> intent_type
         self._metric_vectors: Dict[str, np.ndarray] = {}  # metric_code -> embedding
         self._metric_info: Dict[str, Dict] = {}  # metric_code -> info
+        self._dim_value_vectors: Dict[str, np.ndarray] = {}  # dimension_value -> embedding
+        self._dim_value_info: Dict[str, Dict] = {}  # dimension_value -> info
         self._initialized = False
         self._loading = False
 
@@ -125,10 +127,21 @@ class SemanticSearch:
                 self._metric_vectors[metric_code] = np.array(embedding)
                 self._metric_info[metric_code] = {"text": text}
 
+            # 加载维度值向量
+            cur.execute("SELECT dimension_value, dimension_field, dimension_type, embedding FROM dim_value_embeddings")
+            for row in cur.fetchall():
+                dim_value, dim_field, dim_type, embedding_str = row
+                embedding = json.loads(embedding_str)
+                self._dim_value_vectors[dim_value] = np.array(embedding)
+                self._dim_value_info[dim_value] = {
+                    "dimension_field": dim_field,
+                    "dimension_type": dim_type
+                }
+
             cur.close()
             conn.close()
             self._initialized = True
-            print(f"[SemanticSearch] 从 PG 加载了 {len(self._intent_vectors)} 意图向量, {len(self._metric_vectors)} 指标向量")
+            print(f"[SemanticSearch] 从 PG 加载了 {len(self._intent_vectors)} 意图向量, {len(self._metric_vectors)} 指标向量, {len(self._dim_value_vectors)} 维度值向量")
 
         except Exception as e:
             print(f"[SemanticSearch] 从PG加载向量失败: {e}")
@@ -206,6 +219,110 @@ class SemanticSearch:
             }, float(best_similarity)
 
         return None, 0.0
+
+    def search_dimension_value(self, query: str, top_k: int = 5) -> Tuple[List[Dict], float]:
+        """
+        搜索相似维度值
+
+        Returns:
+            ([{"dimension_field": "GROUP_3", "dimension_value": "智能云存储", ...}], 最高相似度)
+        """
+        self.ensure_loaded()
+
+        if not self._dim_value_vectors:
+            return [], 0.0
+
+        # 生成查询向量
+        query_embedding = alibaba_embedding_client.embed_single(query)
+        if query_embedding is None or len(query_embedding) == 0:
+            return [], 0.0
+
+        query_vec = np.array(query_embedding).reshape(1, -1)
+
+        # 计算所有向量的相似度
+        results = []
+        best_similarity = 0.0
+
+        for dim_value, vec in self._dim_value_vectors.items():
+            vec = vec.reshape(1, -1)
+            sim = cosine_similarity(query_vec, vec)[0][0]
+            if sim > 0.5:  # 只返回相似度 > 0.5 的结果
+                info = self._dim_value_info.get(dim_value, {})
+                results.append({
+                    "dimension_value": dim_value,
+                    "dimension_field": info.get("dimension_field", ""),
+                    "dimension_type": info.get("dimension_type", ""),
+                    "similarity": float(sim)
+                })
+                if sim > best_similarity:
+                    best_similarity = sim
+
+        # 按相似度降序排序
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results[:top_k], float(best_similarity)
+
+    def load_dimension_value_vectors(self, force_reload: bool = False):
+        """
+        从 ids.dim_value_mapping 加载维度值向量
+        如果 force_reload=True，强制重新生成并存储
+        """
+        import psycopg2
+        import time
+
+        DATABASE_URL = os.getenv(
+            "DATABASE_URL",
+            "postgresql://postgres:admin123@192.168.1.225:5432/dev_metric"
+        )
+
+        # 检查是否需要加载（避免重复加载）
+        if not force_reload and self._dim_value_vectors:
+            print(f"[SemanticSearch] 维度值向量已加载，跳过 (已有 {len(self._dim_value_vectors)} 条)")
+            return
+
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+
+            # 检查表中是否有数据
+            cur.execute("SELECT COUNT(*) FROM dim_value_embeddings")
+            count = cur.fetchone()[0]
+
+            if count > 0 and not force_reload:
+                # 从 PG 加载已有向量
+                cur.execute("SELECT dimension_value, dimension_field, dimension_type, embedding FROM dim_value_embeddings")
+                for row in cur.fetchall():
+                    dim_value, dim_field, dim_type, embedding_str = row
+                    embedding = json.loads(embedding_str)
+                    self._dim_value_vectors[dim_value] = np.array(embedding)
+                    self._dim_value_info[dim_value] = {
+                        "dimension_field": dim_field,
+                        "dimension_type": dim_type
+                    }
+                print(f"[SemanticSearch] 从 PG 加载了 {len(self._dim_value_vectors)} 个维度值向量")
+                cur.close()
+                conn.close()
+                return
+
+            # 需要重新生成向量
+            print("[SemanticSearch] 开始从 StarRocks 加载维度值数据...")
+
+            # 通过 Go API 获取维度值（查询一些常见维度值）
+            # 这里简化处理：直接查询 StarRocks 的 ids.dim_value_mapping 表
+            # 由于没有直接连接，我们使用一个简化的方法：使用已知的维度值
+            # 实际生产中应该添加一个 Go API 来批量导出
+
+            # 暂时跳过，等待 Go API 支持
+            print("[SemanticSearch] 维度值向量加载需要 Go API 支持批量导出，暂时跳过")
+            cur.close()
+            conn.close()
+
+        except Exception as e:
+            print(f"[SemanticSearch] 加载维度值向量失败: {e}")
+
+    def ensure_dim_value_loaded(self):
+        """确保维度值向量已加载（懒加载）"""
+        if not self._dim_value_vectors:
+            self.load_dimension_value_vectors()
 
     def match_intent(self, query: str) -> Tuple[Optional[str], str]:
         """匹配意图 - 三层降级"""
