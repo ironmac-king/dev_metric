@@ -991,6 +991,43 @@ class ConversationNodes:
         biz_dim_pattern = r"(?:按|每个|各)([^的查看]+)"
         biz_matches = re.findall(biz_dim_pattern, last_message)
 
+        # 匹配"X对应的"模式（如"三级品类对应的"），这表示 GROUP BY
+        # "上个月三级品类对应的销售额" -> 三级品类 是 GROUP BY 维度
+        # 使用 jieba 分词来准确找到维度词边界
+        import jieba
+        words = list(jieba.cut(last_message))
+        group_by_matches = []
+
+        for i, word in enumerate(words):
+            # 情况1: "对应" + "的" 相邻
+            if word == "对应" and i + 1 < len(words) and words[i + 1] == "的":
+                if i > 0:
+                    # 往前最多取2个连续中文词合并（避免把"上个月"等时间词也合并进来）
+                    chinese_parts = []
+                    for j in range(i - 1, -1, -1):
+                        w = words[j]
+                        if re.match(r'^[\u4e00-\u9fa5]+$', w):
+                            chinese_parts.insert(0, w)
+                            if len(chinese_parts) >= 2:
+                                break
+                        else:
+                            break
+                    # 合并后的中文词
+                    merged = ''.join(chinese_parts)
+                    if 2 <= len(merged) <= 8:
+                        group_by_matches.append(merged)
+            # 情况2: "对应的" 作为一个词（jieba可能没分开），前面的词是维度名
+            elif word == "对应的" and i > 0:
+                merged = ''.join([w for w in words[i - 1:i] if re.match(r'^[\u4e00-\u9fa5]+$', w)])
+                if 2 <= len(merged) <= 8:
+                    group_by_matches.append(merged)
+
+        logger.info(f"[entity_node] GROUP BY 模式匹配（jieba分词）: words={words}, group_by_matches={group_by_matches}")
+        # 将匹配结果合并到 biz_matches
+        for gm in group_by_matches:
+            if gm and gm not in biz_matches:
+                biz_matches.append(gm)
+
         # 过滤掉时间维度的匹配（因为已经单独处理了）
         all_dims = []
         for tm in time_matches:
@@ -1065,6 +1102,20 @@ class ConversationNodes:
                     all_dims.append(bm)  # 清理后为空则保留原值
 
         print(f"[DEBUG entity_node] all_dims={all_dims}")
+
+        # 【重要】如果没有任何 all_dims，但有 __SYNONYM__ 标记的维度
+        # 说明用户提到了维度类型但没有指定具体值（如"哪个ASIN"）
+        # 应该把这个维度加入 dimensions 列表
+        if not all_dims:
+            synonym_dims = []
+            for k, v in entities.items():
+                if v == "__SYNONYM__":
+                    synonym_dims.append(k)
+            if synonym_dims:
+                all_dims = synonym_dims
+                entities["dimensions"] = all_dims
+                entities["dimension"] = all_dims[0]  # 兼容旧逻辑
+                logger.info(f"[entity_node] 检测到维度类型（__SYNONYM__）但无具体值，自动设置 dimension={all_dims}")
 
         if all_dims:
             # 多维度支持：存储为列表，同时兼容单维度
@@ -1238,7 +1289,7 @@ class ConversationNodes:
                     # 【重要】如果是排名查询（如"最高的XXX"），不应该追问维度值候选
                     # 而应该直接执行 GROUP BY 查询，让用户看到排名结果
                     is_ranking_query = state.current_intent == "query_ranking"
-                    has_ranking_keywords = any(kw in last_message for kw in ["最高", "最低", "最多", "最少", "第一名", "前", "排名"])
+                    has_ranking_keywords = any(kw in last_message for kw in ["最高", "最低", "最多", "最少", "第一名", "前", "排名", "降低", "降低大", "降幅最大", "降幅最大", "增长", "增长大", "增幅最大"])
                     # 动态从 dimension_configs 获取所有已注册的维度名称
                     try:
                         all_dim_names = [cfg.get("dimension_name", "") for cfg in self.metric_client.get_dimension_configs() if cfg.get("status") == 1]
@@ -2052,7 +2103,7 @@ class ConversationNodes:
             dimensions=query_dimensions,
             pagination=PaginationSpec(
                 page=getattr(state, 'page', 1),
-                page_size=min(getattr(state, 'page_size', 10), 1000)
+                page_size=min(getattr(state, 'page_size', 100), 1000)
             ),
             comparison=ComparisonSpec(
                 enabled=state.current_intent in ["query_comparison", "query_trend"],
@@ -2129,7 +2180,11 @@ class ConversationNodes:
             adjusted = self._apply_dimensions_to_sql(
                 generated_sql,
                 dimensions={},
-                entities={"dimensions": dimensions_list, "dimension": single_dimension},
+                entities={
+                    "dimensions": dimensions_list,
+                    "dimension": single_dimension,
+                    "top_n": state.entities.get("top_n")
+                },
                 time_info=time_info
             )
             logger.info(f"[sql_build_node] B方案调试: adjusted后='{adjusted[:200] if adjusted else None}'")
@@ -2398,18 +2453,14 @@ class ConversationNodes:
             keywords = cfg.get("keywords", "")
             if not keywords:
                 continue
-            # 检查关键词是否在用户输入中（使用单词边界匹配，避免子串误匹配）
+            # 检查关键词是否在用户输入中（直接子串匹配，支持中文）
             keyword_list = [k.strip() for k in keywords.split(",")]
             for kw in keyword_list:
                 if not kw:
                     continue
                 kw_lower = kw.lower()
-                # 使用正则匹配完整词（前后有边界：空格、标点、开头、结尾）
-                # 这样"最近7天"不会匹配"最近30天"（因为"最近"后面不是30天的结尾）
-                import re
-                # 构造单词边界正则：关键词前后是空白字符、标点、开头或结尾
-                pattern = r'(?:^|[\s\b,，、。!?？!；;])' + re.escape(kw_lower) + r'(?:$|[\s\b,，、。!?？!；;])'
-                if re.search(pattern, text_lower):
+                # 直接子串匹配（关键词可能在文本中间，如"过去7天销售额"中的"过去7天"）
+                if kw_lower in text_lower:
                     priority = cfg.get("priority", 0)
                     # 优先匹配优先级高的配置
                     if priority > best_priority:
@@ -4041,6 +4092,7 @@ class ConversationNodes:
                                 answer = f"**{metric_name}**查询完成，共 {len(rows)} 条数据"
                     else:
                         # 复杂查询调用 LLM 生成自然语言
+                        logger.info(f"[response_node] 复杂查询，调用 LLM generate_response，data={data}")
                         answer = self.llm_engine.generate_response(
                             question=state.messages[-1].content if state.messages else "",
                             sql=state.generated_sql or "",
@@ -4048,6 +4100,7 @@ class ConversationNodes:
                             metric_name=metric_name,
                             unit=unit,
                         )
+                        logger.info(f"[response_node] LLM generate_response 返回: {answer[:200] if answer else 'EMPTY'}")
 
                     # 如果有对比计算结果，添加到 result_data 每行
                     comparison_results = getattr(state, 'comparison_results', None)
@@ -4156,6 +4209,7 @@ class ConversationNodes:
                             generated_sql=generated_sql
                         )
                         logger.info(f"[response_node] AFTER normalize result_data[0]={result_data[0] if result_data else 'empty'}")
+                        logger.info(f"[response_node] RETURNING: answer={answer[:100] if answer else 'EMPTY'}")
 
                     return {
                         "answer": answer,

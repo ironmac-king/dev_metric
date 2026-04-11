@@ -117,7 +117,7 @@
                   <span class="step-name">SQL 生成</span>
                 </div>
                 <div class="step-content sql-content">
-                  <pre><code>{{ msg.sql }}</code></pre>
+                  <pre><code>{{ formatSQL(msg.sql) }}</code></pre>
                 </div>
               </div>
             </div>
@@ -345,6 +345,7 @@
 
 <script setup lang="ts">
 import { ref, nextTick, watch, computed } from 'vue'
+import { formatSQL } from '@/utils/sqlFormatter'
 
 const props = defineProps<{
   messages: Array<{

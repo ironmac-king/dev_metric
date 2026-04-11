@@ -130,10 +130,14 @@
 
       <!-- 操作栏 -->
       <QuickActions
+        :recommend-questions="recommendQuestions"
+        :recent-questions="recentQuestions"
         @my-favorites="handleMyFavorites"
-        @recommend-questions="handleRecommendQuestions"
-        @recent-questions="handleRecentQuestions"
+        @select-recommend="handleSelectRecommend"
+        @select-recent="handleSelectRecent"
         @clear-context="handleClearContext"
+        @open-recommend="loadRecommendQuestions"
+        @open-recent="refreshRecentQuestions"
       />
 
       <!-- 输入区域 -->
@@ -217,6 +221,10 @@ const currentGroupBy = ref('')
 const engineType = ref(localStorage.getItem('engine_type') || 'langgraph')
 const drillHistory = ref([])
 
+// 推荐问题和最近提问
+const recommendQuestions = ref<string[]>([])
+const recentQuestions = ref<string[]>([])
+
 // Avatar 配置
 const aiPresets = [
   { bg: 'linear-gradient(135deg, #1677FF 0%, #0055E5 100%)', letter: 'AI' },
@@ -292,6 +300,7 @@ function loadAiAvatarConfig() {
 onMounted(async () => {
   loadAiAvatarConfig()
   loadSessionHistory()
+  loadRecommendQuestions()
 
   // 加载偏好设置
   try {
@@ -886,12 +895,42 @@ function handleMyFavorites() {
   ElMessage.info('我的收藏功能开发中')
 }
 
-function handleRecommendQuestions() {
-  ElMessage.info('推荐问题功能开发中')
+async function handleSelectRecommend(q: string) {
+  question.value = q
+  await handleSend()
 }
 
-function handleRecentQuestions() {
-  ElMessage.info('最近提问功能开发中')
+async function handleSelectRecent(q: string) {
+  question.value = q
+  await handleSend()
+}
+
+// 每次打开下拉时刷新最近提问
+function refreshRecentQuestions() {
+  // 使用 Set 去重，保持顺序（最新的在前面）
+  const seen = new Set()
+  recentQuestions.value = messages.value
+    .filter(m => m.role === 'user')
+    .map(m => m.content)
+    .reverse()
+    .filter(q => {
+      if (seen.has(q)) return false
+      seen.add(q)
+      return true
+    })
+    .slice(0, 10)
+}
+
+// 加载推荐问题
+async function loadRecommendQuestions() {
+  try {
+    const res = await askAPI.getSuggest()
+    if (res.data) {
+      recommendQuestions.value = res.data
+    }
+  } catch (e) {
+    console.error('获取推荐问题失败', e)
+  }
 }
 
 async function handleClearContext() {
