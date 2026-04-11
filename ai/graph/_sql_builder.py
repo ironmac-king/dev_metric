@@ -102,7 +102,7 @@ class SQLBuilder:
                 continue
             if dim_key == "dimension":
                 continue
-            if not dim_value or dim_value == "all":
+            if not dim_value or dim_value in ("all", "__SYNONYM__"):
                 continue
 
             if dim_key in dim_configs:

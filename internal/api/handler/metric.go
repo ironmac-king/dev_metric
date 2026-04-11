@@ -122,6 +122,16 @@ func UpdateMetric(c *gin.Context) {
 	}
 
 	updates["updated_at"] = time.Now()
+
+	// 设置更新人
+	userID := getUserID(c)
+	if userID > 0 {
+		var user model.User
+		if err := postgres.Get().First(&user, userID).Error; err == nil {
+			updates["updated_by"] = user.Username
+		}
+	}
+
 	if err := postgres.Get().Model(&metric).Updates(updates).Error; err != nil {
 		// 审计日志：更新失败
 		auditService.LogSQL(getUserID(c), "UPDATE metric", nil, 1, err.Error(), c.ClientIP())

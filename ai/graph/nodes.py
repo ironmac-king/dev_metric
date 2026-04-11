@@ -11,7 +11,7 @@ from ai.graph.state import ConversationState, IntentResult, SQLGenerationResult,
 from ai.engine.rule_engine import RuleEngine
 from ai.engine.llm import LLMEngine
 from ai.sql_gen.generator import SQLGenerator
-from ai.sql_gen.query_builder import QueryBuilder, QueryState, QueryDimension, TimeSpec, ComparisonSpec, PaginationSpec
+from ai.sql_gen.query_builder import QueryBuilder, QueryState, QueryDimension, TimeSpec, ComparisonSpec, PaginationSpec, QueryIntent
 from ai.client.metric_client import MetricClient
 from ai.client.dim_value_client import DimValueClient
 from ai.config.logging_config import get_logger
@@ -36,6 +36,11 @@ def _get_graph_query():
 
 class ConversationNodes:
     """对话节点"""
+
+    # 业务维度别名映射（用于当 dimension_configs 中没有直接配置时）
+    BIZ_DIM_ALIASES = {
+        "平台": "平台",  # "平台" 别名映射到 "店铺"
+    }
 
     def __init__(self):
         self.rule_engine = RuleEngine()
@@ -65,6 +70,42 @@ class ConversationNodes:
         # ========== Step 0: 处理对追问/满意确认的回复 ==========
         # 场景A: 上一轮问了意图选择，用户选"指标值"/"趋势"等
         # 场景B: 上一轮返回"暂无数据"后，用户回复短词（如"指标值"），表示确认/重试
+
+        # ========== Step 0.5: 闲聊意图检查（优先于满意度确认）==========
+        # 先检查是否是闲聊（打招呼、感谢、告别），避免被误判为满意度确认
+        greeting_patterns = ["你好", "您好", "hi", "hello", "嗨", "hey", "yo", "哈喽", "嗨嗨", "你好呀", "您好呀"]
+        thanks_patterns = ["谢谢", "感谢", "谢了", "多谢", "谢谢你", "感谢你"]
+        bye_patterns = ["再见", "拜拜", "bye", "下次见", "走了", "溜了"]
+        model_question_patterns = ["什么模型", "什么LLM", "什么AI", "你叫什么"]
+
+        import re
+        msg_clean = re.sub(r'^[\s,，。、；：""''【】（ ）\-+_]+|[\s,，。、；：""''【】（ ）\-+_]+$', '', last_message.strip())
+
+        for pat in greeting_patterns:
+            if pat in msg_clean:
+                logger.info(f"[intent_node] 闲聊打招呼: '{last_message}' -> '{msg_clean}'")
+                self._add_thinking_step(state, "意图理解", "completed", f"闲聊打招呼")
+                return {"current_intent": "greeting", "entities": {}}
+
+        for pat in thanks_patterns:
+            if pat in msg_clean:
+                logger.info(f"[intent_node] 闲聊感谢: '{last_message}' -> '{msg_clean}'")
+                self._add_thinking_step(state, "意图理解", "completed", f"闲聊感谢")
+                return {"current_intent": "thanks", "entities": {}}
+
+        for pat in bye_patterns:
+            if pat in msg_clean:
+                logger.info(f"[intent_node] 闲聊告别: '{last_message}' -> '{msg_clean}'")
+                self._add_thinking_step(state, "意图理解", "completed", f"闲聊告别")
+                return {"current_intent": "bye", "entities": {}}
+
+        for pat in model_question_patterns:
+            if pat in msg_clean:
+                logger.info(f"[intent_node] 闲聊模型问题: '{last_message}' -> '{msg_clean}'")
+                self._add_thinking_step(state, "意图理解", "completed", f"闲聊模型问题")
+                return {"current_intent": "greeting", "entities": {}}
+
+        # 闲聊意图检查完成，继续满意度确认检查
         prev_clar_type = getattr(state, '_prev_clarification_type', None)
         ctx = getattr(state, 'conversation_context', None)
         is_satisfaction_reply = (
@@ -301,8 +342,10 @@ class ConversationNodes:
             if has_comparison_kw and not has_explicit_time and not intent_result.entities.get("time_range"):
                 intent_result.entities["time_range"] = "昨天"
                 logger.info(f"[intent_node] 对比关键词检测但无明确时间，设置默认时间范围: 昨天")
-            # 置信度检查：只有既没有 formula_match 也没有明确时间且没有对比关键词时才追问
-            if intent_result.confidence < 0.4 and not formula_match and not has_explicit_time and not has_comparison_kw:
+            # 置信度检查：只有既没有 formula_match 也没有明确时间且没有对比关键词且不是闲聊意图时才追问
+            # greeting/thanks/bye 等闲聊意图直接放行，不走置信度检查
+            non_metric_intents = ["greeting", "thanks", "bye", "unknown"]
+            if intent_result.confidence < 0.4 and not formula_match and not has_explicit_time and not has_comparison_kw and intent_result.intent not in non_metric_intents:
                 state.needs_clarification = True
                 state.clarification_type = "intent"
                 state.clarification_message = "抱歉，我没理解您的意思。您是想查询指标值、趋势、还是对比数据呢？"
@@ -427,14 +470,25 @@ class ConversationNodes:
             ctx.current_metric_code = entities.get("metric_code")
             logger.info(f"[_update_context] 保存 metric_code: {entities.get('metric_code')}")
 
+        # 更新多指标信息（用于环比/同比追问时恢复多指标查询）
+        if entities.get("metrics") and len(entities.get("metrics", [])) >= 2:
+            ctx.current_metrics = entities.get("metrics")
+            logger.info(f"[_update_context] 保存 metrics: {[m.get('metric_name') for m in ctx.current_metrics]}")
+
         # 更新时间表达式
         if entities.get("time_range"):
             ctx.current_time_expr = entities.get("time_range")
 
-        # 更新维度
+        # 更新维度（同时保存业务维度名和数据库列名）
         for dim_key in ["platform", "region", "department", "site", "category", "device"]:
             if entities.get(dim_key):
                 ctx.current_dimensions[dim_key] = entities.get(dim_key)
+
+        # 保存数据库维度列（GROUP_1, GROUP_2, GROUP_3, SKU, ASIN）
+        for dim_key in ["GROUP_1", "GROUP_2", "GROUP_3", "SKU", "ASIN"]:
+            if entities.get(dim_key):
+                ctx.current_dimensions[dim_key] = entities.get(dim_key)
+                logger.info(f"[_update_context] 保存数据库维度: {dim_key}={entities.get(dim_key)}")
 
         state.conversation_context = ctx
 
@@ -601,18 +655,31 @@ class ConversationNodes:
                 entities.setdefault("metric_code", ctx.current_metric_code)
                 logger.debug(f"[entity_node] 继承上轮指标: {ctx.current_metric_name}")
 
+        # ========== 继承上轮的多指标信息（用于环比/同比追问）==========
+        # 当用户问"环比呢"时，如果上一轮是多指标查询，应该继承多指标信息
+        if ctx and ctx.current_metrics and not entities.get("metrics"):
+            entities["metrics"] = ctx.current_metrics
+            logger.info(f"[entity_node] 继承上轮多指标: {[m.get('metric_name') for m in ctx.current_metrics]}")
+
         # ========== 继承上轮的时间表达式 ==========
-        if ctx and not entities.get("time_range") and ctx.current_time_expr:
-            # 检查用户是否明确指定了新的时间
-            last_message = state.messages[-1].content if state.messages else ""
-            has_explicit_time = any(kw in last_message for kw in ["昨天", "今日", "本周", "本月", "去年"])
-            # 特殊处理：环比/同比追问应该继承时间，保持和上轮一样的时间周期
-            is_comparison_followup = any(kw in last_message for kw in ["环比呢", "同比呢", "环比", "同比"])
+        # 检查用户是否明确指定了新的时间
+        last_message = state.messages[-1].content if state.messages else ""
+        has_explicit_time = any(kw in last_message for kw in ["昨天", "今日", "本周", "本月", "去年"])
+        # 特殊处理：环比/同比追问应该继承时间，保持和上轮一样的时间周期
+        is_comparison_followup = any(kw in last_message for kw in ["环比呢", "同比呢", "环比", "同比"])
+
+        # 如果是纯追问（环比/同比追问），强制继承上下文时间，不使用 LLM 识别的错误时间
+        if is_comparison_followup and ctx and ctx.current_time_expr:
+            entities["time_range"] = ctx.current_time_expr
+            # 同时提取 time_info（用于对比计算）
+            time_info = self._extract_time_info(ctx.current_time_expr)
+            if time_info:
+                entities["time_info"] = time_info
+            logger.info(f"[entity_node] 环比/同比追问，强制继承上轮时间: {ctx.current_time_expr}, time_info={time_info}")
+        elif ctx and not entities.get("time_range") and ctx.current_time_expr:
             if not has_explicit_time:
                 entities.setdefault("time_range", ctx.current_time_expr)
                 logger.debug(f"[entity_node] 继承上轮时间: {ctx.current_time_expr}")
-                if is_comparison_followup:
-                    logger.debug(f"[entity_node] 环比/同比追问，继承时间用于环比计算")
 
         # ========== 继承上轮的维度 ==========
         if ctx:
@@ -622,6 +689,17 @@ class ConversationNodes:
                     logger.debug(f"[entity_node] 继承上轮维度: {dim_key}={dim_value}")
 
         last_message = state.messages[-1].content if state.messages else ""
+
+        # ========== 清除维度值选择状态（新问数时）==========
+        # 如果当前不是在回应 dimension_value 追问，则清除上轮残留的维度选择状态
+        # 避免上一轮选择的维度值（如 GROUP_3='智能云存储'）污染新问数
+        if getattr(state, 'clarification_type', None) != 'dimension_value':
+            if hasattr(state, 'selected_dimension_field'):
+                logger.info(f"[entity_node] 清除残留维度选择状态: selected_dimension_field={state.selected_dimension_field}")
+                state.selected_dimension_field = None
+                state.selected_dimension_value = None
+            if hasattr(state, 'dimension_value_candidates'):
+                state.dimension_value_candidates = None
 
         # 检查是否是回应上轮的 metric_enum 追问（用户选择指标）
         user_just_selected_metric = False  # 标记用户是否刚选择了指标
@@ -709,8 +787,11 @@ class ConversationNodes:
                     entities["starrocks_sql"] = None
 
             # 确认时清除 dimension，因为用户已确认具体指标，不需要多维度分解
+            # 只有非时间维度才能清除（时间维度如"日"需要保留用于 GROUP BY）
             if is_confirmation:
-                entities.pop("dimension", None)
+                time_dims = ['日', '月', '年', '天', '周']
+                if entities.get("dimension") not in time_dims:
+                    entities.pop("dimension", None)
 
             # 关键优化：当规则引擎匹配不到时，尝试用 LLM 识别短输入中的指标
             # 比如用户说"sku"，LLM 可以识别出可能是"缺货SKU数"
@@ -735,12 +816,95 @@ class ConversationNodes:
 
         entities.update(term_links)
 
+        # ========== 多指标检测：支持"本月销售额跟页面访问量是多少"类型查询 ==========
+        multi_metrics = term_links.get("_multi_metrics", [])
+        # 只有当查询中包含明确的多指标连接词时才触发多指标模式
+        # 排除"总和"等包含"和"字的词语中的"和"
+        has_multi_conjunction = False
+        for c in ['跟', '和', '以及']:
+            if c in last_message:
+                # 进一步检查：确保"和"不是"总和"的一部分
+                if c == '和':
+                    idx = last_message.find('和')
+                    # 检查是否是"总和"模式（和前面是量词/数词）
+                    if idx > 0 and last_message[idx-1] in ['总', '计', '合', '共']:
+                        continue  # 不是连接词，是词语的一部分
+                    # 检查"X和Y"模式 - X和Y都应该是独立的词
+                    if idx > 0 and idx < len(last_message) - 1:
+                        prev_char = last_message[idx-1]
+                        next_char = last_message[idx+1]
+                        # 如果前后都是汉字/数字/字母，认为是连接词
+                        if prev_char.isalnum() and next_char.isalnum():
+                            has_multi_conjunction = True
+                else:
+                    has_multi_conjunction = True
+        logger.info(f"[entity_node] 多指标检测: last_message={last_message!r}, has_multi_conjunction={has_multi_conjunction}, multi_metrics_count={len(multi_metrics)}")
+        if len(multi_metrics) >= 2 and has_multi_conjunction:
+            # 取前两个最高分的指标（来自不同 metric_name）
+            top_metrics = []
+            seen_names = set()
+            for m in multi_metrics:
+                name = m.get("metric_name", "")
+                if name not in seen_names:
+                    seen_names.add(name)
+                    top_metrics.append(m)
+                if len(top_metrics) >= 2:
+                    break
+
+            if len(top_metrics) >= 2:
+                # 检查是否是不同概念（如一个销售额相关，一个页面访问量相关）
+                m1_name = top_metrics[0].get("metric_name", "")
+                m2_name = top_metrics[1].get("metric_name", "")
+                # 如果两个指标名称核心词不同（不是同一指标的不同变体），视为多指标查询
+                # 例如：页面访问量 vs 销售额 是不同概念
+                # 页面访问量 vs 页面访问量-网页端 是同一概念的不同粒度
+                concept_keywords_1 = set(m1_name.replace("-", "").replace("_", ""))
+                concept_keywords_2 = set(m2_name.replace("-", "").replace("_", ""))
+                # 如果两个名称的字符集重叠少于70%，认为是不同概念
+                overlap = len(concept_keywords_1 & concept_keywords_2) / max(len(concept_keywords_1 | concept_keywords_2), 1)
+
+                if overlap < 0.7:
+                    logger.info(f"[entity_node] 检测到多指标查询: {m1_name} + {m2_name}")
+                    entities["metrics"] = [
+                        {
+                            "metric_name": m.get("metric_name"),
+                            "metric_code": m.get("metric_code"),
+                            "metric_id": m.get("metric_id"),
+                            "starrocks_sql": m.get("starrocks_sql"),
+                            "unit": m.get("unit"),
+                        }
+                        for m in top_metrics
+                    ]
+                    # 清除单指标字段
+                    entities.pop("metric_name", None)
+                    entities.pop("metric_code", None)
+                    entities.pop("metric_id", None)
+                    entities.pop("starrocks_sql", None)
+                    entities.pop("unit", None)
+
         # 处理 LLM 识别的 dimension_values（如 dimension_values='智能云存储'）
         # 转换为具体的 dimension_field（如 GROUP_3='智能云存储'）
         if entities.get("dimension_values") and not any(entities.get(k) for k in ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']):
             dim_value = entities.get("dimension_values")
             dim_type = entities.get("dimension")  # 如 "品类"
             logger.info(f"[entity_node] LLM 识别到 dimension_values={dim_value}, dimension={dim_type}，搜索对应字段")
+
+            # 先检查 dim_type 是否是某个维度的同义词（如"平台"是"店铺"的同义词）
+            actual_dim_type = dim_type
+            if dim_type:
+                # 遍历 business_terms 查找 dim_type 是否是某个维度的同义词
+                for term_key, term_info in self.rule_engine.business_terms.items():
+                    synonyms = term_info.get("synonyms", [])
+                    dimension_field = term_info.get("dimension_field", "")
+                    if dimension_field and any(dim_type == syn for syn in synonyms):
+                        # 找到匹配：dim_type 是 term_key 的同义词
+                        actual_dim_type = term_key
+                        logger.info(f"[entity_node] 维度同义词映射: {dim_type} -> {term_key} (field={dimension_field})")
+                        # 设置 dimension_field 和更新 dimension 名称
+                        entities[dimension_field] = ""
+                        entities["dimension"] = term_key  # 更新为实际维度名
+                        break
+
             try:
                 dim_value_client = DimValueClient()
                 results = dim_value_client.search_dimension_values(dim_value, None, 3)
@@ -753,20 +917,135 @@ class ConversationNodes:
                         matched = results[0]
                     entities[matched["dimension_field"]] = matched["dimension_value"]
                     entities.pop("dimension_values", None)  # 清除旧的
-                    entities.pop("dimension", None)  # 清除泛指的 dimension
-                    logger.info(f"[entity_node] dimension_values 转换: {matched['dimension_field']}={matched['dimension_value']}")
+                    # 只有非时间维度才能清除（时间维度如"日"需要保留用于 GROUP BY）
+                    time_dims = ['日', '月', '年', '天', '周']
+                    current_dim = entities.get("dimension")
+                    logger.info(f"[entity_node] dimension_values 转换: current dimension={current_dim}, time_dims check: {current_dim in time_dims}")
+                    if current_dim not in time_dims:
+                        entities.pop("dimension", None)
+                    logger.info(f"[entity_node] dimension_values 转换: {matched['dimension_field']}={matched['dimension_value']}, remaining dimension={entities.get('dimension')}")
             except Exception as e:
                 logger.warning(f"[entity_node] dimension_values 转换失败: {e}")
 
-        # 识别"按X查看"模式，设置时间维度（用于 GROUP BY）
-        dim_match = re.search(r"按([日月年天周])查看", last_message)
-        if dim_match:
-            time_dim_char = dim_match.group(1)
-            # 映射到维度配置中的维度名
-            dim_map = {"日": "日", "天": "日", "月": "月", "年": "年", "周": "周"}
-            if time_dim_char in dim_map:
-                entities["dimension"] = dim_map[time_dim_char]
-                logger.debug(f"[entity_node] 识别时间维度: {entities['dimension']}")
+        # 识别"按X查看"模式，设置时间维度（用于 GROUP BY）- 支持多维度
+        # 匹配所有"按X查看"模式
+        time_dim_map = {"日": "日", "天": "日", "月": "月", "年": "年", "周": "周"}
+
+        # 匹配时间维度：按日查看、按月查看、每天、每月、每年等
+        # 修复：只匹配明确的"按X查看"或"每X"模式，不匹配"今年"、"本月"等时间范围表达
+        time_dim_pattern = r"(?:按|每)([日月年天周]+)(?:查看)?"
+        time_matches = re.findall(time_dim_pattern, last_message)
+
+        # 匹配业务维度：按平台查看、按部门查看、每个平台、每部门等
+        # 支持"按X查看"和"每个/各X"两种模式
+        # 使用 [^的查看]+ 来匹配连续的汉字（排除"的"和"查看"）
+        biz_dim_pattern = r"(?:按|每个|各)([^的查看]+)"
+        biz_matches = re.findall(biz_dim_pattern, last_message)
+
+        # 过滤掉时间维度的匹配（因为已经单独处理了）
+        all_dims = []
+        for tm in time_matches:
+            if tm in time_dim_map:
+                all_dims.append(time_dim_map[tm])
+
+        # 输出原始字节，避免中文显示乱码
+        print(f"[DEBUG entity_node] time_matches={time_matches}, biz_matches={biz_matches}")
+        for i, bm in enumerate(biz_matches):
+            print(f"[DEBUG entity_node] biz_matches[{i}] chars={[hex(ord(c)) for c in bm]}")
+
+        # SQL关键字过滤器：排除排序相关的词，这些不是维度
+        SQL_ORDER_KEYWORDS = [
+            "降序", "升序", "排序", "降序排列", "升序排列",
+            "从大到小", "从小到大", "按降序", "按升序",
+            "排列", "顺序", "倒序", "正序"
+        ]
+
+        # 时间词过滤器：包含时间词的匹配结果不是业务维度
+        TIME_KEYWORDS = ["最近", "天", "日", "月", "年", "周", "今日", "昨日", "明日", "本周", "本月", "去年"]
+
+        # 量词前缀过滤器：这些前缀单独出现不是有效维度
+        DIMENSION_PREFIXES = ["个", "只", "台", "款", "条", "件"]
+
+        for bm in biz_matches:
+            # 排除已经是时间维度的词
+            if bm not in time_dim_map:
+                # 去掉常见的量词前缀，避免"每个平台"、"各平台"、"个店铺"等被当作维度名
+                cleaned_dim = bm
+                # 先去掉"每个/各/各个"前缀
+                for prefix in ["每个", "各", "各个"]:
+                    if cleaned_dim.startswith(prefix):
+                        cleaned_dim = cleaned_dim[len(prefix):]
+                        break
+                # 再去掉单个量词前缀（如"个店铺" -> "店铺"）
+                for prefix in ["个", "只", "台", "款", "条", "件"]:
+                    if cleaned_dim.startswith(prefix):
+                        cleaned_dim = cleaned_dim[len(prefix):]
+                        break
+                # 过滤掉SQL排序关键字
+                if cleaned_dim in SQL_ORDER_KEYWORDS:
+                    print(f"[DEBUG entity_node] 过滤SQL排序关键字: {cleaned_dim}")
+                    continue
+                # 过滤掉包含时间词的匹配结果（如"个店铺最近7天"）
+                if any(time_kw in cleaned_dim for time_kw in TIME_KEYWORDS):
+                    print(f"[DEBUG entity_node] 过滤时间词维度: {cleaned_dim}")
+                    continue
+                # 过滤掉过长的匹配结果（可能是错误的贪婪匹配）
+                if len(cleaned_dim) > 10:
+                    print(f"[DEBUG entity_node] 过滤过长维度: {cleaned_dim}")
+                    continue
+                # 过滤掉过短的匹配结果（可能是错误的匹配，如"个"）
+                if len(cleaned_dim) < 2:
+                    print(f"[DEBUG entity_node] 过滤过短维度: {cleaned_dim}")
+                    continue
+                # 过滤掉以量词开头的匹配结果（如"个店铺"）
+                if any(cleaned_dim.startswith(p) for p in DIMENSION_PREFIXES):
+                    print(f"[DEBUG entity_node] 过滤量词前缀维度: {cleaned_dim}")
+                    continue
+                # 打印所有检查的结果
+                in_sql_kw = cleaned_dim in SQL_ORDER_KEYWORDS
+                in_time_kw = any(time_kw in cleaned_dim for time_kw in TIME_KEYWORDS)
+                len_gt10 = len(cleaned_dim) > 10
+                len_lt2 = len(cleaned_dim) < 2
+                has_prefix = any(cleaned_dim.startswith(p) for p in DIMENSION_PREFIXES)
+                print(f"[DEBUG entity_node] 维度检查: cleaned_dim={cleaned_dim!r}, in_sql_kw={in_sql_kw}, in_time_kw={in_time_kw}, len_gt10={len_gt10}, len_lt2={len_lt2}, has_prefix={has_prefix}")
+                if not any([in_sql_kw, in_time_kw, len_gt10, len_lt2, has_prefix]):
+                    print(f"[DEBUG entity_node] bm={bm!r}, cleaned_dim={cleaned_dim!r} -> 追加到all_dims")
+                if cleaned_dim:
+                    all_dims.append(cleaned_dim)
+                else:
+                    all_dims.append(bm)  # 清理后为空则保留原值
+
+        print(f"[DEBUG entity_node] all_dims={all_dims}")
+
+        if all_dims:
+            # 多维度支持：存储为列表，同时兼容单维度
+            entities["dimensions"] = all_dims
+            entities["dimension"] = all_dims[0]  # 兼容旧逻辑
+            logger.debug(f"[entity_node] 识别多维度: {entities['dimensions']}")
+
+            # 校验维度名是否在 dimension_configs 中注册
+            # 获取 starrocks_table 用于查询维度配置
+            starrocks_table = state.entities.get("starrocks_table")
+            if not starrocks_table and state.entities.get("starrocks_sql"):
+                from_match = re.search(r'FROM\s+([a-zA-Z0-9_.]+)', state.entities.get("starrocks_sql"), re.IGNORECASE)
+                if from_match:
+                    starrocks_table = from_match.group(1).strip()
+
+            unregistered_dims = []
+            for dim in all_dims:
+                # 跳过时间维度（日、月、年等）
+                if dim in ["日", "月", "年", "天", "周", "day", "month", "year"]:
+                    continue
+                if not self._is_dimension_name_registered(dim, starrocks_table):
+                    unregistered_dims.append(dim)
+
+            if unregistered_dims:
+                logger.warning(f"[entity_node] 发现未注册的维度: {unregistered_dims}")
+                # 设置追问状态，提示用户
+                state.needs_clarification = True
+                state.clarification_type = "invalid_dimension"
+                state.clarification_message = f"抱歉，暂时没有配置「{unregistered_dims[0]}」维度，您可以尝试：站点、平台、品类等维度"
+                logger.info(f"[entity_node] 设置追问状态: {state.clarification_message}")
 
         # 如果没有匹配到指标但有时间范围，也要提取
         if not entities.get("time_range"):
@@ -891,14 +1170,20 @@ class ConversationNodes:
                     entities[matched["dimension_field"]] = matched["dimension_value"]
                     # 清除泛指的 dimension，因为具体维度值已经确定
                     # 避免 SQL 生成时同时执行 GROUP BY 和 WHERE
-                    entities.pop("dimension", None)
+                    # 只有非时间维度才能清除（时间维度如"日"需要保留用于 GROUP BY）
+                    time_dims = ['日', '月', '年', '天', '周']
+                    if entities.get("dimension") not in time_dims:
+                        entities.pop("dimension", None)
                     logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']} (精确匹配)")
                 elif len(candidates) == 1:
                     # 唯一匹配（可能是前缀或模糊），直接使用
                     matched = candidates[0]
                     entities[matched["dimension_field"]] = matched["dimension_value"]
                     # 清除泛指的 dimension，因为具体维度值已经确定
-                    entities.pop("dimension", None)
+                    # 只有非时间维度才能清除（时间维度如"日"需要保留用于 GROUP BY）
+                    time_dims = ['日', '月', '年', '天', '周']
+                    if entities.get("dimension") not in time_dims:
+                        entities.pop("dimension", None)
                     logger.info(f"[entity_node] 识别维度值: {text} -> {matched['dimension_field']}={matched['dimension_value']}")
                 else:
                     # 【重要】如果是排名查询（如"最高的XXX"），不应该追问维度值候选
@@ -1476,6 +1761,71 @@ class ConversationNodes:
         time_range = state.entities.get("time_range")
         dimension = state.entities.get("dimension")  # GROUP BY 维度
 
+        # ========== QueryIntent 构建（Phase 1: 构建但不使用，保持向后兼容）==========
+        query_intent = self._conversation_state_to_query_intent(state)
+        logger.info(f"[sql_build_node] QueryIntent构建: intent_type={query_intent.intent_type}, metric_code={query_intent.metric_code}")
+
+        # ========== 多指标支持 ==========
+        multi_metrics = state.entities.get("metrics", [])
+        if multi_metrics and len(multi_metrics) >= 2:
+            logger.info(f"[sql_build_node] 检测到多指标查询: {[m.get('metric_name') for m in multi_metrics]}")
+            # 多指标：需要合并多个 starrocks_sql 的 SELECT 列
+            # 检查是否来自同一张表
+            tables = set()
+            all_select_parts = []  # [(alias, sql_fragment), ...]
+            base_where = None
+
+            for m in multi_metrics:
+                m_sql = m.get("starrocks_sql", "")
+                if not m_sql:
+                    # 尝试从 metric_code 获取
+                    try:
+                        m_info = self.metric_client.get_metric_by_code(m.get("metric_code"))
+                        if m_info:
+                            m_sql = m_info.get("starrocks_sql", "")
+                    except:
+                        pass
+                if m_sql:
+                    # 解析 starrocks_sql 提取表名和 SELECT 部分
+                    table_match = re.search(r'FROM\s+([^\s;]+)', m_sql, re.IGNORECASE)
+                    if table_match:
+                        tables.add(table_match.group(1).strip())
+                    # 提取 SELECT 和 FROM 之间的内容
+                    select_match = re.search(r'SELECT\s+(.+?)\s+FROM\s+', m_sql, re.IGNORECASE | re.DOTALL)
+                    if select_match:
+                        select_part = select_match.group(1).strip()
+                        # 移除多余空白
+                        select_part = re.sub(r'\s+', ' ', select_part)
+                        all_select_parts.append((m.get('metric_name'), select_part, m_sql))
+                    # 提取 WHERE 条件（假设相同）
+                    where_match = re.search(r'WHERE\s+(.+?)(?:\s+GROUP\s+BY|\s+ORDER\s+BY|\s*$)', m_sql, re.IGNORECASE | re.DOTALL)
+                    if where_match and not base_where:
+                        base_where = where_match.group(1).strip()
+
+            if len(tables) == 1 and len(all_select_parts) >= 2:
+                # 同一张表，可以合并
+                starrocks_table = list(tables)[0]
+                # 合并 SELECT 部分，用中文 metric_name 作为别名
+                combined_select = []
+                for m_name, select_part, original_sql in all_select_parts:
+                    # 提取原始的列表达式（如 SUM(col) 或 sum(col)）
+                    col_match = re.search(r'(sum|avg|count|max|min)\s*\(\s*(\w+)\s*\)', select_part, re.IGNORECASE)
+                    if col_match:
+                        # 直接用中文名作为别名，替换整个表达式
+                        new_select = f"{col_match.group(1)}({col_match.group(2)}) AS `{m_name}`"
+                    else:
+                        # 没有聚合函数，直接用 metric_name 作为别名
+                        new_select = f"{select_part} AS `{m_name}`"
+                    combined_select.append(new_select)
+                starrocks_sql = f"SELECT {', '.join(combined_select)} FROM {starrocks_table}"
+                if base_where:
+                    starrocks_sql += f" WHERE {base_where}"
+                logger.info(f"[sql_build_node] 多指标合并 SQL: {starrocks_sql[:200]}")
+            else:
+                # 不同表，降级到单指标（取第一个）
+                logger.warning(f"[sql_build_node] 多指标来自不同表，降级到单指标: tables={tables}")
+                multi_metrics = []
+
         logger.info(f"[sql_build_node] metric={metric_name}({metric_code}), time_info={time_info}, dimension={dimension}, starrocks_table={starrocks_table}")
 
         # 提取维度参数（用于验证）
@@ -1531,41 +1881,67 @@ class ConversationNodes:
 
         # 如果已有具体的维度值（如 GROUP_3=智能云存储），跳过泛指的 dimension GROUP BY
         # 避免同时出现 WHERE GROUP_3='智能云存储' 和 GROUP BY 品类
-        logger.info(f"[sql_build_node] dimension={dimension}, state.entities={state.entities}")
-        if dimension:
-            specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
-            has_specific_dim_value = any(state.entities.get(k) for k in specific_dim_keys)
-            logger.info(f"[sql_build_node] specific_dim_keys check: {[k for k in specific_dim_keys if state.entities.get(k)]}, has_specific_dim_value={has_specific_dim_value}")
-            if has_specific_dim_value:
-                logger.info(f"[sql_build_node] 已有具体维度值，跳过泛指的 dimension={dimension} GROUP BY")
-                dimension = None
+        # 但时间维度（日、月、年）不受此限制，即使有具体维度值也应该 GROUP BY
+        time_dimensions = ['日', '月', '年', '天', '周']
+        dimensions_list = state.entities.get("dimensions", [])  # 支持多维度
+        logger.info(f"[sql_build_node] dimension={dimension}, dimensions_list={dimensions_list}, state.entities={state.entities}")
 
-        if dimension and starrocks_table:
-            # 从维度配置获取实际的列名
+        # 确定要 GROUP BY 的维度列表
+        dims_to_process = []
+        if dimensions_list:
+            # 使用 dimensions_list（支持多维度）
+            dims_to_process = dimensions_list
+        elif dimension:
+            # 兼容单维度
+            dims_to_process = [dimension]
+
+        # 过滤掉已有具体值的非时间维度
+        filtered_dims = []
+        specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
+        for dim in dims_to_process:
+            is_time_dim = dim in time_dimensions
+            if not is_time_dim:
+                has_specific_dim_value = any(state.entities.get(k) for k in specific_dim_keys)
+                if has_specific_dim_value:
+                    logger.info(f"[sql_build_node] 已有具体维度值，跳过泛指的 dim={dim} GROUP BY")
+                    continue
+            filtered_dims.append(dim)
+
+        # 处理每个维度
+        dim_configs = None
+        if filtered_dims and starrocks_table:
             dim_configs = self._get_table_dimensions_cached(starrocks_table)
-            logger.info(f"[sql_build_node] dim_configs={dim_configs}, dimension={dimension}")
-            mapped_dim = dimension
+            logger.info(f"[sql_build_node] dim_configs={dim_configs}, filtered_dims={filtered_dims}")
+
+        for dim in filtered_dims:
+            mapped_dim = dim
             # 模糊匹配：用户说"品类"应该匹配"三级品类"
-            # 收集所有匹配项，优先选最长的（最具体的）
-            candidates = []
-            for dim_name in dim_configs:
-                if dimension in dim_name or dim_name in dimension:
-                    candidates.append(dim_name)
-            if candidates:
-                matched_dim = max(candidates, key=len)  # 选最长的
-            # 再次尝试：如果 dim_name 是 dimension 的子串
-            if not matched_dim:
-                for dim_name in dim_configs:
-                    if dim_name in dimension:
-                        matched_dim = dim_name
-                        break
-            if matched_dim:
-                mapped_dim = dim_configs[matched_dim].get("column_name", matched_dim)
-            else:
-                mapped_dim = dimension  # fallback
+            if dim_configs:
+                matched_dim = None
+                # 首先尝试直接匹配
+                if dim in dim_configs:
+                    matched_dim = dim
+                else:
+                    # 尝试别名映射
+                    aliased_dim = self.BIZ_DIM_ALIASES.get(dim, dim)
+                    if aliased_dim in dim_configs:
+                        matched_dim = aliased_dim
+                    else:
+                        # 模糊匹配
+                        candidates = [d for d in dim_configs if dim in d or d in dim]
+                        if candidates:
+                            matched_dim = max(candidates, key=len)  # 选最长的
+                        if not matched_dim:
+                            for d in dim_configs:
+                                if d in dim:
+                                    matched_dim = d
+                                    break
+                if matched_dim:
+                    mapped_dim = dim_configs[matched_dim].get("column_name", matched_dim)
+            logger.info(f"[sql_build_node] 添加 GROUP BY 维度: dim={dim} -> mapped_dim={mapped_dim}")
             query_dimensions.append(QueryDimension(
-                type=dimension,
-                column=dimension,
+                type=dim,
+                column=dim,
                 field=mapped_dim,
                 value=None
             ))
@@ -1632,6 +2008,38 @@ class ConversationNodes:
         generated_sql = result.get("sql", "")
         thinking_steps = result.get("thinking_steps", [])
 
+        # ========== Phase 2: QueryIntent 对比验证 ==========
+        try:
+            result_from_intent = builder.build_sql_from_intent(query_intent)
+            sql_old = result.get("sql", "")
+            sql_new = result_from_intent.get("sql", "")
+
+            if sql_old != sql_new:
+                logger.warning(f"[sql_build_node] QueryIntent对比: SQL不一致!")
+                thinking_steps.append({
+                    "step": "query_intent_compare",
+                    "status": "warning",
+                    "content": f"两种方式SQL不同: old={sql_old[:80] if sql_old else 'empty'}..., new={sql_new[:80] if sql_new else 'empty'}..."
+                })
+            else:
+                logger.info(f"[sql_build_node] QueryIntent对比: SQL一致")
+                thinking_steps.append({
+                    "step": "query_intent_compare",
+                    "status": "completed",
+                    "content": "两种方式SQL输出一致"
+                })
+        except Exception as e:
+            logger.warning(f"[sql_build_node] QueryIntent对比失败: {e}")
+            thinking_steps.append({
+                "step": "query_intent_compare",
+                "status": "error",
+                "content": f"QueryIntent对比异常: {str(e)[:100]}"
+            })
+        field_mapping = result.get("field_mapping", {})
+
+        logger.info(f"[sql_build_node] field_mapping group_by_fields: {field_mapping.get('group_by_fields', [])}")
+        logger.info(f"[sql_build_node] query_state.dimensions: {[(d.type, d.field, d.value) for d in query_state.dimensions]}")
+
         # 后处理：SKU 占位符移除
         sku_value = state.entities.get("sku")
         if not sku_value and generated_sql:
@@ -1650,6 +2058,33 @@ class ConversationNodes:
             generated_sql = generated_sql.rstrip() + f" ORDER BY {metric_col} DESC"
             logger.info(f"[sql_build_node] 添加 ORDER BY {metric_col} DESC for top_n={top_n}")
 
+        # === B方案：统一后处理 ===
+        # 1. 维度后处理：多维度 GROUP BY + 列名映射
+        if generated_sql:
+            time_info = state.entities.get("time_info")
+            dimensions_list = state.entities.get("dimensions", [])
+            single_dimension = state.entities.get("dimension")
+            table_name = self._extract_table_name(generated_sql)
+
+            adjusted = self._apply_dimensions_to_sql(
+                generated_sql,
+                dimensions={},
+                entities={"dimensions": dimensions_list, "dimension": single_dimension},
+                time_info=time_info
+            )
+            if adjusted and adjusted != generated_sql:
+                logger.info(f"[sql_build_node] 维度后处理完成，SQL: {adjusted[:200]}...")
+                generated_sql = adjusted
+
+        # 2. 公式语法匹配和应用
+        last_message = state.messages[-1].content if state.messages else ""
+        formula_config = self._match_formula_syntax(state.current_intent, last_message)
+        if formula_config:
+            generated_sql = self._apply_formula_syntax(generated_sql, formula_config, state.entities)
+            self._add_thinking_step(state, "formula_syntax", "completed",
+                f"应用公式语法: {formula_config.get('name', 'unknown')}")
+            logger.info(f"[sql_build_node] 应用公式语法: {formula_config.get('name')}, SQL: {generated_sql[:200]}...")
+
         # 记录思考步骤
         for step in thinking_steps:
             self._add_thinking_step(state, step.get("step", ""), step.get("status", "completed"), step.get("detail", ""))
@@ -1658,12 +2093,122 @@ class ConversationNodes:
         self._add_thinking_step(state, "sql_gen", "completed",
             f"使用 QueryBuilder 生成 SQL，指标：{metric_name or '未知指标'}")
 
+        # === SQL 校验 ===
+        verify_result = self._sql_verify(generated_sql)
+        if not verify_result["valid"]:
+            logger.warning(f"[sql_build_node] SQL校验失败: {verify_result['error']}, SQL: {generated_sql[:200] if generated_sql else 'empty'}")
+            self._add_thinking_step(state, "sql_verify", "failed", verify_result["error"])
+            return {
+                "generated_sql": generated_sql,
+                "sql_params": {"metric_id": metric_id, "metric_code": metric_code},
+                "needs_clarification": True,
+                "clarification_type": "invalid_sql",
+                "clarification_message": f"生成的SQL有问题: {verify_result['error']}",
+                "thinking_steps": thinking_steps,
+            }
+        self._add_thinking_step(state, "sql_verify", "passed", "SQL校验通过")
+
+        # 记录格式化后的 SQL（便于阅读）
+        formatted_sql = self._format_sql_for_display(generated_sql)
+        self._add_thinking_step(state, "generated_sql", "completed", formatted_sql)
+
         return {
             "generated_sql": generated_sql,
             "sql_params": {"metric_id": metric_id, "metric_code": metric_code},
             "needs_clarification": False,
             "thinking_steps": thinking_steps,
         }
+
+    def _sql_verify(self, sql: str) -> Dict[str, Any]:
+        """SQL校验，确保生成的SQL安全且合理
+
+        返回: {"valid": bool, "error": str}
+        """
+        if not sql or not sql.strip():
+            return {"valid": False, "error": "SQL为空"}
+
+        sql_upper = sql.upper()
+
+        # 1. 注入检测
+        dangerous_keywords = ['DELETE', 'DROP', 'TRUNCATE', 'ALTER', 'INSERT', 'UPDATE', 'EXEC', 'EXECUTE']
+        for kw in dangerous_keywords:
+            if kw in sql_upper:
+                return {"valid": False, "error": f"危险关键字: {kw}"}
+
+        # 2. 基本语法检查
+        if 'SELECT' not in sql_upper:
+            return {"valid": False, "error": "缺少 SELECT 关键字"}
+        if 'FROM' not in sql_upper:
+            return {"valid": False, "error": "缺少 FROM 关键字"}
+
+        # 3. GROUP BY 语法检查 - GROUP BY 后面应该是列名或列别名，不应该有复杂表达式
+        # 如果 GROUP BY 后面包含函数调用或运算符，可能是公式语法拼错了
+        group_by_match = re.search(r'GROUP\s+BY\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|\s+;|$)', sql_upper)
+        if group_by_match:
+            group_by_clause = group_by_match.group(1).strip()
+            # 检查是否包含不应该在 GROUP BY 中的内容
+            invalid_patterns = [
+                r'\(',           # 函数调用，如 SUM(col)
+                r'\+.*\+',       # 运算符，如 col1 + col2
+                r'-.*-',         # 减法
+                r'\*.*\*',       # 乘法
+                r'\/.*\/',       # 除法
+                r'DISTINCT',     # DISTINCT 不应该在 GROUP BY 中
+            ]
+            for pattern in invalid_patterns:
+                if re.search(pattern, group_by_clause):
+                    return {"valid": False, "error": f"GROUP BY 子句异常: 可能包含非列名内容"}
+
+        # 4. ORDER BY 语法检查 - ORDER BY 后面应该是列名或列别名，不应该有复杂表达式
+        order_by_match = re.search(r'ORDER\s+BY\s+(.+?)(?:\s+LIMIT|\s+;|$)', sql_upper)
+        if order_by_match:
+            order_by_clause = order_by_match.group(1).strip()
+            invalid_patterns = [
+                r'\(',           # 函数调用
+                r'[+\-*/].*[+\-*/]',  # 运算符
+            ]
+            for pattern in invalid_patterns:
+                if re.search(pattern, order_by_clause):
+                    return {"valid": False, "error": f"ORDER BY 子句异常: 可能包含非列名内容"}
+
+        # 5. 时间范围合理性检查
+        fdate_matches = re.findall(r"FDATE\s*>=?\s*'?(\d{4}-\d{2}-\d{2})'?", sql)
+        if fdate_matches:
+            try:
+                from datetime import datetime
+                dates = [datetime.strptime(d, '%Y-%m-%d') for d in fdate_matches]
+                if dates:
+                    date_range_days = (max(dates) - min(dates)).days
+                    if date_range_days > 730:  # 超过2年
+                        return {"valid": False, "error": f"时间范围超过2年: {date_range_days}天"}
+            except Exception:
+                pass  # 日期解析失败不阻挡，继续其他检查
+
+        return {"valid": True, "error": ""}
+
+    def _format_sql_for_display(self, sql: str) -> str:
+        """格式化 SQL 为易读形式（添加换行和缩进）"""
+        if not sql:
+            return ""
+
+        # 按关键字换行
+        sql = re.sub(r'\s+', ' ', sql).strip()  # 先合并多余空格
+
+        # 在主要关键字前添加换行
+        formatted = sql
+        for keyword in ['SELECT ', 'FROM ', 'WHERE ', 'GROUP BY ', 'ORDER BY ', 'HAVING ', 'LIMIT ', 'AND ', 'OR ']:
+            formatted = formatted.replace(keyword, '\n' + keyword)
+
+        # 缩进（第一行不加缩进，后续行加缩进）
+        lines = formatted.split('\n')
+        result_lines = []
+        for i, line in enumerate(lines):
+            if i == 0:
+                result_lines.append(line.strip())
+            else:
+                result_lines.append('  ' + line.strip())
+
+        return '\n'.join(result_lines)
 
     # 维度配置缓存（避免每次查询都调 API）
     _table_dimensions_cache: Dict[str, Dict[str, Dict]] = {}
@@ -1688,6 +2233,96 @@ class ConversationNodes:
             self._formula_syntax_loaded = True
         return self._formula_syntax_cache
 
+    def _conversation_state_to_query_intent(self, state: ConversationState) -> QueryIntent:
+        """
+        将 ConversationState 转换为 QueryIntent
+
+        这是从 entities dict 到结构化 QueryIntent 的转换。
+        目的是：
+        1. 让 SQL 构建的输入更清晰
+        2. 为后续 LLM 生成 QueryIntent 打基础
+
+        Args:
+            state: 对话状态
+
+        Returns:
+            QueryIntent 结构化的查询意图
+        """
+        entities = state.entities
+
+        # 1. 解析意图类型
+        intent_type = state.current_intent or "query_value"
+
+        # 2. 提取时间维度
+        time_info = entities.get("time_info", {})
+        time_range = None
+        if time_info:
+            time_range = {
+                "start": time_info.get("start"),
+                "end": time_info.get("end")
+            }
+
+        # 3. 提取分组维度
+        dimensions_list = entities.get("dimensions", [])
+        single_dimension = entities.get("dimension")
+        group_by_dims = dimensions_list if dimensions_list else ([single_dimension] if single_dimension else [])
+
+        # 【修复】将中文维度名映射为数据库列名（如"站点"→"FSITECODE"）
+        if group_by_dims:
+            # 获取 starrocks_table
+            starrocks_table = entities.get("starrocks_table")
+            if not starrocks_table:
+                starrocks_sql = entities.get("starrocks_sql", "")
+                from_match = re.search(r'FROM\s+([a-zA-Z0-9_.]+)', starrocks_sql, re.IGNORECASE)
+                if from_match:
+                    starrocks_table = from_match.group(1).strip()
+
+            # 获取维度配置映射，将中文维度名转为列名
+            if starrocks_table:
+                dim_configs = self._get_table_dimensions_cached(starrocks_table)
+                if dim_configs:
+                    mapped_dims = []
+                    for dim in group_by_dims:
+                        if dim in dim_configs:
+                            mapped_dims.append(dim_configs[dim].get("column_name", dim))
+                        else:
+                            mapped_dims.append(dim)
+                    group_by_dims = mapped_dims
+
+        # 4. 提取过滤条件
+        filters = []
+        for key in ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN', 'platform', 'region', 'department', 'site', 'category', 'device']:
+            if entities.get(key):
+                filters.append({
+                    "field": key,
+                    "operator": "=",
+                    "value": entities.get(key)
+                })
+
+        # 5. 提取对比配置
+        comparison_enabled = intent_type in ["query_comparison", "query_trend"]
+        comparison_types = ["同比", "环比"] if intent_type == "query_comparison" else []
+
+        return QueryIntent(
+            intent_type=intent_type,
+            metric_code=entities.get("metric_code"),
+            metric_name=entities.get("metric_name"),
+            metric_id=entities.get("metric_id"),
+            aggregation=None,  # 可从 starrocks_sql 解析
+            time_dimension=entities.get("time_dimension"),
+            time_range=time_range,
+            time_expr=entities.get("time_range"),
+            group_by_dims=group_by_dims,
+            filters=filters,
+            comparison_enabled=comparison_enabled,
+            comparison_types=comparison_types,
+            top_n=entities.get("top_n"),
+            multi_metrics=entities.get("metrics", []),
+            raw_starrocks_sql=entities.get("starrocks_sql"),
+            raw_starrocks_table=entities.get("starrocks_table"),
+            raw_entities=entities,  # 保留原始 entities 用于调试
+        )
+
     def _match_formula_syntax(self, intent: str, text: str) -> Optional[Dict[str, Any]]:
         """根据用户输入文本匹配公式语法配置（不限制 intent_type）"""
         configs = self._get_formula_syntax_configs()
@@ -1702,10 +2337,18 @@ class ConversationNodes:
             keywords = cfg.get("keywords", "")
             if not keywords:
                 continue
-            # 检查关键词是否在用户输入中
+            # 检查关键词是否在用户输入中（使用单词边界匹配，避免子串误匹配）
             keyword_list = [k.strip() for k in keywords.split(",")]
             for kw in keyword_list:
-                if kw and kw.lower() in text_lower:
+                if not kw:
+                    continue
+                kw_lower = kw.lower()
+                # 使用正则匹配完整词（前后有边界：空格、标点、开头、结尾）
+                # 这样"最近7天"不会匹配"最近30天"（因为"最近"后面不是30天的结尾）
+                import re
+                # 构造单词边界正则：关键词前后是空白字符、标点、开头或结尾
+                pattern = r'(?:^|[\s\b,，、。!?？!；;])' + re.escape(kw_lower) + r'(?:$|[\s\b,，、。!?？!；;])'
+                if re.search(pattern, text_lower):
                     priority = cfg.get("priority", 0)
                     # 优先匹配优先级高的配置
                     if priority > best_priority:
@@ -1732,6 +2375,7 @@ class ConversationNodes:
         if col_match:
             metric_col = col_match.group(2)
         result_sql = result_sql.replace("{metric}", metric_col)
+        logger.info(f"[_apply_formula_syntax] metric_col={metric_col}, result_sql={result_sql}, original_sql={sql[:200]}")
 
         # {n} -> top_n 值（默认10）
         top_n = entities.get("top_n")
@@ -1743,6 +2387,10 @@ class ConversationNodes:
 
         # 清理其他未替换的占位符
         result_sql = re.sub(r'\{[^}]+\}', '', result_sql)
+
+        # === 检查公式是否包含聚合函数（AVG/SUM/COUNT等）===
+        formula_has_agg = re.search(r'(sum|avg|count|min|max)\s*\(', result_sql, re.IGNORECASE)
+        formula_agg_func = formula_has_agg.group(1).upper() if formula_has_agg else None
 
         # === 避免重复追加 ORDER BY/LIMIT ===
         # 如果 SQL 已经包含 ORDER BY，不重复追加 ORDER BY 部分
@@ -1760,9 +2408,46 @@ class ConversationNodes:
             logger.info(f"[_apply_formula_syntax] SQL已包含ORDER BY/LIMIT，跳过追加")
             return sql
 
-        # 追加到原始 SQL
-        sql = sql.rstrip().rstrip(";") + " " + result_sql
-        logger.info(f"[_apply_formula_syntax] 应用公式语法: {config.get('name')}, SQL: {sql}")
+        # 将公式语法插入到 SELECT 子句，而不是追加到 SQL 末尾
+        # 在 SELECT ... FROM 之间插入公式作为新列
+        select_pattern = r'(SELECT\s+)(.*?)(\s+FROM\s+)'
+        select_match = re.search(select_pattern, sql, re.IGNORECASE | re.DOTALL)
+        if select_match:
+            # 如果公式包含聚合函数，需要替换原始聚合，而不是追加
+            if formula_agg_func:
+                # 找到原始的聚合函数（如 SUM(col) AS alias）并替换
+                original_agg_pattern = r'(SUM|AVG|COUNT|MIN|MAX)\s*\(\s*' + re.escape(metric_col) + r'\s*\)(\s+AS\s+`?' + re.escape(metric_col) + r'`?)?'
+                if re.search(original_agg_pattern, sql, re.IGNORECASE):
+                    # 替换原始聚合为公式
+                    sql = re.sub(
+                        original_agg_pattern,
+                        result_sql,
+                        sql,
+                        flags=re.IGNORECASE
+                    )
+                    logger.info(f"[_apply_formula_syntax] 替换原始聚合: {config.get('name')}, SQL: {sql}")
+                else:
+                    # 追加公式到 SELECT
+                    sql = re.sub(
+                        select_pattern,
+                        r'\1\2, ' + result_sql + r' \3',
+                        sql,
+                        flags=re.IGNORECASE | re.DOTALL
+                    )
+                    logger.info(f"[_apply_formula_syntax] 追加公式到SELECT: {config.get('name')}, SQL: {sql}")
+            else:
+                # 在 FROM 前插入公式列
+                sql = re.sub(
+                    select_pattern,
+                    r'\1\2, ' + result_sql + r' \3',
+                    sql,
+                    flags=re.IGNORECASE | re.DOTALL
+                )
+                logger.info(f"[_apply_formula_syntax] 应用公式语法到SELECT: {config.get('name')}, SQL: {sql}")
+        else:
+            # Fallback: 追加到末尾
+            sql = sql.rstrip().rstrip(";") + " " + result_sql
+            logger.info(f"[_apply_formula_syntax] 应用公式语法(append): {config.get('name')}, SQL: {sql}")
 
         # === 修复：将 GROUP BY 列添加到 SELECT ===
         group_cols = []
@@ -1897,10 +2582,50 @@ class ConversationNodes:
             return False, f"抱歉，暂时没有配置这些维度：{', '.join(invalid_dims)}"
         return True, None
 
+    def _is_dimension_name_registered(self, dim_name: str, table_name: str = None) -> bool:
+        """
+        检查维度名是否在 dimension_configs 表中注册
+        dim_name: 维度名称（如"店铺"、"站点"、"品类"）
+        返回: True=已注册，False=未注册
+        """
+        try:
+            dim_configs = self.metric_client.get_dimension_configs(table_name)
+            # 检查是否在 dimension_name 中
+            for cfg in dim_configs:
+                if cfg.get("dimension_name") == dim_name and cfg.get("status") == 1:
+                    return True
+            # 检查别名映射
+            aliased_name = self.BIZ_DIM_ALIASES.get(dim_name, dim_name)
+            for cfg in dim_configs:
+                if cfg.get("dimension_name") == aliased_name and cfg.get("status") == 1:
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"[_is_dimension_name_registered] 检查维度失败: {e}")
+            return True  # 检查失败时放行，避免阻断用户
+
     def _is_dimension_registered(self, dim_type: str, dim_value: str) -> bool:
         """检查维度值是否在 dimensions 表配置中注册"""
         dim_map = self.rule_engine._get_dimension_mapping(dim_type)
         return dim_value in dim_map.values() or dim_value in dim_map.keys()
+
+    def _find_matching_dimension(self, dim: str, dim_configs: Dict[str, Any]) -> Optional[str]:
+        """从 dim_configs 中查找匹配的维度列名"""
+        if not dim_configs:
+            return dim
+        # 精确匹配
+        if dim in dim_configs:
+            return dim_configs[dim].get("column_name", dim)
+        # 别名映射
+        aliased_dim = self.BIZ_DIM_ALIASES.get(dim, dim)
+        if aliased_dim in dim_configs:
+            return dim_configs[aliased_dim].get("column_name", aliased_dim)
+        # 模糊匹配
+        candidates = [d for d in dim_configs if dim in d or d in dim]
+        if candidates:
+            matched = max(candidates, key=len)
+            return dim_configs[matched].get("column_name", matched)
+        return dim  # 找不到就返回原始维度名
 
     def _apply_dimensions_to_sql(self, sql: str, dimensions: Dict[str, Any], entities: Dict[str, Any], time_info: Dict = None) -> str:
         """
@@ -1952,8 +2677,21 @@ class ConversationNodes:
                         col = dim_configs.get("日", {}).get("column_name", "FDATE")
                         time_cond = f"{col} >= '{start_date}' AND {col} <= '{end_date}'"
 
-                    if "WHERE" in adjusted_sql.upper():
-                        adjusted_sql += f" AND {time_cond}"
+                    # 检查时间条件是否已存在于 WHERE 子句中
+                    if time_cond in adjusted_sql:
+                        logger.info(f"[_apply_dimensions_to_sql] 时间条件已存在于 WHERE，跳过: {time_cond}")
+                    elif "WHERE" in adjusted_sql.upper():
+                        # 找到 WHERE 子句的位置，在 GROUP BY/LIMIT/ORDER 之前插入
+                        # 使用正则找到 WHERE 后的第一个 GROUP BY/LIMIT/ORDER/EOF
+                        where_match = re.search(r'WHERE\s+(.+?)(?=\s*(?:GROUP\s+BY|ORDER\s+BY|LIMIT|$))', adjusted_sql, re.IGNORECASE | re.DOTALL)
+                        if where_match:
+                            # 在 WHERE 条件后、GROUP BY 之前插入
+                            existing_where = where_match.group(1).strip()
+                            insert_pos = where_match.end()
+                            adjusted_sql = adjusted_sql[:insert_pos] + f" AND {time_cond}" + adjusted_sql[insert_pos:]
+                        else:
+                            # 兜底：直接追加（不应该走到这里）
+                            adjusted_sql += f" AND {time_cond}"
                     else:
                         adjusted_sql += f" WHERE {time_cond}"
 
@@ -1966,57 +2704,160 @@ class ConversationNodes:
             adjusted_sql = re.sub(r'\s*AND\s+sku\s*=\s*\$\{SKU\}', '', adjusted_sql, flags=re.IGNORECASE)
             adjusted_sql = adjusted_sql.rstrip()
 
-        # === 2. 处理动态维度 (GROUP BY) ===
-        dimension = entities.get("dimension")  # 如 "department"
-        # 时间维度（日、月、年）直接注入 GROUP BY
-        time_dimension_keys = ["日", "月", "年", "day", "month", "year"]
-        if dimension in time_dimension_keys:
-            # 统一为中文键
-            dim_key = "日" if dimension in ["日", "day"] else "月" if dimension in ["月", "month"] else "年" if dimension in ["年", "year"] else dimension
-            # 从配置获取实际的列名（大写：FDATE, MONTHS）
-            if table_name:
-                dim_configs = self._get_table_dimensions_cached(table_name)
-                col = dim_configs.get(dim_key, {}).get("column_name", dim_key.upper())
-            else:
-                col = dim_key.upper()
-            # 注入 GROUP BY（避免重复）
-            if "GROUP BY" not in adjusted_sql.upper():
-                adjusted_sql += f" GROUP BY {col}"
-            return adjusted_sql
+        # === 2. 处理动态维度 (GROUP BY) - 支持多维度 ===
+        # 获取维度列表（兼容单维度和多维度）
+        dimensions_list = entities.get("dimensions", [])
+        if table_name:
+            dim_configs = self._get_table_dimensions_cached(table_name)
+        else:
+            dim_configs = {}
+        single_dimension = entities.get("dimension")
+        if not dimensions_list and single_dimension:
+            dimensions_list = [single_dimension]
 
-        if dimension:
-            # 有维度，保留 GROUP BY，从配置查列名
-            if table_name:
-                dim_configs = self._get_table_dimensions_cached(table_name)
+        time_dimension_keys = ["日", "月", "年", "day", "month", "year"]
+
+        # === 收集所有需要 GROUP BY 的列 ===
+        group_by_cols = []
+
+        # 2.1 处理时间维度
+        for dim in dimensions_list:
+            if dim in time_dimension_keys:
+                dim_key = "日" if dim in ["日", "day"] else "月" if dim in ["月", "month"] else "年"
+                if table_name:
+                    col = dim_configs.get(dim_key, {}).get("column_name", dim_key.upper())
+                else:
+                    col = dim_key.upper()
+                if col and col.upper() not in [c.upper() for c in group_by_cols]:
+                    group_by_cols.append(col)
+
+        # 2.2 处理业务维度（平台、店铺、部门、渠道等）
+        for dim in dimensions_list:
+            if dim not in time_dimension_keys:
+                matched_col = self._find_matching_dimension(dim, dim_configs) if dim_configs else dim
+                if matched_col and matched_col.upper() not in [c.upper() for c in group_by_cols]:
+                    group_by_cols.append(matched_col)
+
+        # === 修正已有的 GROUP BY 列名 ===
+        # 例如 starrocks_sql 中有 "GROUP BY 日"，需要替换为 "FDATE"
+        # 注意：只有当 GROUP BY 包含中文维度名时才需要替换
+        # 如果已经是英文列名（如 MONTHS），不需要替换
+        for time_key in time_dimension_keys:
+            # 只匹配中文维度名，不匹配英文
+            if time_key in ["day", "month", "year"]:
+                continue  # 跳过英文，直接用英文列名
+            pattern = rf'GROUP\s+BY\s+[`]?{time_key}[`]?(?:\s*,|\s+|$)'
+            if re.search(pattern, adjusted_sql, re.IGNORECASE):
+                dim_key = "日" if time_key in ["日", "day"] else "月" if time_key in ["月", "month"] else "年"
+                col = dim_configs.get(dim_key, {}).get("column_name", dim_key.upper()) if dim_configs else dim_key.upper()
+                adjusted_sql = re.sub(pattern, f'GROUP BY {col}', adjusted_sql, flags=re.IGNORECASE)
+
+        # === 追加缺失的 GROUP BY 列 ===
+        if group_by_cols:
+            # 先找出现有的 GROUP BY 子句及其所有列
+            group_by_match = re.search(r'GROUP\s+BY\s+(.+?)(?=\s*(?:ORDER|LIMIT|WHERE|$))', adjusted_sql, re.IGNORECASE | re.DOTALL)
+            if group_by_match:
+                # 提取现有 GROUP BY 的列（可能包含 AND 条件，需要分离）
+                group_by_content = group_by_match.group(1).strip()
+                # 分割出列名部分（去掉可能的 AND 条件）
+                existing_cols_raw = re.split(r'\s+AND\s+', group_by_content, maxsplit=1)[0]
+                existing_cols = [c.strip().strip('`').strip('[').strip(']') for c in existing_cols_raw.split(',')]
+                existing_cols = [c for c in existing_cols if c]  # 去除空字符串
+
+                # 添加缺失的列
+                cols_to_add = []
+                for col in group_by_cols:
+                    if col.upper() not in [c.upper() for c in existing_cols]:
+                        cols_to_add.append(col)
+                        existing_cols.append(col)
+
+                if cols_to_add:
+                    # 替换 GROUP BY 子句
+                    new_group_by = f"GROUP BY {', '.join(existing_cols)}"
+                    adjusted_sql = re.sub(
+                        r'GROUP\s+BY\s+.+?(?=\s*(?:ORDER|LIMIT|WHERE|$))',
+                        new_group_by,
+                        adjusted_sql,
+                        flags=re.IGNORECASE | re.DOTALL
+                    )
+
+                    # 【重要】同步更新 SELECT 列表，添加缺失的 GROUP BY 列
+                    # 找到 SELECT ... FROM 模式，在聚合函数前插入新列
+                    select_pattern = r'(SELECT\s+)(.*?)(\s+FROM\s+)'
+                    select_match = re.search(select_pattern, adjusted_sql, re.IGNORECASE | re.DOTALL)
+                    if select_match:
+                        select_prefix = select_match.group(1)  # "SELECT "
+                        select_content = select_match.group(2)  # SELECT 和 FROM 之间的内容
+                        from_suffix = select_match.group(3)  # " FROM "
+
+                        # 检查 cols_to_add 中的列是否已存在于 select_content
+                        cols_to_add_to_select = []
+                        for col in cols_to_add:
+                            col_name = f"`{col}`"
+                            if col_name.upper() not in select_content.upper() and col.upper() not in select_content.upper():
+                                cols_to_add_to_select.append(col_name)
+
+                        if cols_to_add_to_select:
+                            # 在 FROM 前插入新列
+                            cols_str = ", ".join(cols_to_add_to_select) + ", "
+                            new_select = select_prefix + cols_str + select_content.strip() + from_suffix
+                            adjusted_sql = new_select + adjusted_sql[select_match.end():]
+                            logger.info(f"[_apply_dimensions_to_sql] SELECT 已更新，添加列: {cols_to_add_to_select}")
+            else:
+                adjusted_sql += f" GROUP BY {', '.join(group_by_cols)}"
+
+        # === 如果有单维度但列表为空，处理单维度的情况（兼容旧逻辑）===
+        if not group_by_cols and single_dimension:
+            if single_dimension in time_dimension_keys:
+                dim_key = "日" if single_dimension in ["日", "day"] else "月" if single_dimension in ["月", "month"] else "年"
+                if table_name:
+                    dim_configs = self._get_table_dimensions_cached(table_name)
+                    col = dim_configs.get(dim_key, {}).get("column_name", dim_key.upper())
+                else:
+                    col = dim_key.upper()
+                if "GROUP BY" not in adjusted_sql.upper():
+                    adjusted_sql += f" GROUP BY {col}"
+            elif single_dimension:
+                # 有维度，保留 GROUP BY，从配置查列名
+                if table_name:
+                    dim_configs = self._get_table_dimensions_cached(table_name)
+                else:
+                    dim_configs = {}
                 # 优先精确匹配
                 matched_dim = None
-                if dimension in dim_configs:
-                    matched_dim = dimension
-                else:
+                if dim_configs and single_dimension in dim_configs:
+                    matched_dim = single_dimension
+                elif dim_configs:
                     # 模糊匹配：收集所有匹配项，优先选最长的（最具体的）
-                    # 例如 "品类" 匹配 "一级品类"/"二级品类"/"三级品类"，选最长的
                     candidates = []
                     for dim_name in dim_configs:
-                        if dimension in dim_name or dim_name in dimension:
+                        if single_dimension in dim_name or dim_name in single_dimension:
                             candidates.append(dim_name)
                     if candidates:
-                        matched_dim = max(candidates, key=len)  # 选最长的
-                    # 再次尝试：如果 dim_name 是 dimension 的子串
+                        matched_dim = max(candidates, key=len)
                     if not matched_dim:
                         for dim_name in dim_configs:
-                            if dim_name in dimension:
+                            if dim_name in single_dimension:
                                 matched_dim = dim_name
                                 break
-                if matched_dim:
+                if matched_dim and dim_configs:
                     column = dim_configs[matched_dim].get("column_name", matched_dim)
                 else:
-                    column = dimension
+                    column = single_dimension
             else:
-                column = dimension
+                column = single_dimension
             adjusted_sql = adjusted_sql.replace("{dimension}", column)
-            # 如果有维度但 SQL 中没有 GROUP BY 占位符，手动添加 GROUP BY
-            if dimension and "GROUP BY" not in adjusted_sql.upper():
-                adjusted_sql = adjusted_sql.rstrip() + f" GROUP BY {column}"
+            # 如果已有具体的维度值（如 GROUP_3='智能云存储'），不应该再加 GROUP BY
+            # 因为 WHERE 条件已经筛选了这个具体值
+            specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
+            has_specific_dim_value = any(entities.get(k) for k in specific_dim_keys)
+            time_dimensions = ['日', '月', '年', '天', '周']
+            is_time_dim = single_dimension in time_dimensions
+            if single_dimension and "GROUP BY" not in adjusted_sql.upper():
+                if has_specific_dim_value and not is_time_dim:
+                    logger.info(f"[_apply_dimensions_to_sql] 已有具体维度值，跳过 GROUP BY {column}")
+                else:
+                    adjusted_sql = adjusted_sql.rstrip() + f" GROUP BY {column}"
         else:
             # 无维度，去掉 GROUP BY 相关
             adjusted_sql = adjusted_sql.replace("{dimension}", "*")
@@ -2032,7 +2873,8 @@ class ConversationNodes:
             dim_configs = {}
 
         for dim_key, dim_value in dimensions.items():
-            if not dim_value or dim_key == "dimension":
+            # 跳过空值、dimension 占位符、__SYNONYM__ 占位符
+            if not dim_value or dim_key == "dimension" or dim_value == "__SYNONYM__":
                 continue
 
             # 从配置获取列名，没有则用 dim_key 本身
@@ -2074,7 +2916,9 @@ class ConversationNodes:
             # === 修复：支持多列 GROUP BY ===
             group_cols = []  # 改为列表，支持多列
             # 支持反引号``、方括号[]、无引号等多种 GROUP BY 列名格式
-            group_match = re.search(r'GROUP\s+BY\s+([\w`\[\],\s]+?)(?=\s*(?:ORDER|GROUP|LIMIT|$))', adjusted_sql, re.IGNORECASE)
+            # 注意：(?=\s*(?:ORDER|LIMIT|WHERE|$)) 中的 ORDER/LIMIT/WHERE 是 SQL 关键字，
+            # 不会出现在 GROUP BY 列名中，所以不会产生歧义
+            group_match = re.search(r'GROUP\s+BY\s+([\w`\[\],\s]+?)(?=\s*(?:ORDER|LIMIT|WHERE|$))', adjusted_sql, re.IGNORECASE)
             if group_match:
                 group_by_clause = group_match.group(1)
                 # 解析所有列（逗号分隔），并去除反引号、方括号等
@@ -2474,7 +3318,11 @@ class ConversationNodes:
                     comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{comp_end_day:02d}"
                 else:
                     comparison_start = f"{comp_start_year}-{comp_start_month:02d}-{start_dt.day:02d}"
-                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{end_dt.day:02d}"
+                    # 非完整月：结束日期为 end_dt.day - 1（昨天），不超过今天
+                    from datetime import timedelta
+                    yesterday = datetime.now() - timedelta(days=1)
+                    comp_end_day = min(end_dt.day - 1, yesterday.day)
+                    comparison_end = f"{comp_end_year}-{comp_end_month:02d}-{comp_end_day:02d}"
             else:
                 # 同比：去年同期
                 comp_start_year, comp_end_year = start_dt.year - 1, end_dt.year - 1
@@ -2484,7 +3332,11 @@ class ConversationNodes:
                     comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{comp_end_day:02d}"
                 else:
                     comparison_start = f"{comp_start_year}-{start_dt.month:02d}-{start_dt.day:02d}"
-                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{end_dt.day:02d}"
+                    # 非完整月：结束日期为 end_dt.day - 1（昨天），不超过今天
+                    from datetime import timedelta
+                    yesterday = datetime.now() - timedelta(days=1)
+                    comp_end_day = min(end_dt.day - 1, yesterday.day)
+                    comparison_end = f"{comp_end_year}-{end_dt.month:02d}-{comp_end_day:02d}"
 
             return comparison_start, comparison_end
 
@@ -2505,8 +3357,18 @@ class ConversationNodes:
 
         # Step 1: 构建所有对比SQL
         comparison_tasks = []
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         for comp_type in comparison_types:
             comparison_start, comparison_end = calculate_comparison_period(comp_type, start_dt, end_dt, is_full_month)
+            # 检查对比周期的 end_date 是否大于今天
+            try:
+                comp_end_dt = datetime.strptime(comparison_end[:10], "%Y-%m-%d")
+                if comp_end_dt > today:
+                    logger.info(f"[comparison] {comp_type} 对比周期结束日期 {comparison_end} > 今天 {today.strftime('%Y-%m-%d')}，跳过该对比类型")
+                    thinking_parts.append(f"{comp_type}：对比周期 {comparison_start} 至 {comparison_end} 超出今天，跳过")
+                    continue
+            except Exception as e:
+                logger.warning(f"[comparison] 日期比较失败: {e}")
             comparison_sql = build_comparison_sql(comparison_start, comparison_end)
             comparison_tasks.append({
                 "comp_type": comp_type,
@@ -2809,6 +3671,21 @@ class ConversationNodes:
                 "needs_clarification": True,
             }
 
+        # ========== 兜底处理：意图置信度低但不是明确指标查询 ==========
+        # 如果意图是 query_value 但没有提取到任何指标，或者意图是 unknown，
+        # 说明用户可能在闲聊或问了一个通用问题，直接走 LLM 回复
+        if state.current_intent in ["query_value", "unknown"]:
+            has_metric = bool(state.entities.get("metric_name") or state.entities.get("metric_code"))
+            has_time = bool(state.entities.get("time_range"))
+            # 既没有指标也没有时间，大概率是闲聊
+            if not has_metric and not has_time:
+                logger.info(f"[response_node] 兜底处理: intent={state.current_intent}, 无指标无时间，判定为闲聊")
+                return {
+                    "answer": "您好！我是智能问数助手，可以帮您查询指标数据。比如您可以问我：「昨天的销售额是多少」、「本周订单量趋势」等。请问有什么可以帮您？",
+                    "suggest_questions": ["昨天的访客数是多少", "本周订单量如何", "查看销售额指标"],
+                    "needs_clarification": False,
+                }
+
         # 打招呼
         if state.current_intent == "greeting":
             return {
@@ -2924,7 +3801,17 @@ class ConversationNodes:
                     logger.info(f"[response_node] metric_name={metric_name}, entities={state.entities}")
 
                     # 简单查询用模板生成回答，复杂查询才调用 LLM
-                    rows = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                    # 防御性检查：确保 rows 是列表而不是 None
+                    if isinstance(data, dict):
+                        raw_data = data.get("data", [])
+                        rows = raw_data if isinstance(raw_data, list) else []
+                    else:
+                        rows = data if isinstance(data, list) else []
+
+                    # 防御性检查：确保 comparison_results 是列表
+                    if comparison_results is not None and not isinstance(comparison_results, list):
+                        comparison_results = None
+
                     is_simple = (
                         (comparison_results is None or len(comparison_results) == 0) and
                         len(rows) <= 3 and
@@ -2934,26 +3821,116 @@ class ConversationNodes:
                     if is_simple:
                         # 简单模板生成（避免 LLM 调用耗时）
                         row = rows[0] if rows else {}
-                        metric_col = None
-                        group_by_col = None
-                        for k in row.keys():
-                            if k not in (group_by_col,) if group_by_col else True:
-                                if not any(p in k for p in ['同比', '环比', '去年同期', '上月同期']):
-                                    metric_col = k
-                                    break
-                        metric_val = row.get(metric_col) if metric_col else None
-                        if metric_val is not None:
-                            if isinstance(metric_val, (int, float)):
-                                if unit == "%":
-                                    answer = f"**{metric_name}**为 {metric_val:.2f}%"
-                                elif unit in ("元", "万美元", "亿美元"):
-                                    answer = f"**{metric_name}**为 ¥{metric_val:,.2f}"
+
+                        # ========== 多指标支持 ==========
+                        multi_metrics = state.entities.get("metrics", [])
+                        if multi_metrics and len(multi_metrics) >= 2:
+                            # 多指标查询：为每个指标格式化结果
+                            answer_parts = []
+
+                            # 解析 starrocks_sql 提取别名映射（re 已从模块级别导入）
+                            alias_to_metric = {}  # alias -> (metric_name, unit)
+                            for m in multi_metrics:
+                                m_name = m.get("metric_name", "该指标")
+                                m_unit = m.get("unit", "")
+                                m_sql = m.get("starrocks_sql", "")
+                                # 提取 "as alias" 或 "AS alias" 模式
+                                aliases = re.findall(r'(?:as|AS)\s+[`"]?(\w+)[`"]?', m_sql)
+                                for alias in aliases:
+                                    alias_to_metric[alias.upper()] = (m_name, m_unit)
+
+                            for m in multi_metrics:
+                                m_name = m.get("metric_name", "该指标")
+                                m_unit = m.get("unit", "")
+                                m_sql = m.get("starrocks_sql", "")
+                                m_code = m.get("metric_code", "")
+
+                                # 找到该指标对应的列名
+                                m_col = None
+                                # 1. 优先：从 starrocks_sql 提取 alias 精确匹配（忽略大小写）
+                                aliases = re.findall(r'(?:as|AS)\s+[`"]?(\w+)[`"]?', m_sql)
+                                row_keys_lower = {k.lower(): k for k in row.keys()}
+                                for alias in aliases:
+                                    if alias.lower() in row_keys_lower:
+                                        m_col = row_keys_lower[alias.lower()]
+                                        break
+                                # 2. 尝试用 metric_code 匹配（如 ORDERED_PRODUCTSALES）
+                                if not m_col and m_code:
+                                    for k in row.keys():
+                                        if m_code.upper() in k.upper():
+                                            m_col = k
+                                            break
+                                # 3. 尝试用 metric_name 匹配（如 总销售额）
+                                if not m_col:
+                                    for k in row.keys():
+                                        if m_name in k or k in m_name:
+                                            if not any(p in k for p in ['同比', '环比', '去年同期', '上月同期', '月', '日', '年']):
+                                                m_col = k
+                                                break
+                                # 4. 用别名映射表匹配
+                                if not m_col:
+                                    for k in row.keys():
+                                        if k.upper() in alias_to_metric:
+                                            m_col = k
+                                            break
+                                # 5. 找到所有非维度列（兜底）
+                                if not m_col:
+                                    group_by_cols = ['月', '日', '年', '月份', '日期', '年份']
+                                    for k in row.keys():
+                                        if not any(bc in k for bc in group_by_cols) and not any(p in k for p in ['同比', '环比', '去年同期', '上月同期']):
+                                            if m_col is None:  # 只取第一个
+                                                m_col = k
+
+                                if m_col:
+                                    m_val = row.get(m_col)
                                 else:
-                                    answer = f"**{metric_name}**为 {metric_val:,.2f}"
-                            else:
-                                answer = f"**{metric_name}**为 {metric_val}"
+                                    m_val = None
+
+                                if m_val is not None and isinstance(m_val, (int, float)):
+                                    if m_unit == "%":
+                                        answer_parts.append(f"**{m_name}**为 {m_val:.2f}%")
+                                    elif m_unit in ("元", "万美元", "亿美元"):
+                                        answer_parts.append(f"**{m_name}**为 ¥{m_val:,.2f}")
+                                    elif "次" in m_unit or "元" not in m_unit:
+                                        answer_parts.append(f"**{m_name}**为 {m_val:,.2f}{m_unit}")
+                                    else:
+                                        answer_parts.append(f"**{m_name}**为 {m_val:,.2f}")
+                                elif m_val is not None:
+                                    answer_parts.append(f"**{m_name}**为 {m_val}")
+
+                            answer = "，".join(answer_parts) if answer_parts else f"查询完成，共 {len(rows)} 条数据"
                         else:
-                            answer = f"**{metric_name}**查询完成，共 {len(rows)} 条数据"
+                            # 单指标查询（原有逻辑，但修复了维度列问题）
+                            # 尝试从 starrocks_sql 提取 alias
+                            metric_col = None
+                            starrocks_sql = state.entities.get("starrocks_sql", "")
+                            if starrocks_sql:
+                                aliases = re.findall(r'(?:as|AS)\s+[`"]?(\w+)[`"]?', starrocks_sql)
+                                row_keys_lower = {k.lower(): k for k in row.keys()}
+                                for alias in aliases:
+                                    if alias.lower() in row_keys_lower:
+                                        metric_col = row_keys_lower[alias.lower()]
+                                        break
+                            # 兜底：跳过维度列和对比列
+                            if not metric_col:
+                                dim_cols = ['月', '日', '年', '月份', '日期', '年份', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'SKU', 'ASIN']
+                                for k in row.keys():
+                                    if not any(p in k for p in dim_cols + ['同比', '环比', '去年同期', '上月同期']):
+                                        metric_col = k
+                                        break
+                            metric_val = row.get(metric_col) if metric_col else None
+                            if metric_val is not None:
+                                if isinstance(metric_val, (int, float)):
+                                    if unit == "%":
+                                        answer = f"**{metric_name}**为 {metric_val:.2f}%"
+                                    elif unit in ("元", "万美元", "亿美元"):
+                                        answer = f"**{metric_name}**为 ¥{metric_val:,.2f}"
+                                    else:
+                                        answer = f"**{metric_name}**为 {metric_val:,.2f}"
+                                else:
+                                    answer = f"**{metric_name}**为 {metric_val}"
+                            else:
+                                answer = f"**{metric_name}**查询完成，共 {len(rows)} 条数据"
                     else:
                         # 复杂查询调用 LLM 生成自然语言
                         answer = self.llm_engine.generate_response(

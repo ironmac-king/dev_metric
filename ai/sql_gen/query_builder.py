@@ -2,6 +2,7 @@
 QueryBuilder - JSON → SQL 的确定性转换器
 用于智能问数的 SQL 生成层重构
 """
+import re
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from enum import Enum
@@ -91,6 +92,59 @@ class QueryState(BaseModel):
     created_at: Optional[str] = None
 
 
+class QueryIntent(BaseModel):
+    """
+    结构化的查询意图描述
+
+    从 ConversationState.current_intent + entities 转换而来，
+    旨在提供比 entities dict 更结构化的语义信息。
+
+    与 QueryState 的区别：
+    - QueryState 是执行层参数，QueryBuilder 直接使用
+    - QueryIntent 是语义层描述，更接近自然语言理解
+    """
+    # 核心意图
+    intent_type: str = "query_value"  # query_value / query_trend / query_comparison / query_metadata
+
+    # 指标信息
+    metric_code: Optional[str] = None
+    metric_name: Optional[str] = None
+    metric_id: Optional[int] = None
+
+    # 聚合方式
+    aggregation: Optional[str] = None  # SUM / AVG / COUNT / MAX / MIN
+
+    # 时间维度
+    time_dimension: Optional[str] = None  # day / month / year / 近7天 / 近30天
+    time_range: Optional[Dict[str, str]] = None  # {"start": "2026-03-01", "end": "2026-04-10"}
+    time_expr: Optional[str] = None  # 原始时间表达式，如"近7天"
+
+    # 分组维度
+    group_by_dims: List[str] = []  # ["平台", "品类"]
+
+    # 过滤条件
+    filters: List[Dict[str, Any]] = []  # [{field: "GROUP_3", operator: "=", value: "xxx"}]
+
+    # 对比分析
+    comparison_enabled: bool = False
+    comparison_types: List[str] = []  # ["同比", "环比"]
+
+    # 排序与限制
+    top_n: Optional[int] = None
+    sort_by: Optional[str] = None
+    sort_order: str = "DESC"
+
+    # 多指标支持
+    multi_metrics: List[Dict[str, Any]] = []  # 多指标查询
+
+    # 原始数据引用（供回退使用）
+    raw_starrocks_sql: Optional[str] = None
+    raw_starrocks_table: Optional[str] = None
+
+    # 原始 entities（调试用）
+    raw_entities: Optional[Dict[str, Any]] = None
+
+
 class QueryBuilder:
     """
     QueryState JSON → 可执行 SQL 的确定性转换器
@@ -137,6 +191,17 @@ class QueryBuilder:
             "status": "completed",
             "detail": f"渲染SQL: {rendered_sql[:120]}..."
         })
+
+        # Step 2.5: 标准化列名 - 将 SELECT/GROUP BY 中的中文显示名替换为实际列名
+        # 例如: SELECT `站点`, SUM(...) → SELECT `FSITECODE`, SUM(...)
+        for field_info in field_mapping.get("select_fields", []):
+            alias = field_info.get("alias", "")
+            field = field_info.get("field", "")
+            if alias and field and alias != field:
+                # 替换 `别名` 为 `实际列名`（处理可能带反引号的别名）
+                rendered_sql = re.sub(rf"`{re.escape(alias)}`", f"`{field}`", rendered_sql, flags=re.IGNORECASE)
+                rendered_sql = re.sub(rf"(?<![a-zA-Z0-9_]){re.escape(alias)}(?![a-zA-Z0-9_`])", field, rendered_sql)
+                logger.debug(f"[build_sql] 列名标准化: {alias} → {field}")
 
         # Step 3: 构建基础 SQL
         logger.info(f"[build_sql] rendered_sql (first 150): {rendered_sql[:150] if rendered_sql else 'None/empty'}")
@@ -241,7 +306,8 @@ class QueryBuilder:
 
         # 3.5 如果维度有具体值但 SQL 里没有占位符，手动追加到 WHERE
         for dim in query_state.dimensions:
-            if dim.value:
+            # 跳过 __SYNONYM__ 占位符（表示识别了维度类型但无具体值）
+            if dim.value and dim.value != "__SYNONYM__":
                 placeholder = f"{{{dim.type}}}"
                 if placeholder not in rendered:
                     # 没有占位符，手动追加 WHERE 条件
@@ -363,8 +429,6 @@ class QueryBuilder:
         如果 rendered_sql 非空（已有渲染后的 starrocks_sql），在其基础上添加 GROUP BY
         否则从零构建
         """
-        import re
-        logger.info(f"[_build_base_sql] ENTRY: rendered_sql={rendered_sql[:50] if rendered_sql else 'empty'}...")
 
         # 如果有渲染后的 SQL，使用它并只添加 GROUP BY
         if rendered_sql:
@@ -463,10 +527,16 @@ class QueryBuilder:
         # 维度过滤条件
         for dim in query_state.dimensions:
             if dim.value is not None:  # 这是过滤条件
+                # 跳过 __SYNONYM__ 占位符（表示识别了维度类型但无具体值，不需要 WHERE 条件）
+                if dim.value == '__SYNONYM__':
+                    continue
                 where_parts.append(f"`{dim.field}` = '{dim.value}'")
 
         # 其他过滤条件
         for f in query_state.filters:
+            # 跳过 __SYNONYM__ 占位符（表示识别了维度类型但无具体值，不需要 WHERE 条件）
+            if f.get('value') == '__SYNONYM__':
+                continue
             where_parts.append(f"`{f['field']}` {f.get('operator', '=')} '{f['value']}'")
 
         if where_parts:
@@ -618,3 +688,92 @@ class QueryBuilder:
             })
 
         return comparison_sqls
+
+    # ========== QueryIntent 相关方法 ==========
+
+    def build_sql_from_intent(self, intent: QueryIntent) -> Dict[str, Any]:
+        """
+        新增入口：将 QueryIntent 转换为 SQL
+
+        这是为了后续让 LLM 生成 QueryIntent（结构化意图），
+        而不是直接生成 SQL，从而避免 LLM 生成 SQL 的幻觉问题。
+
+        Args:
+            intent: 结构化的查询意图
+
+        Returns:
+            与 build_sql() 相同的格式
+        """
+        logger.info(f"[build_sql_from_intent] intent_type={intent.intent_type}, metric_code={intent.metric_code}")
+        query_state = self._intent_to_state(intent)
+        return self.build_sql(query_state)
+
+    def _intent_to_state(self, intent: QueryIntent) -> QueryState:
+        """
+        将 QueryIntent 转换为 QueryState
+
+        Args:
+            intent: 结构化的查询意图
+
+        Returns:
+            QueryState 查询状态
+        """
+        # 构建 metric dict
+        metric = {
+            "code": intent.metric_code or "",
+            "name": intent.metric_name or "",
+            "starrocks_sql": intent.raw_starrocks_sql or "",
+            "starrocks_table": intent.raw_starrocks_table or "",
+        }
+
+        # 构建 TimeSpec
+        time_spec = TimeSpec(
+            type=TimeType.DATE_RANGE,
+            start=intent.time_range.get("start") if intent.time_range else None,
+            end=intent.time_range.get("end") if intent.time_range else None,
+            original_expr=intent.time_expr,
+        )
+
+        # 构建 dimensions
+        query_dimensions = []
+        for dim_name in intent.group_by_dims:
+            if dim_name:  # 跳过空维度名
+                query_dimensions.append(QueryDimension(
+                    type=dim_name,
+                    column=dim_name,
+                    field=dim_name,
+                    value=None  # None 表示用于 GROUP BY
+                ))
+
+        # 添加 filters 作为 dimensions（带 value 的用于 WHERE 条件）
+        for f in intent.filters:
+            if isinstance(f, dict) and f.get("field"):
+                query_dimensions.append(QueryDimension(
+                    type=f["field"],
+                    column=f["field"],
+                    field=f["field"],
+                    value=f.get("value")
+                ))
+
+        # 构建 pagination
+        pagination = PaginationSpec(
+            page=1,
+            page_size=min(intent.top_n or 10, 1000)
+        )
+
+        # 构建 comparison
+        comparison = ComparisonSpec(
+            enabled=intent.comparison_enabled,
+            types=intent.comparison_types
+        )
+
+        return QueryState(
+            version="1.0",
+            intent=intent.intent_type,
+            confidence=0.9,
+            metric=metric,
+            time=time_spec,
+            dimensions=query_dimensions,
+            pagination=pagination,
+            comparison=comparison,
+        )

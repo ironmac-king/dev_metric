@@ -64,6 +64,12 @@
           </div>
         </div>
         <div class="header-actions">
+          <button v-if="sidebarCollapsed" class="action-btn cursor-pointer" @click="sidebarCollapsed = false" title="显示会话历史">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <rect x="2" y="3" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M6 7H12M6 10H10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
           <button class="action-btn cursor-pointer" @click="showPreferencesPanel = true" title="偏好设置">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
               <circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="1.5"/>
@@ -102,10 +108,15 @@
         :selected-candidate-idx="selectedCandidateIdx"
         :selected-dim-value-idx="selectedDimValueIdx"
         :selected-dims="selectedDims"
+        :message-style="preferences.message_style"
+        :font-size="preferences.font_size"
+        :compact-mode="preferences.compact_mode"
+        :show-thinking="preferences.show_thinking"
         @toggle-thinking="toggleThinking"
         @select-metric="selectMetricCandidate"
         @select-dim-value="selectDimensionValueCandidate"
         @page-change="handlePageChange"
+        @page-size-change="handlePageSizeChange"
         @drill-down="handleDrillDown"
         @breadcrumb-click="handleBreadcrumbClick"
         @back="handleBack"
@@ -132,6 +143,7 @@
         :suggestions="suggestions"
         :show-suggestions="showSuggestions"
         :selected-index="selectedIndex"
+        :single-match="singleMatchSuggestion"
         placeholder="输入您的问题..."
         @send="handleSend"
         @input="onInput"
@@ -144,7 +156,7 @@
     </div>
 
     <!-- 偏好设置面板 -->
-    <AskPreferencesPanel v-model="showPreferencesPanel" />
+    <AskPreferencesPanel v-model="showPreferencesPanel" @preferences-changed="onPreferencesChanged" />
   </div>
 </template>
 
@@ -177,6 +189,15 @@ const showPreferencesPanel = ref(false)
 const selectedCandidateIdx = ref(null)
 const selectedDimValueIdx = ref(null)
 
+// 偏好设置状态
+const preferences = ref({
+  theme: 'light',
+  message_style: 'bubbles',
+  font_size: 'medium',
+  show_thinking: true,
+  compact_mode: false
+})
+
 // 编辑消息
 const editingMessageIndex = ref(-1)
 const editingContent = ref('')
@@ -188,6 +209,7 @@ const selectedDims = ref({})
 const suggestions = ref<Array<{dimension_field: string, dimension_value: string}>>([])
 const selectedIndex = ref(-1)
 const showSuggestions = ref(false)
+const singleMatchSuggestion = ref<{dimension_field: string, dimension_value: string} | null>(null)
 let debounceTimer
 const currentMetricCode = ref('')
 const currentSQL = ref('')
@@ -219,11 +241,11 @@ const userAvatarStyle = computed(() => {
 })
 
 const hasUserAvatar = computed(() => {
-  return localStorage.getItem('user_avatar_custom') || localStorage.getItem('user_avatar_preset')
+  return !!(localStorage.getItem('user_avatar_custom') || localStorage.getItem('user_avatar_preset'))
 })
 
 const hasAiAvatar = computed(() => {
-  return localStorage.getItem('ai_avatar_custom') || localStorage.getItem('ai_avatar_preset')
+  return !!(localStorage.getItem('ai_avatar_custom') || localStorage.getItem('ai_avatar_preset'))
 })
 
 const aiAvatarStyle = computed(() => {
@@ -267,9 +289,23 @@ function loadAiAvatarConfig() {
 }
 
 // 生命周期
-onMounted(() => {
+onMounted(async () => {
   loadAiAvatarConfig()
   loadSessionHistory()
+
+  // 加载偏好设置
+  try {
+    const res = await askAPI.getPreferences()
+    if (res.data) {
+      preferences.value = { ...preferences.value, ...res.data }
+    }
+  } catch (e) {
+    console.error('加载偏好设置失败:', e)
+  }
+
+  // 等待 DOM 渲染完成后再应用样式
+  await nextTick()
+  applyAllPreferences()
 
   const questionParam = route.query.q
   const sessionParam = route.query.session_id
@@ -283,6 +319,27 @@ onMounted(() => {
     loadSession(sessionId.value)
   }
 })
+
+// 应用所有偏好设置
+function applyAllPreferences() {
+  // 应用主题
+  document.documentElement.setAttribute('data-theme', preferences.value.theme)
+  localStorage.setItem('ask_theme', preferences.value.theme)
+  // 消息样式通过 Vue props 传递给 ChatMessage 组件，自动响应式更新
+}
+
+// 处理偏好设置变更事件
+function onPreferencesChanged({ key, value }) {
+  // 更新本地状态 - Vue 会自动把新的 preferences 传递给 ChatMessage
+  preferences.value[key] = value
+
+  // 如果是主题，需要额外处理
+  if (key === 'theme') {
+    document.documentElement.setAttribute('data-theme', value)
+    localStorage.setItem('ask_theme', value)
+  }
+  // 其他样式通过 Vue props 传递，ChatMessage 会自动响应更新
+}
 
 // 会话管理
 async function loadSessionHistory() {
@@ -756,7 +813,7 @@ async function handlePageChange(page, msg) {
       question: msg.content || '当前数据',
       session_id: sessionId.value,
       page: page,
-      page_size: 10,
+      page_size: msg.page_size || 10,
       engine_type: engineType.value
     })
 
@@ -773,6 +830,13 @@ async function handlePageChange(page, msg) {
   } finally {
     loading.value = false
   }
+}
+
+async function handlePageSizeChange(size, msg) {
+  // 改变每页条数时重置到第一页
+  msg.page = 1
+  msg.page_size = size
+  await handlePageChange(1, msg)
 }
 
 async function handleBreadcrumbClick(crumb, cIdx, msg) {
@@ -881,6 +945,10 @@ async function fetchSuggestions() {
     if (data.code === 0 && data.data) {
       suggestions.value = data.data
       showSuggestions.value = suggestions.value.length > 0
+
+      // 检测单一精确匹配
+      const exactMatches = suggestions.value.filter(s => s.match_type === 'exact')
+      singleMatchSuggestion.value = exactMatches.length === 1 ? exactMatches[0] : null
     }
   } catch (e) {
     console.error('获取维度候选失败', e)
@@ -919,7 +987,16 @@ function selectCurrent() {
 
 function selectSuggestion(item) {
   const text = question.value
-  if (text && !text.endsWith(' ') && !text.endsWith('\n')) {
+  // 提取最后一个单词（可能部分输入的词）
+  const words = text.split(/\s+/)
+  const lastWord = words[words.length - 1]
+
+  if (lastWord && item.dimension_value.startsWith(lastWord)) {
+    // 替换最后一个词
+    words[words.length - 1] = item.dimension_value
+    question.value = words.join(' ') + ' '
+  } else if (text && !text.endsWith(' ') && !text.endsWith('\n')) {
+    // 没有部分匹配的词，追加
     question.value = text + ' ' + item.dimension_value
   } else {
     question.value = text + item.dimension_value
@@ -930,6 +1007,7 @@ function selectSuggestion(item) {
 function closeSuggestions() {
   showSuggestions.value = false
   selectedIndex.value = -1
+  singleMatchSuggestion.value = null
 }
 </script>
 
@@ -1025,6 +1103,12 @@ function closeSuggestions() {
   justify-content: center;
   color: var(--text-secondary);
   transition: all 0.15s;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .action-btn:hover {

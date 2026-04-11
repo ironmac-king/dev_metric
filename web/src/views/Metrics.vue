@@ -174,6 +174,16 @@
               </span>
             </template>
           </el-table-column>
+          <el-table-column prop="updated_by" label="更新人" width="100" align="center">
+            <template #default="{ row }">
+              <span class="updater-text">{{ row.updated_by || '-' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="updated_at" label="更新时间" width="160" align="center">
+            <template #default="{ row }">
+              <span class="update-time">{{ formatTime(row.updated_at) }}</span>
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="120" align="center" fixed="right">
             <template #default="{ row }">
               <div class="action-group">
@@ -642,6 +652,18 @@ function formatType(type) {
   if (type.includes('派生')) return '派生'
   if (type.includes('复合')) return '复合'
   return type
+}
+
+function formatTime(time) {
+  if (!time) return '-'
+  const d = new Date(time)
+  if (isNaN(d.getTime())) return '-'
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  const hour = String(d.getHours()).padStart(2, '0')
+  const minute = String(d.getMinutes()).padStart(2, '0')
+  return `${year}-${month}-${day} ${hour}:${minute}`
 }
 
 async function loadMetrics() {

@@ -38,6 +38,7 @@ type Metric struct {
 	QueryParams        json.RawMessage `json:"query_params" gorm:"type:jsonb"`         // 查询参数配置
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
+	UpdatedBy          string         `json:"updated_by" gorm:"column:updated_by;size:64"` // 更新人
 }
 
 func (Metric) TableName() string {
