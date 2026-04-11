@@ -191,7 +191,7 @@ class MetricClient:
                 "thinking_steps": thinking_steps
             }
             response = httpx.post(
-                f"{self.base_url}/api/v1/ask-analysis/log",
+                f"{self.base_url}/api/v1/ask-analysis/logs",
                 json=payload,
                 timeout=10
             )

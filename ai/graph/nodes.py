@@ -484,8 +484,9 @@ class ConversationNodes:
             if entities.get(dim_key):
                 ctx.current_dimensions[dim_key] = entities.get(dim_key)
 
-        # 保存数据库维度列（GROUP_1, GROUP_2, GROUP_3, SKU, ASIN）
-        for dim_key in ["GROUP_1", "GROUP_2", "GROUP_3", "SKU", "ASIN"]:
+        # 保存数据库维度列（从动态维度字段获取）
+        all_dim_keys = self._get_all_dimension_keys()
+        for dim_key in all_dim_keys:
             if entities.get(dim_key):
                 ctx.current_dimensions[dim_key] = entities.get(dim_key)
                 logger.info(f"[_update_context] 保存数据库维度: {dim_key}={entities.get(dim_key)}")
@@ -805,21 +806,42 @@ class ConversationNodes:
 
         # 无论 term_links 是否为空，只要用户提到了新的指标或维度词，就应该清除旧的维度过滤
         # 这样可以避免上一轮的维度值（如 SKU=70312）污染新查询
+        # 当用户指定了新的维度值（如"美国站"）时，也应该清除旧的维度过滤
+        has_new_dimension_value = bool(entities.get("dimension_values"))
         if not is_pure_followup and inherited_metric and not user_just_selected_metric and not is_confirmation and not intent_confirmed_from_context:
-            if contains_metric_reference or contains_dimension_keyword or (is_short_input and not is_time_word):
+            if contains_metric_reference or contains_dimension_keyword or has_new_dimension_value or (is_short_input and not is_time_word):
                 # 用户说了指标相关词、维度词，或输入很短且不是时间词，清除继承
                 entities["metric_name"] = None
                 entities["metric_code"] = None
                 entities["unit"] = None
                 entities["starrocks_sql"] = None
                 # 同时清除旧的维度过滤条件，避免污染新问题
-                # 动态获取维度字段名（从 business_terms 的 dimension_field 获取）
-                dim_filter_keys = ['SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'platform', 'region', 'site', 'FSITECODE']
+                # 从 business_terms 和 _dimension_cache 动态获取所有维度字段
+                dim_filter_keys = set()  # 使用 set 去重
+                # 从 business_terms 获取 dimension_field、synonyms 及其大小写变体
                 if hasattr(self.rule_engine, 'business_terms'):
                     for term_key, term_info in self.rule_engine.business_terms.items():
                         dim_field = term_info.get("dimension_field")
-                        if dim_field and dim_field not in dim_filter_keys:
-                            dim_filter_keys.append(dim_field)
+                        if dim_field:
+                            dim_filter_keys.add(dim_field)
+                            dim_filter_keys.add(dim_field.upper())
+                            dim_filter_keys.add(dim_field.lower())
+                        # 添加 synonyms（业务术语的同义词，如 sku、款号 等）
+                        synonyms = term_info.get("synonyms", [])
+                        for syn in synonyms:
+                            if syn:
+                                dim_filter_keys.add(syn)
+                                dim_filter_keys.add(syn.upper())
+                                dim_filter_keys.add(syn.lower())
+                # 从 _dimension_cache 获取所有维度列名
+                if hasattr(self.rule_engine, '_dimension_cache'):
+                    for dim_name, dim_mapping in self.rule_engine._dimension_cache.items():
+                        for col_name in dim_mapping.values():
+                            if col_name:
+                                dim_filter_keys.add(col_name)
+                                dim_filter_keys.add(col_name.upper())
+                                dim_filter_keys.add(col_name.lower())
+                dim_filter_keys = list(dim_filter_keys)
                 logger.info(f"[entity_node] 准备清除维度, dim_filter_keys={dim_filter_keys}, 当前entities={entities}")
                 for dim_key in dim_filter_keys:
                     if dim_key in entities:
@@ -933,7 +955,7 @@ class ConversationNodes:
 
         # 处理 LLM 识别的 dimension_values（如 dimension_values='智能云存储'）
         # 转换为具体的 dimension_field（如 GROUP_3='智能云存储'）
-        if entities.get("dimension_values") and not any(entities.get(k) for k in ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']):
+        if entities.get("dimension_values") and not any(entities.get(k) for k in self._get_all_dimension_keys()):
             dim_value = entities.get("dimension_values")
             dim_type = entities.get("dimension")  # 如 "品类"
             logger.info(f"[entity_node] LLM 识别到 dimension_values={dim_value}, dimension={dim_type}，搜索对应字段")
@@ -2003,7 +2025,7 @@ class ConversationNodes:
         # 过滤掉已有具体值的非时间维度
         # 注意：__SYNONYM__ 是"识别了维度类型但无具体值"的标记，不是具体值
         filtered_dims = []
-        specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
+        specific_dim_keys = list(self._get_all_dimension_keys())
         for dim in dims_to_process:
             is_time_dim = dim in time_dimensions
             if not is_time_dim:
@@ -2103,7 +2125,7 @@ class ConversationNodes:
             dimensions=query_dimensions,
             pagination=PaginationSpec(
                 page=getattr(state, 'page', 1),
-                page_size=min(getattr(state, 'page_size', 100), 1000)
+                page_size=min(state.entities.get("top_n") or getattr(state, 'page_size', 100), 1000)
             ),
             comparison=ComparisonSpec(
                 enabled=state.current_intent in ["query_comparison", "query_trend"],
@@ -2405,9 +2427,10 @@ class ConversationNodes:
                             mapped_dims.append(dim)
                     group_by_dims = mapped_dims
 
-        # 4. 提取过滤条件
+        # 4. 提取过滤条件（使用动态维度字段）
         filters = []
-        for key in ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN', 'platform', 'region', 'department', 'site', 'category', 'device']:
+        all_dim_keys = self._get_all_dimension_keys()
+        for key in all_dim_keys:
             if entities.get(key):
                 filters.append({
                     "field": key,
@@ -2510,10 +2533,50 @@ class ConversationNodes:
             # 去掉 pattern 中的 ORDER BY 部分（如果 pattern 包含的话）
             result_sql = re.sub(r'ORDER\s+BY\s+[^\s]+\s+(ASC|DESC)?\s*', '', result_sql, flags=re.IGNORECASE).strip()
 
-        # 如果 SQL 已经包含 LIMIT，不重复追加 LIMIT 部分
+        # 如果 SQL 已经包含 LIMIT，用公式的 LIMIT 替换（排名公式需要正确的 LIMIT 值）
         if "LIMIT" in sql.upper():
-            # 去掉 pattern 中的 LIMIT 部分（如果 pattern 包含的话）
-            result_sql = re.sub(r'LIMIT\s+\d+', '', result_sql, flags=re.IGNORECASE).strip()
+            # 检查公式 pattern 是否有 LIMIT
+            formula_limit_match = re.search(r'LIMIT\s+(\d+)', result_sql, re.IGNORECASE)
+            if formula_limit_match:
+                # 提取公式的 LIMIT 值
+                formula_limit = formula_limit_match.group(1)
+
+                # 检查原 SQL 是否有 OFFSET（如果有，需要处理顺序问题）
+                has_offset = "OFFSET" in sql.upper()
+                has_order_by = "ORDER BY" in sql.upper()
+
+                # 重新排列 SQL 语法的顺序：正确顺序应该是 GROUP BY ... ORDER BY ... LIMIT n OFFSET m
+                # 而错误的顺序是 GROUP BY ... LIMIT n OFFSET m ORDER BY ...
+                if has_offset and has_order_by:
+                    # 原 SQL 是 LIMIT...OFFSET...ORDER BY，需要重新排列
+                    # 1. 提取 ORDER BY 子句
+                    order_by_match = re.search(r'ORDER\s+BY\s+.+?(?=\s*(?:GROUP\s+BY|LIMIT|WHERE|$))', sql, re.IGNORECASE | re.DOTALL)
+                    order_by_clause = order_by_match.group(0).strip() if order_by_match else None
+
+                    # 2. 提取 LIMIT...OFFSET
+                    limit_offset_match = re.search(r'LIMIT\s+\d+\s+OFFSET\s+\d+', sql, re.IGNORECASE)
+                    limit_offset_clause = limit_offset_match.group(0).strip() if limit_offset_match else None
+
+                    if order_by_clause and limit_offset_clause:
+                        # 重新组装：GROUP BY ... ORDER BY ... LIMIT n (不带 OFFSET)
+                        sql = sql.replace(order_by_clause, "").replace(limit_offset_clause, "").strip()
+                        # 去掉末尾可能的 AND
+                        sql = re.sub(r'\s+AND\s+$', '', sql, flags=re.IGNORECASE).strip()
+                        sql = f"{sql} {order_by_clause} LIMIT {formula_limit}"
+                        logger.info(f"[_apply_formula_syntax] 重新排列 SQL 语序: {sql[:200]}")
+                    else:
+                        # 只替换 LIMIT 值
+                        sql = re.sub(r'LIMIT\s+\d+', f'LIMIT {formula_limit}', sql, flags=re.IGNORECASE)
+                else:
+                    # 简单替换 LIMIT 值
+                    sql = re.sub(r'LIMIT\s+\d+', f'LIMIT {formula_limit}', sql, flags=re.IGNORECASE)
+
+                logger.info(f"[_apply_formula_syntax] 排名公式替换 LIMIT 为 {formula_limit}")
+                # 公式的 LIMIT 已处理完毕，不需要再追加
+                result_sql = re.sub(r'LIMIT\s+\d+', '', result_sql, flags=re.IGNORECASE).strip()
+            else:
+                # 公式没有 LIMIT，保留原 SQL 的 LIMIT
+                result_sql = re.sub(r'LIMIT\s+\d+', '', result_sql, flags=re.IGNORECASE).strip()
 
         # 如果处理后 result_sql 为空，直接返回原始 SQL
         if not result_sql.strip():
@@ -2610,6 +2673,37 @@ class ConversationNodes:
             self._table_dimensions_cache[table_name] = {}
         return self._table_dimensions_cache[table_name]
 
+    def _get_all_dimension_keys(self) -> set:
+        """
+        从 business_terms 和 _dimension_cache 动态获取所有维度字段
+        用于替代写死的维度列表
+        """
+        dim_keys = set()
+        # 从 business_terms 获取 dimension_field、synonyms 及其大小写变体
+        if hasattr(self.rule_engine, 'business_terms'):
+            for term_key, term_info in self.rule_engine.business_terms.items():
+                dim_field = term_info.get("dimension_field")
+                if dim_field:
+                    dim_keys.add(dim_field)
+                    dim_keys.add(dim_field.upper())
+                    dim_keys.add(dim_field.lower())
+                # 添加 synonyms
+                synonyms = term_info.get("synonyms", [])
+                for syn in synonyms:
+                    if syn:
+                        dim_keys.add(syn)
+                        dim_keys.add(syn.upper())
+                        dim_keys.add(syn.lower())
+        # 从 _dimension_cache 获取所有维度列名
+        if hasattr(self.rule_engine, '_dimension_cache'):
+            for dim_name, dim_mapping in self.rule_engine._dimension_cache.items():
+                for col_name in dim_mapping.values():
+                    if col_name:
+                        dim_keys.add(col_name)
+                        dim_keys.add(col_name.upper())
+                        dim_keys.add(col_name.lower())
+        return dim_keys
+
     def _extract_table_name(self, sql: str) -> str:
         """从 SQL 中提取表名（FROM 后第一个表名）"""
         match = re.search(r'FROM\s+([^\s,;]+)', sql, re.IGNORECASE)
@@ -2624,43 +2718,11 @@ class ConversationNodes:
         """
         dimensions = {}
 
-        # 平台维度
-        if entities.get("platform"):
-            dimensions["platform"] = entities.get("platform")
-
-        # 地区维度
-        if entities.get("region"):
-            dimensions["region"] = entities.get("region")
-
-        # 部门维度
-        if entities.get("department"):
-            dimensions["department"] = entities.get("department")
-
-        # 站点维度
-        if entities.get("site"):
-            dimensions["site"] = entities.get("site")
-
-        # 品类维度
-        if entities.get("category"):
-            dimensions["category"] = entities.get("category")
-
-        # 设备维度
-        if entities.get("device"):
-            dimensions["device"] = entities.get("device")
-
-        # 品类维度 (GROUP_1, GROUP_2, GROUP_3)
-        if entities.get("GROUP_1"):
-            dimensions["GROUP_1"] = entities.get("GROUP_1")
-        if entities.get("GROUP_2"):
-            dimensions["GROUP_2"] = entities.get("GROUP_2")
-        if entities.get("GROUP_3"):
-            dimensions["GROUP_3"] = entities.get("GROUP_3")
-
-        # SKU, ASIN 等维度
-        if entities.get("SKU"):
-            dimensions["SKU"] = entities.get("SKU")
-        if entities.get("ASIN"):
-            dimensions["ASIN"] = entities.get("ASIN")
+        # 动态获取所有维度字段，从 entities 中提取有值的维度
+        all_dim_keys = self._get_all_dimension_keys()
+        for dim_key in all_dim_keys:
+            if entities.get(dim_key):
+                dimensions[dim_key] = entities.get(dim_key)
 
         # 时间维度（日、月、年）- 用于 GROUP BY
         for dim_key in ["日", "月", "年", "天", "周"]:
@@ -2680,11 +2742,14 @@ class ConversationNodes:
             return True, None
 
         invalid_dims = []
-        # 品类维度（GROUP_1/2/3, SKU, ASIN）来自 StarRocks dim_value_mapping，不在此验证
-        skip_validation_keys = ["GROUP_1", "GROUP_2", "GROUP_3", "SKU", "ASIN", "日", "月", "年", "天", "周"]
+        # 时间维度跳过验证
+        time_dims = ['日', '月', '年', '天', '周']
+        # 从动态维度字段获取品类维度，跳过验证
+        skip_validation_keys = set(self._get_all_dimension_keys())
+        skip_validation_keys.update(time_dims)
 
         for dim_key, dim_value in dimensions.items():
-            # 跳过非维度参数（如时间维度和品类维度）
+            # 跳过时间维度和品类维度
             if dim_key in skip_validation_keys:
                 continue
             if not self._is_dimension_registered(dim_key, dim_value):
@@ -2982,7 +3047,7 @@ class ConversationNodes:
             # 如果已有具体的维度值（如 GROUP_3='智能云存储'），不应该再加 GROUP BY
             # 因为 WHERE 条件已经筛选了这个具体值
             # 注意：__SYNONYM__ 不是具体值，是"识别了维度类型但无具体值"的标记
-            specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
+            specific_dim_keys = list(self._get_all_dimension_keys())
             has_specific_dim_value = any(
                 entities.get(k) and entities.get(k) != '__SYNONYM__'
                 for k in specific_dim_keys
@@ -3110,12 +3175,45 @@ class ConversationNodes:
                             flags=re.IGNORECASE | re.DOTALL
                         )
 
-            # 添加 ORDER BY 和 LIMIT
+            # 添加 ORDER BY 和 LIMIT（正确的 SQL 语法：ORDER BY ... LIMIT n）
             if group_cols:
                 adjusted_sql = re.sub(r'\s*$', '', adjusted_sql)  # 去掉末尾空白
-                if "ORDER BY" not in adjusted_sql.upper():
-                    adjusted_sql += f" ORDER BY {metric_col} DESC"
-                if "LIMIT" not in adjusted_sql.upper():
+
+                # 检查现有的 LIMIT 和 OFFSET
+                has_limit = "LIMIT" in adjusted_sql.upper()
+                has_offset = "OFFSET" in adjusted_sql.upper()
+                has_order_by = "ORDER BY" in adjusted_sql.upper()
+
+                if has_order_by and has_limit:
+                    # ORDER BY 在 LIMIT 之后，需要重新排列
+                    # 提取 ORDER BY 子句
+                    order_match = re.search(r'ORDER\s+BY\s+[^\s]+\s+(ASC|DESC)?', adjusted_sql, re.IGNORECASE)
+                    if order_match:
+                        order_clause = order_match.group(0)
+                        # 提取 LIMIT...OFFSET 子句
+                        limit_match = re.search(r'LIMIT\s+\d+\s+OFFSET\s+\d+', adjusted_sql, re.IGNORECASE)
+                        if limit_match:
+                            limit_clause = limit_match.group(0)
+                            # 重新排列：去掉原来的 ORDER BY 和 LIMIT，重新按正确顺序添加
+                            adjusted_sql = re.sub(r'ORDER\s+BY\s+[^\s]+\s+(ASC|DESC)?', '', adjusted_sql, flags=re.IGNORECASE)
+                            adjusted_sql = re.sub(r'LIMIT\s+\d+\s+OFFSET\s+\d+', '', adjusted_sql, flags=re.IGNORECASE)
+                            adjusted_sql = adjusted_sql.rstrip()
+                            adjusted_sql = f"{adjusted_sql} {order_clause} {limit_clause}"
+                            logger.info(f"[_apply_dimensions_to_sql] 重新排列SQL语序: {adjusted_sql[:200]}")
+                elif not has_order_by:
+                    if has_limit and has_offset:
+                        # LIMIT...OFFSET 存在，在它之前添加 ORDER BY
+                        adjusted_sql = re.sub(
+                            r'(LIMIT\s+\d+\s+OFFSET\s+\d+)',
+                            f'ORDER BY {metric_col} DESC \\1',
+                            adjusted_sql,
+                            flags=re.IGNORECASE
+                        )
+                    else:
+                        # 没有 ORDER BY也没有 LIMIT，正常添加
+                        adjusted_sql += f" ORDER BY {metric_col} DESC LIMIT {top_n}"
+                elif has_limit:
+                    # 有 ORDER BY 但没有 LIMIT
                     adjusted_sql += f" LIMIT {top_n}"
 
         return adjusted_sql
@@ -4072,9 +4170,10 @@ class ConversationNodes:
                                         break
                             # 兜底：跳过维度列和对比列
                             if not metric_col:
-                                dim_cols = ['月', '日', '年', '月份', '日期', '年份', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'SKU', 'ASIN']
+                                dim_cols = list(self._get_all_dimension_keys())
+                                dim_cols.extend(['月', '日', '年', '月份', '日期', '年份', '同比', '环比', '去年同期', '上月同期'])
                                 for k in row.keys():
-                                    if not any(p in k for p in dim_cols + ['同比', '环比', '去年同期', '上月同期']):
+                                    if not any(p in k for p in dim_cols):
                                         metric_col = k
                                         break
                             metric_val = row.get(metric_col) if metric_col else None

@@ -35,8 +35,18 @@ def create_langgraph_app_with_saver(checkpointer):
     # 设置入口
     workflow.set_entry_point("intent")
 
+    # 条件边：intent 之后根据意图类型分流
+    # greeting/thanks/bye 直接到 response，其他意图走正常流程
+    workflow.add_conditional_edges(
+        "intent",
+        intent_route,
+        {
+            "response": "response",  # 闲聊意图直接回复
+            "entity": "entity"       # 其他意图继续实体识别
+        }
+    )
+
     # 普通边
-    workflow.add_edge("intent", "entity")
     workflow.add_edge("entity", "sql_gen")
     workflow.add_edge("execute", "comparison")
     workflow.add_edge("comparison", "response")
@@ -54,6 +64,17 @@ def create_langgraph_app_with_saver(checkpointer):
 
     # 编译，使用传入的 MemorySaver 做状态持久化
     return workflow.compile(checkpointer=checkpointer)
+
+
+def intent_route(state: ConversationState) -> Literal["response", "entity"]:
+    """根据意图类型决定下一步路由
+
+    greeting/thanks/bye 等闲聊意图直接到 response，不走实体识别和 SQL 生成流程
+    """
+    current_intent = getattr(state, 'current_intent', None)
+    if current_intent in ["greeting", "thanks", "bye"]:
+        return "response"
+    return "entity"
 
 
 def create_langgraph_app():
@@ -119,7 +140,8 @@ def langgraph_sql_gen_node(state: ConversationState) -> Dict[str, Any]:
     # 处理分页
     sql = updates.get("generated_sql")
     if sql and sql not in ["METADATA_QUERY", "NONE"]:
-        page_size = min(getattr(state, 'page_size', 10), 1000)
+        # 优先使用 state.entities.top_n（排名需求），其次用 state.page_size（分页需求）
+        page_size = min(state.entities.get("top_n") or getattr(state, 'page_size', 100), 1000)
         page = getattr(state, 'page', 1)
         sql = re.sub(r'\s+LIMIT\s+\d+\s*(OFFSET\s+\d+)?', '', sql, flags=re.IGNORECASE)
         sql = re.sub(r'\s+OFFSET\s+\d+', '', sql, flags=re.IGNORECASE)
@@ -242,7 +264,7 @@ class LangGraphEngine(ConversationEngine):
         question: str,
         session_id: str,
         page: int = 1,
-        page_size: int = 10,
+        page_size: int = 100,
         user_id: str = "default",
         dept_id: int = 0,
         data_filter: str = ""
@@ -626,7 +648,7 @@ class LangGraphEngine(ConversationEngine):
             return None
 
         # 获取当前分组维度，用于过滤（统一转大写避免大小写问题）
-        current_dimension = entities.get("dimension", "").upper()
+        current_dimension = (entities.get("dimension") or "").upper()
 
         # 时间维度列表 - 不作为下钻维度
         time_dimension_keywords = ["日", "月", "年", "周", "天", "DAY", "MONTH", "YEAR", "WEEK"]

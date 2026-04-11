@@ -569,7 +569,19 @@ class RuleEngine:
         words = re.split(r'[,，、\s]+', text)
         words = [w.strip() for w in words if w.strip()]
 
-        # ========== Step 0: 优先从 business_terms 同义词匹配 ==========
+        # ========== Step 0.5: 匹配 "SKU 数字" 模式（如 "SKU 10101"）==========
+        # 匹配 SKU/ASIN + 数字的模式
+        sku_pattern = re.search(r'SKU\s*(\d+)', text, re.IGNORECASE)
+        if sku_pattern:
+            dimensions["SKU"] = sku_pattern.group(1)
+            logger.debug(f"[RuleEngine] SKU数字匹配: SKU={sku_pattern.group(1)}")
+
+        asin_pattern = re.search(r'ASIN\s*([A-Z0-9]+)', text, re.IGNORECASE)
+        if asin_pattern:
+            dimensions["ASIN"] = asin_pattern.group(1)
+            logger.debug(f"[RuleEngine] ASIN匹配: ASIN={asin_pattern.group(1)}")
+
+        # ========== Step 1: 优先从 business_terms 同义词匹配 ==========
         # 如果 business_terms 有 synonyms 配置，优先检查
         if self.business_terms:
             for term_key, term_info in self.business_terms.items():
@@ -603,12 +615,20 @@ class RuleEngine:
             for name, code in dim_mapping.items():
                 # 分词精确匹配
                 if name in words:
-                    dimensions[dim_name] = code  # key 用 dimension_name
+                    # 如果 code == name（如 "ASIN" == "ASIN"），表示这是维度类型而非具体值
+                    # 设置为 __SYNONYM__ 表示"识别了维度类型但无具体值"
+                    if code == name:
+                        dimensions[dim_name] = "__SYNONYM__"
+                    else:
+                        dimensions[dim_name] = code
                     dimensions[f"{dim_name}_name"] = name
                     break
                 # 子串匹配（支持"三级品类"在文本中间的情况）
                 if name in text:
-                    dimensions[dim_name] = code
+                    if code == name:
+                        dimensions[dim_name] = "__SYNONYM__"
+                    else:
+                        dimensions[dim_name] = code
                     dimensions[f"{dim_name}_name"] = name
                     break
 
