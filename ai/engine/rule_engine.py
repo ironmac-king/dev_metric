@@ -79,12 +79,23 @@ class RuleEngine:
                     for t in terms:
                         term = t.get("term", "")
                         if term:
+                            # 处理 synonyms 可能是字符串（PostgreSQL数组格式如"{三级品类,三级类目}"）或列表
+                            synonyms_raw = t.get("synonyms", [])
+                            if isinstance(synonyms_raw, str):
+                                # PostgreSQL 数组格式字符串，解析为列表
+                                synonyms_raw = synonyms_raw.strip("{}").split(",") if synonyms_raw else []
+                            synonyms = synonyms_raw if isinstance(synonyms_raw, list) else []
+
+                            dim_field = t.get("dimension_field", "")
+                            if dim_field:
+                                logger.info(f"[RuleEngine] 加载业务术语: term={term}, synonyms={synonyms}, dimension_field={dim_field}")
+
                             self.business_terms[term.lower()] = {
                                 "term": term,
                                 "description": t.get("description", ""),
                                 "metric_ids": t.get("metric_ids", []),
-                                "synonyms": t.get("synonyms", []),  # 加载同义词
-                                "dimension_field": t.get("dimension_field", ""),  # 维度字段
+                                "synonyms": synonyms,  # 加载同义词
+                                "dimension_field": dim_field,  # 维度字段
                                 "dimension_value": t.get("dimension_value", ""),  # 维度值
                             }
                     logger.info(f"[RuleEngine] 加载了 {len(self.business_terms)} 个业务术语")
@@ -102,31 +113,22 @@ class RuleEngine:
             return
 
         try:
-            response = httpx.get(f"{self.api_base}/api/v1/metadata/dimensions", timeout=10)
+            # 从 dimension_configs 获取维度配置（支持"三级品类"等多级维度）
+            response = httpx.get(f"{self.api_base}/api/v1/dimension-configs", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
-                    dimensions = data.get("data", [])
-                    if dimensions:
+                    configs = data.get("data", [])
+                    if configs:
                         self._dimension_cache = {}
-                        for dim in dimensions:
-                            code = dim.get("code", "")
-                            values = dim.get("values", {})
-                            if values and isinstance(values, dict):
-                                # values 已经是 {name: code} 格式
-                                self._dimension_cache[code] = values
-                            elif values and isinstance(values, list):
-                                # values 是列表格式，转换为 {name: code}
-                                self._dimension_cache[code] = {v: v for v in values}
-                            else:
-                                # 尝试解析 JSON 字符串
-                                try:
-                                    self._dimension_cache[code] = json.loads(values) if isinstance(values, str) else {}
-                                except:
-                                    self._dimension_cache[code] = {}
-
+                        for cfg in configs:
+                            dim_name = cfg.get("dimension_name", "")
+                            column_name = cfg.get("column_name", "")
+                            if dim_name and column_name and cfg.get("status") == 1:
+                                # dimension_name 作为 key，{dimension_name: column_name} 作为值
+                                self._dimension_cache[dim_name] = {dim_name: column_name}
                         self._dimension_cache_time = time.time()
-                        logger.info(f"[RuleEngine] 从API加载了 {len(self._dimension_cache)} 个维度类型: {list(self._dimension_cache.keys())}")
+                        logger.info(f"[RuleEngine] 从dimension_configs加载了 {len(self._dimension_cache)} 个维度: {list(self._dimension_cache.keys())}")
                         return
         except Exception as e:
             logger.info(f"[RuleEngine] 加载维度映射失败: {e}, 将使用内置默认值")
@@ -143,15 +145,21 @@ class RuleEngine:
         """
         self._dimension_cache = {
             "platform": {
-                "亚马逊": "amazon", "天猫": "tmall", "京东": "jd",
-                "淘宝": "taobao", "拼多多": "pdd", "抖音": "douyin",
-                "快手": "kuaishou", "ebay": "ebay", "沃尔玛": "walmart"
+                # 注意："亚马逊"等站点词已移到 site 维度，避免与 site 混淆
+                "ebay": "ebay", "沃尔玛": "walmart"
             },
             "region": {
                 "华东": "east_china", "华南": "south_china", "华北": "north_china",
                 "国内": "domestic", "海外": "overseas", "国外": "overseas",
                 "美国": "usa", "英国": "uk", "欧洲": "europe",
                 "东南亚": "seasia", "北美": "north_america",
+            },
+            # site 站点维度 - 店铺/平台站点映射
+            "site": {
+                "亚马逊": "amazon", "亚马逊美国站": "amazon_us",
+                "亚马逊欧洲站": "amazon_eu", "亚马逊日本站": "amazon_jp",
+                "天猫": "tmall", "京东": "jd", "淘宝": "taobao",
+                "拼多多": "pdd", "抖音": "douyin", "快手": "kuaishou",
             },
             # department 已移除，避免"销量"等词被错误匹配到"销售"
             # 如需启用，请确保 dimensions 表中有对应配置
@@ -418,39 +426,53 @@ class RuleEngine:
             result.update(extracted_dimensions)
             logger.debug(f"规则提取维度: {extracted_dimensions}")
 
-        # 先尝试精确匹配
-        for term, metric_info in self.metric_templates.items():
-            if term.lower() in text_lower:
-                logger.debug(f"精确匹配成功: {term} -> {metric_info.get('metric_name')}")
-                result.update(metric_info)
-                # 恢复维度信息（不被 metric_info 覆盖）
-                result.update(extracted_dimensions)
-                return result
+        # 收集所有匹配（精确+模糊），不 early return
+        all_matches = []  # (score, metric_info) tuples
 
-        # 尝试模糊匹配（包含关系）
-        best_match = None
-        best_score = 0
-
+        # 精确匹配（双向包含）
         for term, metric_info in self.metric_templates.items():
             term_lower = term.lower()
+            if term_lower in text_lower or text_lower in term_lower:
+                logger.debug(f"双向精确匹配: {term} -> {metric_info.get('metric_name')}")
+                # 精确匹配给满分 1.0
+                all_matches.append((1.0, term, metric_info))
+
+        # 模糊匹配（字符重叠）
+        for term, metric_info in self.metric_templates.items():
+            term_lower = term.lower()
+            # 跳过已精确匹配的
+            if any(term == t for _, t, _ in all_matches):
+                continue
             if term_lower in text_lower:
-                score = len(term_lower)
-                if score > best_score:
-                    best_score = score
-                    best_match = metric_info
+                score = len(term_lower) / max(len(text_lower), 1)
+                all_matches.append((score, term, metric_info))
             else:
                 common_chars = set(term_lower) & set(text_lower)
-                if len(common_chars) >= 3 and len(term_lower) >= 4:
+                if len(common_chars) >= 2 and len(term_lower) >= 3:
                     score = len(common_chars) / len(term_lower)
-                    if score > 0.6 and score > best_score:
-                        best_score = score
-                        best_match = metric_info
+                    if score > 0.25:  # 降低阈值到 0.25
+                        all_matches.append((score, term, metric_info))
 
-        if best_match:
-            logger.debug(f"模糊匹配成功: {best_match.get('metric_name')}")
-            result.update(best_match)
-            # 恢复维度信息
+        # 按分数排序，取最高分（去重，相同 metric_name 只取最高分）
+        seen_metrics = set()
+        sorted_matches = []
+        for score, term, metric_info in sorted(all_matches, key=lambda x: -x[0]):
+            mn = metric_info.get('metric_name', '')
+            if mn not in seen_metrics:
+                seen_metrics.add(mn)
+                sorted_matches.append((score, term, metric_info))
+
+        if sorted_matches:
+            top_score, top_term, top_metric = sorted_matches[0]
+            logger.debug(f"最佳匹配: {top_term} (score={top_score:.2f}) -> {top_metric.get('metric_name')}")
+            result.update(top_metric)
             result.update(extracted_dimensions)
+            # 如果有多个不同指标，返回多指标列表
+            if len(sorted_matches) > 1:
+                result["_multi_metrics"] = [
+                    {"term": t, "score": s, **m}
+                    for s, t, m in sorted_matches[:5]  # 最多5个
+                ]
 
         # 如果仍未匹配，使用ML实体抽取
         if not result and self.use_ml and self.ml_extractor:
@@ -547,65 +569,57 @@ class RuleEngine:
         words = re.split(r'[,，、\s]+', text)
         words = [w.strip() for w in words if w.strip()]
 
-        # 获取动态维度映射
-        platform_map = self._get_dimension_mapping("platform")
-        region_map = self._get_dimension_mapping("region")
-        department_map = self._get_dimension_mapping("department")
-        site_map = self._get_dimension_mapping("site")
-        category_map = self._get_dimension_mapping("category")
-        device_map = self._get_dimension_mapping("device")
+        # ========== Step 0: 优先从 business_terms 同义词匹配 ==========
+        # 如果 business_terms 有 synonyms 配置，优先检查
+        if self.business_terms:
+            for term_key, term_info in self.business_terms.items():
+                synonyms = term_info.get("synonyms", [])
+                dimension_field = term_info.get("dimension_field", "")
+                dimension_value = term_info.get("dimension_value", "")
+                # 检查用户输入是否包含该同义词（支持子串匹配）
+                for syn in synonyms:
+                    if not syn:
+                        continue
+                    # 检查原始文本中是否包含该同义词
+                    if syn in text or syn.lower() in text.lower():
+                        if dimension_field:
+                            # 即使 dimension_value 为空，也记录 dimension_field
+                            # 这表示用户提到了这个维度（如"平台"作为"店铺"的同义词）
+                            dimensions[dimension_field] = dimension_value if dimension_value else "__SYNONYM__"
+                            dimensions[f"{dimension_field}_name"] = term_key  # 用术语名作为维度显示名
+                            logger.debug(f"[RuleEngine] 同义词匹配: '{syn}' -> {dimension_field}={dimension_value} (term={term_key})")
+                            break
+                if dimensions:
+                    break
 
-        # 平台维度 - 分词精确匹配
-        for name, code in platform_map.items():
-            if name in words:
-                dimensions["platform"] = code
-                dimensions["platform_name"] = name
-                break
+        # 如果已从同义词匹配到维度，直接返回
+        if dimensions:
+            return dimensions
 
-        # 地区维度 - 分词精确匹配
-        for name, code in region_map.items():
-            if name in words:
-                dimensions["region"] = code
-                dimensions["region_name"] = name
-                break
+        # ========== 动态维度匹配：从 dimension_configs 加载的所有维度 ==========
+        # _dimension_cache 的结构: {"维度名": {"维度名": "列名"}, ...}
+        # 例如: {"三级品类": {"三级品类": "GROUP_3"}, "站点": {"站点": "FSITECODE"}, ...}
+        for dim_name, dim_mapping in self._dimension_cache.items():
+            for name, code in dim_mapping.items():
+                # 分词精确匹配
+                if name in words:
+                    dimensions[dim_name] = code  # key 用 dimension_name
+                    dimensions[f"{dim_name}_name"] = name
+                    break
+                # 子串匹配（支持"三级品类"在文本中间的情况）
+                if name in text:
+                    dimensions[dim_name] = code
+                    dimensions[f"{dim_name}_name"] = name
+                    break
 
-        # 如果没有精确匹配，尝试"华东区"、"华北区"等变体（区域+后缀）
-        if "region" not in dimensions:
-            region_keywords = list(region_map.keys())
-            region_match = re.search(f"({'|'.join(region_keywords)})(区|地区)?", text)
-            if region_match:
-                name = region_match.group(1)
-                if name in region_map:
-                    dimensions["region"] = region_map[name]
-                    dimensions["region_name"] = name
-
-        # 部门维度 - 分词精确匹配
-        for name, code in department_map.items():
-            if name in words:
-                dimensions["department"] = code
-                dimensions["department_name"] = name
-                break
-
-        # 站点维度（店铺站点）
-        for name, code in site_map.items():
-            if name in words:
-                dimensions["site"] = code
-                dimensions["site_name"] = name
-                break
-
-        # 品类维度
-        for name, code in category_map.items():
-            if name in words:
-                dimensions["category"] = code
-                dimensions["category_name"] = name
-                break
-
-        # 设备维度
-        for name, code in device_map.items():
-            if name in words:
-                dimensions["device"] = code
-                dimensions["device_name"] = name
-                break
+        # 备选：地区维度变体匹配（"华东区"、"华北区"等）
+        if "region" not in dimensions and "华东" not in dimensions and "华北" not in dimensions:
+            for dim_name, dim_mapping in self._dimension_cache.items():
+                for name, code in dim_mapping.items():
+                    if re.search(f"({'|'.join(['华东', '华南', '华北', '华西', '西南'])})区?", text):
+                        dimensions["region"] = code
+                        dimensions["region_name"] = name
+                        break
 
         return dimensions
 

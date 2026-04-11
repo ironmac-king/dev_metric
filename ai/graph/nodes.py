@@ -741,50 +741,99 @@ class ConversationNodes:
             entities
         )
 
+        # 是否为纯追问（只有定义/口径/环比/同比等词，没有指标名）
+        follow_up_only_indicators = ["定义", "口径", "规则", "怎么", "如何", "环比", "同比"]
+        # 注意：环比/同比是意图词，不是指标名，不要加入 contains_metric_reference
+        contains_metric_reference = any(word in last_message for word in ["数", "量", "额", "率", "次数", "人数", "销售额", "订单", "转化", "访客", "用户"])
+
+        # 只有当查询只包含 follow-up 指示词，且不包含指标名时，才保留继承的指标
+        is_pure_followup = any(ind in last_message for ind in follow_up_only_indicators) and not contains_metric_reference
+
+        # 检查是否从上一轮继承了指标
+        inherited_metric = entities.get("metric_name") or entities.get("metric_code")
+
+        # 清除继承指标的条件：
+        # 1. 用户说了明确的 follow-up 词（如"定义呢"、"口径呢"），保留继承
+        # 2. 用户说了新的指标相关词，清除继承
+        # 3. 用户输入很短（小于4个字符）且不是时间词，清除继承（新指标可能没配置）
+        message_len = len(last_message.strip())
+        is_short_input = message_len < 4 and message_len > 0
+        # 使用正则匹配动态时间词（支持"最近8天"、"近几月"、"前几年"等所有动态时间）
+        is_time_word = bool(re.search(
+            r'昨天|今天|明日|昨日|本周|本月|上周|上月|去年|今年|'  # 固定时间词
+            r'近几?(?:天|周|月|年)|前几?(?:天|周|月|年)|'  # 近几/前几 + 天/周/月/年
+            r'最近\d+(?:天|周|月|年)|过去\d+(?:天|周|月|年)|'  # 最近N天/周/月/年、过去N天/周/月/年
+            r'\d+(?:天|周|月|年)(?:前|内)|'
+            r'上?(?:一|这)?(?:周|月|年)',  # 本周、本月、上周、上月等
+            last_message
+        ))
+
+        # 只有不是 follow-up 且有继承指标时，才考虑清除
+        # 但如果用户刚选择了指标（user_just_selected_metric），不能清除刚设置的指标
+        # 确认词（如"是的"、"好"等）也不应该清除继承的指标
+        # 来自 Step 0 的意图确认也不清除（Step 0 已从 context 恢复了指标）
+        confirmation_words = ["是的", "好", "可以", "对的", "没错", "确定", "行", "ok", "yeah", "yes"]
+        is_confirmation = last_message.strip() in confirmation_words or last_message.strip().lower() in ["ok", "yes", "yeah", "y"]
+        intent_confirmed_from_context = getattr(state, '_intent_confirmed_from_context', False)
+
+        # 检查是否提到了维度相关词（从 business_terms 动态获取）
+        # 当用户提到维度词时，应该清除旧的维度过滤
+        dimension_keywords = []
+        if hasattr(self.rule_engine, 'business_terms'):
+            for term_key, term_info in self.rule_engine.business_terms.items():
+                # 只获取有 dimension_field 的业务术语（表示这是维度相关的同义词）
+                if term_info.get("dimension_field"):
+                    dimension_keywords.append(term_key)
+                    # 同时加入 synonyms
+                    synonyms = term_info.get("synonyms", [])
+                    if isinstance(synonyms, list):
+                        dimension_keywords.extend([s.lower() for s in synonyms])
+                    else:
+                        logger.warning(f"[entity_node] synonyms 不是列表类型: {synonyms}, term_key={term_key}")
+        # Fallback：如果 business_terms 为空或没加载，使用硬编码的常见维度词
+        if not dimension_keywords:
+            dimension_keywords = [
+                "类目", "品类", "种类", "分类", "商品", "产品",
+                "SKU", "sku", "款号", "ASIN", "asin",
+                "品牌", "牌子", "站点", "平台", "渠道",
+                "地区", "区域", "地域", "省份", "国家",
+                "部门", "科室", "设备", "广告",
+            ]
+        contains_dimension_keyword = any(dim_kw in last_message for dim_kw in dimension_keywords)
+
+        logger.info(f"[entity_node] 清除检查: is_pure_followup={is_pure_followup}, inherited_metric={inherited_metric}, contains_dimension_keyword={contains_dimension_keyword}, is_short_input={is_short_input}, term_links={bool(term_links)}, last_message={last_message}")
+
+        # 无论 term_links 是否为空，只要用户提到了新的指标或维度词，就应该清除旧的维度过滤
+        # 这样可以避免上一轮的维度值（如 SKU=70312）污染新查询
+        if not is_pure_followup and inherited_metric and not user_just_selected_metric and not is_confirmation and not intent_confirmed_from_context:
+            if contains_metric_reference or contains_dimension_keyword or (is_short_input and not is_time_word):
+                # 用户说了指标相关词、维度词，或输入很短且不是时间词，清除继承
+                entities["metric_name"] = None
+                entities["metric_code"] = None
+                entities["unit"] = None
+                entities["starrocks_sql"] = None
+                # 同时清除旧的维度过滤条件，避免污染新问题
+                # 动态获取维度字段名（从 business_terms 的 dimension_field 获取）
+                dim_filter_keys = ['SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'platform', 'region', 'site', 'FSITECODE']
+                if hasattr(self.rule_engine, 'business_terms'):
+                    for term_key, term_info in self.rule_engine.business_terms.items():
+                        dim_field = term_info.get("dimension_field")
+                        if dim_field and dim_field not in dim_filter_keys:
+                            dim_filter_keys.append(dim_field)
+                logger.info(f"[entity_node] 准备清除维度, dim_filter_keys={dim_filter_keys}, 当前entities={entities}")
+                for dim_key in dim_filter_keys:
+                    if dim_key in entities:
+                        entities[dim_key] = None
+                        logger.info(f"[entity_node] 清除旧维度过滤: {dim_key}")
+                # 同时清除 dimensions 列表，避免残留的维度名被 sql_build_node 误用
+                entities["dimensions"] = []
+                entities["dimension"] = None
+                logger.info(f"[entity_node] 清除 dimensions 列表和 dimension 字段")
+
         # 如果实体链接返回空，检查是否是新的指标查询
         # 新指标查询的特征：包含指标相关的词（如"数"、"量"、"用户"等）
         # 如果是新的指标查询，即使 metric_id 已设置，也要清除（因为这是不同的指标）
         if not term_links:
-            follow_up_only_indicators = ["定义", "口径", "规则", "怎么", "如何", "环比", "同比"]
-            # 注意：环比/同比是意图词，不是指标名，不要加入 contains_metric_reference
-            contains_metric_reference = any(word in last_message for word in ["数", "量", "额", "率", "次数", "人数", "销售额", "订单", "转化", "访客", "用户"])
-
-            # 只有当查询只包含 follow-up 指示词，且不包含指标名时，才保留继承的指标
-            is_pure_followup = any(ind in last_message for ind in follow_up_only_indicators) and not contains_metric_reference
-
-            # 检查是否从上一轮继承了指标
-            inherited_metric = entities.get("metric_name") or entities.get("metric_code")
-
-            # 清除继承指标的条件：
-            # 1. 用户说了明确的 follow-up 词（如"定义呢"、"口径呢"），保留继承
-            # 2. 用户说了新的指标相关词，但规则没匹配到，清除继承
-            # 3. 用户输入很短（小于4个字符）且不是时间词，清除继承（新指标可能没配置）
-            message_len = len(last_message.strip())
-            is_short_input = message_len < 4 and message_len > 0
-            # 使用正则匹配动态时间词（支持"最近8天"、"近几月"、"前几年"等所有动态时间）
-            is_time_word = bool(re.search(
-                r'昨天|今天|明日|昨日|本周|本月|上周|上月|去年|今年|'  # 固定时间词
-                r'近几?(?:天|周|月|年)|前几?(?:天|周|月|年)|'  # 近几/前几 + 天/周/月/年
-                r'最近\d+(?:天|周|月|年)|过去\d+(?:天|周|月|年)|'  # 最近N天/周/月/年、过去N天/周/月/年
-                r'\d+(?:天|周|月|年)(?:前|内)|'
-                r'上?(?:一|这)?(?:周|月|年)',  # 本周、本月、上周、上月等
-                last_message
-            ))
-
-            # 只有不是 follow-up 且有继承指标时，才考虑清除
-            # 但如果用户刚选择了指标（user_just_selected_metric），不能清除刚设置的指标
-            # 确认词（如"是的"、"好"等）也不应该清除继承的指标
-            # 来自 Step 0 的意图确认也不清除（Step 0 已从 context 恢复了指标）
-            confirmation_words = ["是的", "好", "可以", "对的", "没错", "确定", "行", "ok", "yeah", "yes"]
-            is_confirmation = last_message.strip() in confirmation_words or last_message.strip().lower() in ["ok", "yes", "yeah", "y"]
-            intent_confirmed_from_context = getattr(state, '_intent_confirmed_from_context', False)
-            if not is_pure_followup and inherited_metric and not user_just_selected_metric and not is_confirmation and not intent_confirmed_from_context:
-                if contains_metric_reference or (is_short_input and not is_time_word):
-                    # 用户说了指标相关词但没匹配到，或者输入很短且不是时间词，清除继承
-                    entities["metric_name"] = None
-                    entities["metric_code"] = None
-                    entities["unit"] = None
-                    entities["starrocks_sql"] = None
 
             # 确认时清除 dimension，因为用户已确认具体指标，不需要多维度分解
             # 只有非时间维度才能清除（时间维度如"日"需要保留用于 GROUP BY）
@@ -1190,7 +1239,12 @@ class ConversationNodes:
                     # 而应该直接执行 GROUP BY 查询，让用户看到排名结果
                     is_ranking_query = state.current_intent == "query_ranking"
                     has_ranking_keywords = any(kw in last_message for kw in ["最高", "最低", "最多", "最少", "第一名", "前", "排名"])
-                    is_dimension_type_query = text.upper() in ["SKU", "ASIN", "品类", "品牌", "渠道", "地区", "平台"]
+                    # 动态从 dimension_configs 获取所有已注册的维度名称
+                    try:
+                        all_dim_names = [cfg.get("dimension_name", "") for cfg in self.metric_client.get_dimension_configs() if cfg.get("status") == 1]
+                        is_dimension_type_query = text in all_dim_names or text.upper() in [d.upper() for d in all_dim_names if d]
+                    except:
+                        is_dimension_type_query = text.upper() in ["SKU", "ASIN", "品类", "品牌", "渠道", "地区", "平台"]
 
                     if is_ranking_query or (has_ranking_keywords and is_dimension_type_query):
                         # 排名查询场景：直接跳过追问，将此作为 GROUP BY 维度处理
@@ -1896,12 +1950,16 @@ class ConversationNodes:
             dims_to_process = [dimension]
 
         # 过滤掉已有具体值的非时间维度
+        # 注意：__SYNONYM__ 是"识别了维度类型但无具体值"的标记，不是具体值
         filtered_dims = []
         specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
         for dim in dims_to_process:
             is_time_dim = dim in time_dimensions
             if not is_time_dim:
-                has_specific_dim_value = any(state.entities.get(k) for k in specific_dim_keys)
+                has_specific_dim_value = any(
+                    state.entities.get(k) and state.entities.get(k) != '__SYNONYM__'
+                    for k in specific_dim_keys
+                )
                 if has_specific_dim_value:
                     logger.info(f"[sql_build_node] 已有具体维度值，跳过泛指的 dim={dim} GROUP BY")
                     continue
@@ -1964,7 +2022,8 @@ class ConversationNodes:
             logger.info(f"[sql_build_node] state.entities keys={list(state.entities.keys())}")
 
             for key, value in state.entities.items():
-                if key in all_columns and value:
+                # 跳过 __SYNONYM__ 占位符（识别了维度类型但无具体值，应该用于 GROUP BY 不是 WHERE）
+                if key in all_columns and value and value != '__SYNONYM__':
                     # 这是一个具体的维度值，添加为 WHERE 条件
                     for dim_name, cfg in dim_configs.items():
                         if cfg["column_name"] == key:
@@ -2065,6 +2124,7 @@ class ConversationNodes:
             dimensions_list = state.entities.get("dimensions", [])
             single_dimension = state.entities.get("dimension")
             table_name = self._extract_table_name(generated_sql)
+            logger.info(f"[sql_build_node] B方案调试: generated_sql前='{generated_sql[:200]}', single_dimension={single_dimension}, dimensions_list={dimensions_list}")
 
             adjusted = self._apply_dimensions_to_sql(
                 generated_sql,
@@ -2072,6 +2132,7 @@ class ConversationNodes:
                 entities={"dimensions": dimensions_list, "dimension": single_dimension},
                 time_info=time_info
             )
+            logger.info(f"[sql_build_node] B方案调试: adjusted后='{adjusted[:200] if adjusted else None}'")
             if adjusted and adjusted != generated_sql:
                 logger.info(f"[sql_build_node] 维度后处理完成，SQL: {adjusted[:200]}...")
                 generated_sql = adjusted
@@ -2585,20 +2646,21 @@ class ConversationNodes:
     def _is_dimension_name_registered(self, dim_name: str, table_name: str = None) -> bool:
         """
         检查维度名是否在 dimension_configs 表中注册
-        dim_name: 维度名称（如"店铺"、"站点"、"品类"）
+        dim_name: 维度名称（如"店铺"、"站点"、"品类"、"三级品类"）
         返回: True=已注册，False=未注册
         """
         try:
             dim_configs = self.metric_client.get_dimension_configs(table_name)
-            # 检查是否在 dimension_name 中
+            # 检查是否在 dimension_name 中（精确匹配）
             for cfg in dim_configs:
                 if cfg.get("dimension_name") == dim_name and cfg.get("status") == 1:
                     return True
-            # 检查别名映射
+            # 检查别名映射（BIZ_DIM_ALIASES）
             aliased_name = self.BIZ_DIM_ALIASES.get(dim_name, dim_name)
-            for cfg in dim_configs:
-                if cfg.get("dimension_name") == aliased_name and cfg.get("status") == 1:
-                    return True
+            if aliased_name != dim_name:
+                for cfg in dim_configs:
+                    if cfg.get("dimension_name") == aliased_name and cfg.get("status") == 1:
+                        return True
             return False
         except Exception as e:
             logger.warning(f"[_is_dimension_name_registered] 检查维度失败: {e}")
@@ -2613,18 +2675,23 @@ class ConversationNodes:
         """从 dim_configs 中查找匹配的维度列名"""
         if not dim_configs:
             return dim
+        # dim_configs 可能是 Dict 或 List[Dict]
+        # 如果是 Dict（来自 _get_table_dimensions_cached），key 是 dimension_name
+        # 如果是 List[Dict]（来自 get_dimension_configs），需要先转换
+        if isinstance(dim_configs, list):
+            # List[Dict] 格式：转换为 Dict
+            cfg_dict = {cfg.get("dimension_name", ""): cfg for cfg in dim_configs if cfg.get("dimension_name")}
+        else:
+            # Dict 格式：直接使用
+            cfg_dict = dim_configs
+
         # 精确匹配
-        if dim in dim_configs:
-            return dim_configs[dim].get("column_name", dim)
+        if dim in cfg_dict:
+            return cfg_dict[dim].get("column_name", dim) if isinstance(cfg_dict[dim], dict) else cfg_dict[dim]
         # 别名映射
         aliased_dim = self.BIZ_DIM_ALIASES.get(dim, dim)
-        if aliased_dim in dim_configs:
-            return dim_configs[aliased_dim].get("column_name", aliased_dim)
-        # 模糊匹配
-        candidates = [d for d in dim_configs if dim in d or d in dim]
-        if candidates:
-            matched = max(candidates, key=len)
-            return dim_configs[matched].get("column_name", matched)
+        if aliased_dim in cfg_dict:
+            return cfg_dict[aliased_dim].get("column_name", aliased_dim) if isinstance(cfg_dict[aliased_dim], dict) else cfg_dict[aliased_dim]
         return dim  # 找不到就返回原始维度名
 
     def _apply_dimensions_to_sql(self, sql: str, dimensions: Dict[str, Any], entities: Dict[str, Any], time_info: Dict = None) -> str:
@@ -2640,6 +2707,20 @@ class ConversationNodes:
             return sql
 
         adjusted_sql = sql
+
+        # === 0. 防御性修复：检测并修复 "LIMIT ... GROUP BY" 这种错误顺序 ===
+        # 有时 build_sql_from_intent 会生成 "LIMIT 10 OFFSET 0 GROUP BY GROUP_3" 这种错误顺序
+        # GROUP BY 应该在 LIMIT 之前，需要修复
+        logger.info(f"[_apply_dimensions_to_sql] 入口SQL: {repr(adjusted_sql)[:250]}")
+        limit_group_by_match = re.search(r'(.*?)(\s+LIMIT\s+\d+\s+OFFSET\s+\d+)\s+GROUP\s+BY\s+(.+?)$', adjusted_sql, re.IGNORECASE | re.DOTALL)
+        if limit_group_by_match:
+            logger.info(f"[_apply_dimensions_to_sql] 检测到错误的 LIMIT...GROUP BY 顺序，修复中")
+            sql_before_limit = limit_group_by_match.group(1).rstrip()
+            limit_clause = limit_group_by_match.group(2).strip()
+            group_by_cols = limit_group_by_match.group(3).strip()
+            # 修复：将 GROUP BY 移到 LIMIT 之前
+            adjusted_sql = f"{sql_before_limit} GROUP BY {group_by_cols} {limit_clause}"
+            logger.info(f"[_apply_dimensions_to_sql] 修复后SQL: {adjusted_sql[:200]}")
 
         logger.info(f"[_apply_dimensions_to_sql] time_info={time_info}, SQL原始={repr(sql)[:150]}")
 
@@ -2849,15 +2930,42 @@ class ConversationNodes:
             adjusted_sql = adjusted_sql.replace("{dimension}", column)
             # 如果已有具体的维度值（如 GROUP_3='智能云存储'），不应该再加 GROUP BY
             # 因为 WHERE 条件已经筛选了这个具体值
+            # 注意：__SYNONYM__ 不是具体值，是"识别了维度类型但无具体值"的标记
             specific_dim_keys = ['GROUP_3', 'GROUP_2', 'GROUP_1', 'SKU', 'ASIN']
-            has_specific_dim_value = any(entities.get(k) for k in specific_dim_keys)
+            has_specific_dim_value = any(
+                entities.get(k) and entities.get(k) != '__SYNONYM__'
+                for k in specific_dim_keys
+            )
             time_dimensions = ['日', '月', '年', '天', '周']
             is_time_dim = single_dimension in time_dimensions
-            if single_dimension and "GROUP BY" not in adjusted_sql.upper():
-                if has_specific_dim_value and not is_time_dim:
-                    logger.info(f"[_apply_dimensions_to_sql] 已有具体维度值，跳过 GROUP BY {column}")
-                else:
-                    adjusted_sql = adjusted_sql.rstrip() + f" GROUP BY {column}"
+            if single_dimension:
+                # 先检查是否 GROUP BY 在 LIMIT 之后（错误位置），需要修复
+                limit_before_group_by = re.search(r'\s+LIMIT\s+\d+\s+OFFSET\s+\d+\s+GROUP\s+BY\s+', adjusted_sql, re.IGNORECASE)
+                if limit_before_group_by:
+                    logger.info(f"[_apply_dimensions_to_sql] 检测到 GROUP BY 在 LIMIT 之后（错误），修复")
+                    # 重新排列为 GROUP BY ... LIMIT ...
+                    sql_before_limit = adjusted_sql[:limit_before_group_by.start()].rstrip()
+                    limit_and_offset = limit_before_group_by.group().strip()
+                    group_by_part = adjusted_sql[limit_before_group_by.end():].strip()
+                    adjusted_sql = f"{sql_before_limit} GROUP BY {group_by_part} {limit_and_offset}"
+                    logger.info(f"[_apply_dimensions_to_sql] 修复后SQL: {adjusted_sql[:200]}")
+                elif "GROUP BY" not in adjusted_sql.upper():
+                    logger.info(f"[_apply_dimensions_to_sql] 单维度分支: single_dimension={single_dimension}, column={column}, has_specific_dim_value={has_specific_dim_value}")
+                    if has_specific_dim_value and not is_time_dim:
+                        logger.info(f"[_apply_dimensions_to_sql] 已有具体维度值，跳过 GROUP BY {column}")
+                    else:
+                        # 追加 GROUP BY 时，需要在 LIMIT 之前插入
+                        # 必须匹配完整的 LIMIT...OFFSET 模式，否则插入位置会错误
+                        limit_match = re.search(r'(\s+LIMIT\s+\d+\s+(?:OFFSET\s+\d+)?)', adjusted_sql, re.IGNORECASE)
+                        logger.info(f"[_apply_dimensions_to_sql] LIMIT匹配: limit_match={limit_match.group(1) if limit_match else None}")
+                        if limit_match:
+                            # LIMIT 之前的位置插入 GROUP BY
+                            insert_pos = limit_match.start()
+                            adjusted_sql = adjusted_sql[:insert_pos].rstrip() + f" GROUP BY {column}" + adjusted_sql[insert_pos:]
+                            logger.info(f"[_apply_dimensions_to_sql] 修复后SQL: {adjusted_sql[:200]}")
+                        else:
+                            adjusted_sql = adjusted_sql.rstrip() + f" GROUP BY {column}"
+                            logger.info(f"[_apply_dimensions_to_sql] 无LIMIT，直接追加GROUP BY: {adjusted_sql[:200]}")
         else:
             # 无维度，去掉 GROUP BY 相关
             adjusted_sql = adjusted_sql.replace("{dimension}", "*")
