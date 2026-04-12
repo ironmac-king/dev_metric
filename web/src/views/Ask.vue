@@ -67,6 +67,8 @@
         <div class="sql-mode-toggle">
           <el-switch
             v-model="sqlMode"
+            active-value="llm"
+            inactive-value="template"
             active-text="LLM"
             inactive-text="模板"
             active-color="#13ce66"
