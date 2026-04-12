@@ -323,12 +323,14 @@ class LangGraphEngine(ConversationEngine):
                     "data_filter": data_filter,
                     "sql_mode": sql_mode,  # SQL生成模式: "llm" | "template"
                 }
+                logger.info(f"[LangGraphEngine] Initial state sql_mode={sql_mode}")
             else:
                 # 复用现有状态
                 initial_state = current_state.values
                 initial_state["page"] = page
                 initial_state["page_size"] = page_size
                 initial_state["sql_mode"] = sql_mode  # 更新 SQL 模式
+                logger.info(f"[LangGraphEngine] Updated existing state sql_mode={sql_mode}")
                 # 清除上轮状态
                 initial_state["needs_clarification"] = False
                 initial_state["clarification_message"] = None

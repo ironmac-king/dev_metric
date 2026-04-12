@@ -275,7 +275,7 @@ async def ask_question(req: AskRequest):
     engine_type = req.engine_type or "legacy"
     engine = get_engine(engine_type)
     logger = get_logger("ai.main")
-    logger.info(f"[ask_question] engine_type={engine_type}, question={req.question[:50]}")
+    logger.info(f"[ask_question] engine_type={engine_type}, sql_mode={req.sql_mode}, question={req.question[:50]}")
 
     try:
         # 调用引擎处理
