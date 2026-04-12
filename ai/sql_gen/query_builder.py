@@ -192,16 +192,16 @@ class QueryBuilder:
             "detail": f"渲染SQL: {rendered_sql[:120]}..."
         })
 
-        # Step 2.5: 标准化列名 - 将 SELECT/GROUP BY 中的中文显示名替换为实际列名
-        # 例如: SELECT `站点`, SUM(...) → SELECT `FSITECODE`, SUM(...)
-        for field_info in field_mapping.get("select_fields", []):
-            alias = field_info.get("alias", "")
-            field = field_info.get("field", "")
-            if alias and field and alias != field:
-                # 替换 `别名` 为 `实际列名`（处理可能带反引号的别名）
-                rendered_sql = re.sub(rf"`{re.escape(alias)}`", f"`{field}`", rendered_sql, flags=re.IGNORECASE)
-                rendered_sql = re.sub(rf"(?<![a-zA-Z0-9_]){re.escape(alias)}(?![a-zA-Z0-9_`])", field, rendered_sql)
-                logger.debug(f"[build_sql] 列名标准化: {alias} → {field}")
+        # Step 2.5: 保留中文别名 - 不要把中文别名替换回字段名！
+        # 注意：这段代码原本是把中文别名替换回字段名，但会导致返回结果列名变成英文
+        # 正确的做法是保留 starrocks_sql 中的中文别名，让数据库返回中文列名
+        # for field_info in field_mapping.get("select_fields", []):
+        #     alias = field_info.get("alias", "")
+        #     field = field_info.get("field", "")
+        #     if alias and field and alias != field:
+        #         rendered_sql = re.sub(rf"`{re.escape(alias)}`", f"`{field}`", rendered_sql, flags=re.IGNORECASE)
+        #         rendered_sql = re.sub(rf"(?<![a-zA-Z0-9_]){re.escape(alias)}(?![a-zA-Z0-9_`])", field, rendered_sql)
+        #         logger.debug(f"[build_sql] 列名标准化: {alias} → {field}")
 
         # Step 3: 构建基础 SQL
         logger.info(f"[build_sql] rendered_sql (first 150): {rendered_sql[:150] if rendered_sql else 'None/empty'}")
@@ -368,8 +368,9 @@ class QueryBuilder:
                     continue
 
                 # 匹配 sum(xxx) as alias 或 xxx as alias
-                agg_match = re.match(r'(SUM|AVG|COUNT|MAX|MIN)\s*\(\s*(\w+)\s*\)\s*(?:as\s+`?(\w+)`?)?', field, re.IGNORECASE)
-                alias_match = re.match(r'(\w+)\s+as\s+`?(\w+)`?', field, re.IGNORECASE)
+                # 支持中文别名：\w+ 改为 [\w\u4e00-\u9fa5]+
+                agg_match = re.match(r'(SUM|AVG|COUNT|MAX|MIN)\s*\(\s*(\w+)\s*\)\s*(?:as\s+`?([\w\u4e00-\u9fa5]+)`?)?', field, re.IGNORECASE)
+                alias_match = re.match(r'([\w\u4e00-\u9fa5]+)\s+as\s+`?([\w\u4e00-\u9fa5]+)`?', field, re.IGNORECASE)
 
                 if agg_match:
                     result["select_fields"].append({
@@ -443,6 +444,7 @@ class QueryBuilder:
 
             # 如果有 GROUP BY 维度
             if group_by_dims:
+                logger.info(f"[_build_base_sql] DEBUG: entering group_by_dims block, group_by_dims={group_by_dims}")
                 # 检查 SQL 是否已有 GROUP BY
                 has_group_by = re.search(r'\bGROUP\s+BY\b', sql, re.IGNORECASE)
                 # 查找独立的 FROM 关键字（前面有空格或换行，后面是空格+表名）
@@ -452,19 +454,23 @@ class QueryBuilder:
                     if select_start:
                         # 提取 SELECT 和 FROM 之间的内容
                         select_clause_raw = sql[select_start.end():from_pos.start()]
+                        logger.info(f"[_build_base_sql] DEBUG: select_start.end()={select_start.end()}, from_pos.start()={from_pos.start()}")
                         # 规范化：替换多余空白为单个空格
                         select_clause = re.sub(r'\s+', ' ', select_clause_raw).strip()
                         # 找出缺失的维度列
                         missing_dims = [d for d in group_by_dims if f"`{d}`".upper() not in select_clause.upper() and d.upper() not in select_clause.upper()]
+                        logger.info(f"[_build_base_sql] DEBUG: select_clause='{select_clause}', missing_dims={missing_dims}, has_group_by={bool(has_group_by)}")
                         if missing_dims:
                             # 构建维度列前缀
                             dims_to_add = ", ".join([f"`{d}`" for d in missing_dims]) + ", "
+                            logger.info(f"[_build_base_sql] DEBUG: dims_to_add='{dims_to_add}'")
                             if not has_group_by:
                                 # 没有 GROUP BY，添加 GROUP BY 列到 SELECT 开头
                                 new_select = f"SELECT {dims_to_add}{select_clause_raw.strip()}"
                             else:
                                 # GROUP BY 已存在，需要在聚合函数前插入维度列
                                 agg_match = re.search(r'\b(SUM|COUNT|AVG|MAX|MIN)\s*\(', select_clause, re.IGNORECASE)
+                                logger.info(f"[_build_base_sql] DEBUG: agg_match={agg_match.group() if agg_match else None}")
                                 if agg_match:
                                     agg_pos_in_raw = select_clause_raw.find(agg_match.group())
                                     if agg_pos_in_raw == -1:

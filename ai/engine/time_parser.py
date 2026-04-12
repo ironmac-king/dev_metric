@@ -476,12 +476,17 @@ class TimeParser:
         elif time_key == "this_week":
             from datetime import timedelta
             today = datetime.now()
+            yesterday = today - timedelta(days=1)
             start = today - timedelta(days=today.weekday())
-            return (start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
+            return (start.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"))
         elif time_key == "this_month":
-            from calendar import monthrange
+            from datetime import timedelta
+            yesterday = datetime.now() - timedelta(days=1)
             _, last_day = monthrange(year, month)
-            return (f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day}")
+            month_end = datetime(year, month, last_day)
+            # T+1 数据逻辑：结束日期不能超过昨天
+            end_date = min(month_end, yesterday)
+            return (f"{year}-{month:02d}-01", end_date.strftime("%Y-%m-%d"))
         elif time_key == "last_week":
             from datetime import timedelta
             today = datetime.now()
@@ -496,8 +501,10 @@ class TimeParser:
         elif time_key == "last_year":
             return (f"{year-1}-01-01", f"{year-1}-12-31")
         elif time_key == "this_year":
+            from datetime import timedelta
             today = datetime.now()
-            return (f"{today.year}-01-01", today.strftime("%Y-%m-%d"))
+            yesterday = today - timedelta(days=1)
+            return (f"{today.year}-01-01", yesterday.strftime("%Y-%m-%d"))
 
         return (None, None)
 

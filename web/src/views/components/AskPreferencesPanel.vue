@@ -165,7 +165,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'preferences-changed'])
 
 const visible = ref(false)
 
@@ -224,6 +224,8 @@ async function updatePref(key, value) {
 
   try {
     await askAPI.updatePreferences({ [key]: value })
+    // 通知父组件偏好设置已更改
+    emit('preferences-changed', { key, value })
   } catch (e) {
     // 回滚
     preferences.value[key] = oldValue

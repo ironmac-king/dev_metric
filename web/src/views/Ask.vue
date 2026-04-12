@@ -63,6 +63,17 @@
             </div>
           </div>
         </div>
+        <!-- SQL 模式切换 -->
+        <div class="sql-mode-toggle">
+          <el-switch
+            v-model="sqlMode"
+            active-text="LLM"
+            inactive-text="模板"
+            active-color="#13ce66"
+            inactive-color="#409eff"
+            @change="onSqlModeChange"
+          />
+        </div>
         <div class="header-actions">
           <button v-if="sidebarCollapsed" class="action-btn cursor-pointer" @click="sidebarCollapsed = false" title="显示会话历史">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -192,6 +203,9 @@ const chatMessageRef = ref<InstanceType<typeof ChatMessage> | null>(null)
 const showPreferencesPanel = ref(false)
 const selectedCandidateIdx = ref(null)
 const selectedDimValueIdx = ref(null)
+
+// SQL 模式切换 (A/B 测试)
+const sqlMode = ref(localStorage.getItem('sql_mode') || 'llm')
 
 // 偏好设置状态
 const preferences = ref({
@@ -453,7 +467,8 @@ async function handleSend() {
     const res = await askAPI.ask({
       question: questionText,
       session_id: sessionId.value || undefined,
-      engine_type: engineType.value
+      engine_type: engineType.value,
+      sql_mode: sqlMode.value
     })
 
     if (res) {
@@ -541,7 +556,8 @@ async function resendMessage() {
     const res = await askAPI.ask({
       question: newContent,
       session_id: sessionId.value || undefined,
-      engine_type: engineType.value
+      engine_type: engineType.value,
+      sql_mode: sqlMode.value
     })
 
     if (res) {
@@ -652,6 +668,12 @@ function setEngineType(type) {
   engineType.value = type
   localStorage.setItem('engine_type', type)
   ElMessage.success(`已切换到 ${type === 'langgraph' ? 'LangGraph' : 'LLM'} 引擎`)
+}
+
+// SQL 模式切换
+function onSqlModeChange(mode) {
+  localStorage.setItem('sql_mode', mode)
+  ElMessage.success(`已切换到 ${mode === 'llm' ? 'LLM 生成' : 'SQL 模板'} 模式`)
 }
 
 // 下拉菜单
@@ -823,7 +845,8 @@ async function handlePageChange(page, msg) {
       session_id: sessionId.value,
       page: page,
       page_size: msg.page_size || 10,
-      engine_type: engineType.value
+      engine_type: engineType.value,
+      sql_mode: sqlMode.value
     })
 
     if (res) {
@@ -1142,6 +1165,21 @@ function closeSuggestions() {
   justify-content: center;
   color: var(--text-secondary);
   transition: all 0.15s;
+}
+
+.sql-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: var(--bg-primary);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.sql-mode-toggle :deep(.el-switch) {
+  --el-switch-off-color: #409eff;
 }
 
 .header-actions {

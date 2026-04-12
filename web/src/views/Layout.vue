@@ -138,13 +138,6 @@
             </svg>
             <span>维度配置</span>
           </router-link>
-          <router-link to="/prompt-config" class="nav-item" :class="{ active: $route.path === '/prompt-config' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M3 3h12v12H3V3z" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M6 7h6M6 10h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-            <span>Prompt配置</span>
-          </router-link>
           <router-link to="/user-management" class="nav-item" :class="{ active: $route.path === '/user-management' }">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
               <circle cx="9" cy="6" r="3" stroke="currentColor" stroke-width="1.5"/>

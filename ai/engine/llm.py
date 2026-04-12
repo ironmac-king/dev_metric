@@ -186,48 +186,8 @@ class LLMEngine:
             if metric:
                 inherited_context = f"\n（上下文：用户正在查询指标「{metric}」，可继承此指标）"
 
-        # 系统提示
-        system_prompt = """你是一个专业的业务指标查询助手，擅长从用户的自然语言中准确提取结构化信息。
-
-【指标知识】
-- 常见指标：销售额、订单量、访客数、广告转化率、页面访问量、加购率、客单价
-- 指标编号格式：MKI-02-0001（格式：MKI-领域-序号）
-- 指标域：营销域、服务域、用户域
-- 维度类型：日、月、年（时间维度）、品类、品牌、渠道、地区、平台（业务维度）
-
-【意图类型】
-- query_value: 查询指标数值（如"销售额是多少"、"近30天访客数"）
-- query_trend: 查询指标趋势（如"销售额趋势"、"走势怎么样"）
-- query_comparison: 对比分析（如"环比"、"同比"、"对比"）
-- query_metadata: 查询元数据（如"业务口径"、"技术口径"、"定义"）
-- query_ranking: 排名分析（如"最高的品类"、"前10名品牌"）
-- query_ratio: 占比分析（如"占比"、"比例"）
-- greeting: 打招呼
-- thanks: 感谢
-- bye: 告别
-
-【重要】
-- 如果用户提到"各平台"、"各地区"、"各品类"等多维度分组需求，在 dimension 字段填入对应的维度类型
-- 如果用户提到"第一名"、"前10"、"最高的"等排名需求，设置 top_n 参数
-- 时间表达优先使用标准描述如"近30天"、"本月"、"上周"
-
-【区分维度类型和维度值】
-- 维度类型是分类名，如"品类"、"平台"、"渠道"，出现在 dimension 字段
-- 维度值是具体名称，如"智能云存储"、"天猫"、"京东"，出现在 dimension_values 字段
-
-【Few-shot 示例】
-用户问题：「今年智能云存储销售额是多少」
-返回：{"intent": "query_value", "metric_name": "销售额", "time_range": "今年", "dimension": "品类", "dimension_values": "智能云存储"}
-
-用户问题：「天猫平台的订单量」
-返回：{"intent": "query_value", "metric_name": "订单量", "dimension": "平台", "dimension_values": "天猫"}
-
-用户问题：「各品类销售额是多少」
-返回：{"intent": "query_value", "metric_name": "销售额", "dimension": "品类", "dimension_values": null}
-
-用户问题：「今年京东渠道的转化率」
-返回：{"intent": "query_value", "metric_name": "转化率", "time_range": "今年", "dimension": "渠道", "dimension_values": "京东"}
-"""
+        # 系统提示 - 从 PromptManager 加载（DB 配置优先，有 fallback）
+        system_prompt = get_prompt_manager().get_nl2structure_prompt()
 
         try:
             # 使用纯文本 Prompt + JSON 解析（腾讯云 DeepSeek 不支持 Function Calling）
@@ -311,26 +271,20 @@ class LLMEngine:
 
         time_hint = f"上轮时间是「{inherited_time}」" if inherited_time else "上轮时间是「上月」"
 
-        prompt = f"""你是一个业务指标查询助手。用户在进行多轮对话。
+        # 从 PromptManager 获取 prompt
+        base_prompt = get_prompt_manager().get_prompt(
+            "followup_expansion",
+            default=_DEFAULT_FOLLOWUP_EXPANSION_PROMPT
+        )
 
-当前轮用户说：「{text}」
-上轮查询的指标是：「{inherited_metric}」
-{time_hint}
-
-请将用户的短文本追问补齐为完整的问题描述。
-
-规则：
-1. 直接返回补齐后的问题，不要解释
-2. 保持原有的对比类型（环比/同比）
-3. 时间必须继承上轮的时间，不能自己推断新时间
-4. 补齐后的问题应该像用户直接说出来的一样自然
-
-示例：
-- 上轮"上月销量同比是多少"，本轮"环比呢" → "上月销量环比是多少"
-- 上轮"本月广告花费"，本轮"同比呢" → "本月广告花费同比是多少"
-- 上轮"上周转化率"，本轮"趋势呢" → "上周转化率趋势是什么"
-
-直接返回补齐后的问题："""
+        # 替换变量
+        prompt = base_prompt.format(
+            text=text,
+            inherited_metric=inherited_metric,
+            inherited_time=inherited_time,
+            comparison_type=comparison_type,
+            time_hint=time_hint
+        )
 
         try:
             response = self.client.chat.completions.create(
@@ -413,56 +367,22 @@ class LLMEngine:
                 correlated_str = ", ".join([f"「{m['name']}」" for m in correlated[:5]])
                 graph_context += f"\n相关指标：{correlated_str}"
 
-        prompt = f"""你是一个业务指标查询助手。规则引擎对用户问题进行了初步分析，请审核并纠正。
+        # 从 PromptManager 获取 prompt
+        base_prompt = get_prompt_manager().get_prompt(
+            "intent_validation",
+            default=_DEFAULT_VALIDATION_PROMPT
+        )
 
-## 用户问题
-「{text}」{inherited}
-
-## 规则引擎初步结果
-- 识别意图: {rule_intent}
-- 识别指标: {rule_entities.get('metric_name', '无')}
-- 时间范围: {rule_entities.get('time_range', '无')}
-
-## 可用的指标库（{len(metrics_lines)} 个指标）
-{metrics_str if metrics_str else '无'}
-
-## 指标知识图谱上下文
-{graph_context if graph_context else '（暂无图谱数据）'}
-
-## 你的任务
-1. 判断规则引擎的结果是否正确
-2. 如果正确，保持原结果
-3. 如果错误或不完整，纠正它
-4. **重要**：如果用户问的是指标，必须从上面的指标库中选择，不要瞎编指标名
-5. 从指标库选择时，注意中英文名称的对应（如"访客数"和"visitors"是同一个指标）
-6. **关键**：如果用户问题中包含泛指词如"各平台"、"各地区"、"各维度"等，说明用户想要多维度分组查询。但指标库中一般没有"各平台X指标"这种指标，只有具体平台的具体指标。此时应该：
-   - 识别用户实际想查询的基础指标（如"销售额"）
-   - 在entities中设置dimension字段为用户提到的维度
-   - 保持is_valid=True，让后续流程处理维度追问
-
-## 意图类型说明
-- query_value: 查询指标数值
-- query_trend: 查询指标趋势（上升/下降）
-- query_comparison: 对比分析（对比两个时间/维度）
-- query_metadata: 查询指标元数据（业务口径、技术口径、定义等）
-- greeting: 打招呼
-- thanks: 感谢
-- bye: 告别
-
-## 输出格式（必须是合法 JSON）
-{{
-  "is_valid": true/false,  // 规则引擎结果是否正确
-  "intent": "最终确认的意图",
-  "confidence": 0.0-1.0,  // 置信度
-  "metric_name": "指标名称（必须从指标库中选择）",
-  "metric_code": "指标编号",
-  "time_range": "时间范围",
-  "dimension": "维度（如平台、地区等，如果用户提到的话）",
-  "correction_reason": "纠正原因（如果纠正了的话）",
-  "entities": {{}}
-}}
-
-请输出JSON："""
+        # 替换变量
+        prompt = base_prompt.format(
+            text=text,
+            inherited=inherited,
+            rule_intent=rule_intent,
+            rule_entities=rule_entities,
+            metrics_str=metrics_str or '无',
+            graph_context=graph_context or '（暂无图谱数据）',
+            len_metrics_lines=len(metrics_lines)
+        )
 
         try:
             response = self.client.chat.completions.create(
@@ -596,18 +516,17 @@ class LLMEngine:
         if "metric_name" in entities:
             metric_info += f", 指标名称: {entities['metric_name']}"
 
-        prompt = f"""你是一个 SQL 生成助手。根据用户问题生成 StarRocks SQL。
+        # 从 PromptManager 获取 prompt
+        base_prompt = get_prompt_manager().get_prompt(
+            "sql_generation_fallback",
+            default=_DEFAULT_SQL_GENERATION_PROMPT
+        )
 
-用户问题：{question}
-{metric_info}
-
-要求：
-1. 只生成 SELECT 查询语句
-2. 使用 StarRocks SQL 语法
-3. 不要包含 DROP、DELETE、UPDATE、INSERT 等危险操作
-4. 假设有一个表叫 metric_data，包含 metric_id, date, value, dept_id 等字段
-
-直接返回 SQL，不要解释。"""
+        # 替换变量
+        prompt = base_prompt.format(
+            question=question,
+            metric_info=metric_info
+        )
 
         try:
             response = self.client.chat.completions.create(
@@ -687,31 +606,20 @@ class LLMEngine:
                 metric_names.append(m.get("metric_name", "") or m.get("metric_code", "") or "")
         metrics_str = ", ".join([n for n in metric_names if n])
 
-        prompt = f"""用户查询数据为空，请分析可能原因并生成智能追问。
+        # 从 PromptManager 获取 prompt
+        base_prompt = get_prompt_manager().get_prompt(
+            "empty_result_followup",
+            default=_DEFAULT_EMPTY_RESULT_FOLLOWUP_PROMPT
+        )
 
-## 用户问题
-{question}
-
-## 识别的指标
-{metric_name or "未知"}
-
-## 时间范围
-{time_range or "未指定"}
-
-## 执行的 SQL
-{sql}
-
-## 系统中的可用指标（部分）
-{metrics_str}
-
-请分析并返回 JSON 格式的建议，包含以下字段：
-- analysis: 分析数据为空的可能原因（1-2句话）
-- suggestions: 建议用户采取的行动数组，每个建议包含:
-  - type: "time_range" | "metric_alternative" | "check_definition" | "retry"
-  - text: 具体的建议问题（用户可以直接问的自然语言）
-  - reason: 为什么要这样建议
-
-请返回 JSON，不要包含其他内容。"""
+        # 替换变量
+        prompt = base_prompt.format(
+            question=question,
+            metric_name=metric_name or "未知",
+            time_range=time_range or "未指定",
+            sql=sql,
+            metrics_str=metrics_str
+        )
 
         try:
             response = self.client.chat.completions.create(
@@ -788,30 +696,19 @@ class LLMEngine:
 
         metrics_str = ", ".join(available_metrics[:50]) if available_metrics else "无"
 
-        prompt = f"""你是一个业务指标匹配助手。用户输入了很短的内容，请判断他最可能想查询哪个指标。
+        # 从 PromptManager 获取 prompt
+        base_prompt = get_prompt_manager().get_prompt(
+            "metric_extraction",
+            default=_DEFAULT_METRIC_EXTRACTION_PROMPT
+        )
 
-## 用户输入
-"{text}"
-
-## 可用指标列表（部分）
-{metrics_str}
-{"...(还有更多指标)" if len(available_metrics) > 50 else ""}
-
-## 任务
-1. 分析用户输入，判断最可能匹配的指标
-2. 如果能匹配到，返回匹配的指标名和置信度
-3. 如果完全无法匹配，返回空
-
-## 匹配规则
-- "sku"、"SKU" → 可能匹配包含"SKU"的指标如"缺货SKU数"
-- "访客"、"visitors" → 可能匹配"访客数"
-- "订单"、"orders" → 可能匹配"订单量"、"订单数"
-- 完全无法匹配任何指标 → 返回空
-
-## 输出格式（必须是合法 JSON）
-{{"matched": true/false, "metric_name": "可能的指标名", "confidence": 0.0-1.0, "reason": "匹配原因"}}
-
-请输出JSON："""
+        # 替换变量
+        extra_note = "...(还有更多指标)" if len(available_metrics) > 50 else ""
+        prompt = base_prompt.format(
+            text=text,
+            metrics_str=metrics_str,
+            extra_note=extra_note
+        )
 
         try:
             response = self.client.chat.completions.create(
@@ -881,59 +778,25 @@ class LLMEngine:
         dimension = state.entities.get("dimension", "未指定")
         asked_fields = state.asked_fields
 
-        prompt = f"""你是一个 BI 查询助手 的对话策略专家。请严格按以下规则输出 JSON。
+        # 构建缺失字段字符串
+        missing_fields_str = ', '.join(missing_fields) if missing_fields else '无'
+        asked_fields_str = ', '.join(asked_fields) if asked_fields else '无'
 
-## 追问类型枚举（必须使用以下之一）
-- metric_missing: 指标缺失（用户没说具体指标）
-- time_range_missing: 时间范围缺失（没说昨天/本周/本月等）
-- dimension_missing: 维度缺失（没说按地区/部门/产品分组）
-- filter_condition_missing: 过滤条件缺失（没说只看某类订单/某个产品）
-- action_intent_ambiguous: 操作意图模糊（不确定要查、改、还是导出）
-- term_ambiguous: 术语歧义（同一个词有多个含义）
-- scope_too_broad: 范围太宽（问题太泛化）
-- high_risk_operation: 高风险操作（涉及删除、覆盖等）
-- permission_required: 权限不足
-- costly_query_warning: 高成本查询预警
-- default_value_confirmation: 默认值确认（系统假设了默认值需用户确认）
-- implicit_need_discovery: 隐含需求挖掘（用户可能需要但没说）
+        # 从 PromptManager 获取 prompt
+        base_prompt = get_prompt_manager().get_prompt(
+            "clarification_decision",
+            default=_DEFAULT_CLARIFICATION_PROMPT
+        )
 
-## 规则
-1. 如果用户意图明确且所有必要信息已提供，返回 needs_clarification: false。
-2. 如果缺少关键信息，返回 needs_clarification: true，并提出一个**具体、简洁、一次只问一个问题**的追问。
-3. 追问时必须指定 clarification_type（使用上述枚举之一）。
-4. 优先追问最重要的缺失字段。
-
-## 当前状态
-- 已识别指标: {metric_name}
-- 已识别时间范围: {time_range}
-- 已识别维度: {dimension}
-- 缺少信息: {', '.join(missing_fields) if missing_fields else '无'}
-- 已追问过的字段: {', '.join(asked_fields) if asked_fields else '无'}
-
-## 对话历史
-{history_summary}
-
-## 已知默认值
-- time_range 默认值: last_7_days（最近7天）
-- dimension 默认值: all（不分维度）
-
-## 输出格式（必须是合法 JSON，无其他内容）
-{{"needs_clarification": true/false, "clarification_type": "追问类型枚举", "question": "追问内容（如果需要）", "reason": "原因", "missing_fields": [], "suggested_defaults": {{"字段名": "默认值"}}}}
-
-## 示例
-示例1 - 用户只说"销售额"：
-输入: missing_fields=["time_range"], metric_name="销售额"
-输出: {{"needs_clarification": true, "clarification_type": "time_range_missing", "question": "请问您想查询哪个时间段的销售额？昨天、本周还是本月？", "reason": "缺少时间范围", "missing_fields": ["time_range"], "suggested_defaults": {{"time_range": "last_7_days"}}}}
-
-示例2 - 用户说"昨天访客数"：
-输入: missing_fields=[], metric_name="访客数"
-输出: {{"needs_clarification": false, "reason": "信息完整，无需追问", "missing_fields": []}}
-
-示例3 - 用户说"销售数据"，无指标无时间：
-输入: missing_fields=["metric_name", "time_range"], metric_name="未知"
-输出: {{"needs_clarification": true, "clarification_type": "metric_missing", "question": "请问您想查询哪个业务指标？例如销售额、访客数或订单量？", "reason": "缺少指标名称", "missing_fields": ["metric_name"], "suggested_defaults": {{"time_range": "last_7_days"}}}}
-
-请输出JSON："""
+        # 替换变量
+        prompt = base_prompt.format(
+            metric_name=metric_name,
+            time_range=time_range,
+            dimension=dimension,
+            missing_fields_str=missing_fields_str,
+            asked_fields_str=asked_fields_str,
+            history_summary=history_summary
+        )
 
         try:
             response = self.client.chat.completions.create(
@@ -1331,36 +1194,180 @@ class CircuitBreaker:
             self.state = "open"
 
 
-class CircuitBreaker:
-    """熔断器"""
+# ==================== 默认 Prompt 常量（Fallback） ====================
 
-    def __init__(self, failure_threshold: int = 3, recovery_timeout: int = 30):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.failures = 0
-        self.last_failure_time = None
-        self.state = "closed"  # closed, open, half_open
+_DEFAULT_VALIDATION_PROMPT = """你是一个业务指标查询助手。规则引擎对用户问题进行了初步分析，请审核并纠正。
 
-    def call(self, func, *args, **kwargs):
-        """带熔断的调用"""
-        if self.state == "open":
-            raise Exception("LLM 服务暂时不可用，请稍后再试")
+## 用户问题
+「{text}」{inherited}
 
-        try:
-            result = func(*args, **kwargs)
-            self.on_success()
-            return result
-        except Exception as e:
-            self.on_failure()
-            raise e
+## 规则引擎初步结果
+- 识别意图: {rule_intent}
+- 识别指标: {rule_entities.get('metric_name', '无')}
+- 时间范围: {rule_entities.get('time_range', '无')}
 
-    def on_success(self):
-        """成功回调"""
-        self.failures = 0
-        self.state = "closed"
+## 可用的指标库
+{metrics_str}
 
-    def on_failure(self):
-        """失败回调"""
-        self.failures += 1
-        if self.failures >= self.failure_threshold:
-            self.state = "open"
+## 指标知识图谱上下文
+{graph_context}
+
+## 你的任务
+1. 判断规则引擎的结果是否正确
+2. 如果正确，保持原结果
+3. 如果错误或不完整，纠正它
+4. **重要**：如果用户问的是指标，必须从上面的指标库中选择，不要瞎编指标名
+5. 从指标库选择时，注意中英文名称的对应（如"访客数"和"visitors"是同一个指标）
+6. **关键**：如果用户问题中包含泛指词如"各平台"、"各地区"、"各维度"等，说明用户想要多维度分组查询。但指标库中一般没有"各平台X指标"这种指标，只有具体平台的具体指标。此时应该：
+   - 识别用户实际想查询的基础指标（如"销售额"）
+   - 在entities中设置dimension字段为用户提到的维度
+   - 保持is_valid=True，让后续流程处理维度追问
+
+## 意图类型说明
+- query_value: 查询指标数值
+- query_trend: 查询指标趋势（上升/下降）
+- query_comparison: 对比分析（对比两个时间/维度）
+- query_metadata: 查询指标元数据（业务口径、技术口径、定义等）
+- greeting: 打招呼
+- thanks: 感谢
+- bye: 告别
+
+## 输出格式（必须是合法 JSON）
+{{
+  "is_valid": true/false,
+  "intent": "最终确认的意图",
+  "confidence": 0.0-1.0,
+  "metric_name": "指标名称",
+  "metric_code": "指标编号",
+  "time_range": "时间范围",
+  "dimension": "维度",
+  "correction_reason": "纠正原因",
+  "entities": {{}}
+}}
+
+请输出JSON："""
+
+_DEFAULT_CLARIFICATION_PROMPT = """你是一个 BI 查询助手 的对话策略专家。请严格按以下规则输出 JSON。
+
+## 追问类型枚举（必须使用以下之一）
+- metric_missing: 指标缺失
+- time_range_missing: 时间范围缺失
+- dimension_missing: 维度缺失
+- filter_condition_missing: 过滤条件缺失
+- action_intent_ambiguous: 操作意图模糊
+- term_ambiguous: 术语歧义
+- scope_too_broad: 范围太宽
+- high_risk_operation: 高风险操作
+- permission_required: 权限不足
+- costly_query_warning: 高成本查询预警
+- default_value_confirmation: 默认值确认
+- implicit_need_discovery: 隐含需求挖掘
+
+## 规则
+1. 如果用户意图明确且所有必要信息已提供，返回 needs_clarification: false。
+2. 如果缺少关键信息，返回 needs_clarification: true，并提出一个具体、简洁、一次只问一个问题的追问。
+3. 追问时必须指定 clarification_type（使用上述枚举之一）。
+4. 优先追问最重要的缺失字段。
+
+## 当前状态
+- 已识别指标: {metric_name}
+- 已识别时间范围: {time_range}
+- 已识别维度: {dimension}
+- 缺少信息: {missing_fields_str}
+- 已追问过的字段: {asked_fields_str}
+
+## 对话历史
+{history_summary}
+
+## 已知默认值
+- time_range 默认值: last_7_days（最近7天）
+- dimension 默认值: all（不分维度）
+
+## 输出格式（必须是合法 JSON，无其他内容）
+{{"needs_clarification": true/false, "clarification_type": "追问类型枚举", "question": "追问内容", "reason": "原因", "missing_fields": [], "suggested_defaults": {{"字段名": "默认值"}}}}
+
+请输出JSON："""
+
+_DEFAULT_FOLLOWUP_EXPANSION_PROMPT = """你是一个业务指标查询助手。用户在进行多轮对话。
+
+当前轮用户说：「{text}」
+上轮查询的指标是：「{inherited_metric}」
+{time_hint}
+
+请将用户的短文本追问补齐为完整的问题描述。
+
+规则：
+1. 直接返回补齐后的问题，不要解释
+2. 保持原有的对比类型（环比/同比）
+3. 时间必须继承上轮的时间，不能自己推断新时间
+4. 补齐后的问题应该像用户直接说出来的一样自然
+
+示例：
+- 上轮"上月销量同比是多少"，本轮"环比呢" → "上月销量环比是多少"
+- 上轮"本月广告花费"，本轮"同比呢" → "本月广告花费同比是多少"
+- 上轮"上周转化率"，本轮"趋势呢" → "上周转化率趋势是什么"
+
+直接返回补齐后的问题："""
+
+_DEFAULT_METRIC_EXTRACTION_PROMPT = """你是一个业务指标匹配助手。用户输入了很短的内容，请判断他最可能想查询哪个指标。
+
+## 用户输入
+"{text}"
+
+## 可用指标列表（部分）
+{metrics_str}
+
+## 任务
+1. 分析用户输入，判断最可能匹配的指标
+2. 如果能匹配到，返回匹配的指标名和置信度
+3. 如果完全无法匹配，返回空
+
+## 匹配规则
+- "sku"、"SKU" → 可能匹配包含"SKU"的指标如"缺货SKU数"
+- "访客"、"visitors" → 可能匹配"访客数"
+- "订单"、"orders" → 可能匹配"订单量"、"订单数"
+- 完全无法匹配任何指标 → 返回空
+
+## 输出格式（必须是合法 JSON）
+{{"matched": true/false, "metric_name": "可能的指标名", "confidence": 0.0-1.0, "reason": "匹配原因"}}
+
+请输出JSON："""
+
+_DEFAULT_EMPTY_RESULT_FOLLOWUP_PROMPT = """用户查询数据为空，请分析可能原因并生成智能追问。
+
+## 用户问题
+{question}
+
+## 识别的指标
+{metric_name}
+
+## 时间范围
+{time_range}
+
+## 执行的 SQL
+{sql}
+
+## 系统中的可用指标（部分）
+{metrics_str}
+
+请分析并返回 JSON 格式的建议，包含以下字段：
+- analysis: 分析数据为空的可能原因（1-2句话）
+- suggestions: 建议用户采取的行动数组，每个建议包含:
+  - type: "time_range" | "metric_alternative" | "check_definition" | "retry"
+  - text: 具体的建议问题（用户可以直接问的自然语言）
+  - reason: 为什么要这样建议
+
+请返回 JSON，不要包含其他内容。"""
+
+_DEFAULT_SQL_GENERATION_PROMPT = """你是一个 SQL 生成助手。根据用户问题生成 StarRocks SQL。
+
+用户问题：{question}
+{metric_info}
+
+要求：
+1. 只生成 SELECT 查询语句
+2. 使用 StarRocks SQL 语法
+3. 不要包含 DROP、DELETE、UPDATE、INSERT 等危险操作
+4. 假设有一个表叫 metric_data，包含 metric_id, date, value, dept_id 等字段
+
+直接返回 SQL，不要解释。"""

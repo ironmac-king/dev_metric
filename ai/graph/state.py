@@ -78,6 +78,8 @@ class ConversationState(BaseModel):
     matched_formula_syntax: Optional[Dict[str, Any]] = None  # 匹配到的公式语法配置
     # ========== QueryState 相关 ==========
     _query_state: Optional[Dict[str, Any]] = None  # LLM 生成的 QueryState JSON
+    # ========== SQL 生成模式 (A/B Test) ==========
+    sql_mode: str = "llm"  # SQL生成模式: "llm" | "template"
     # ========== response_node 结果缓存（避免重复执行）==========
     result_data: Any = None  # 缓存查询结果
     answer: Optional[str] = None  # 缓存生成的回答
@@ -100,6 +102,7 @@ class ConversationContext(BaseModel):
     current_metric_name: Optional[str] = None
     current_time_expr: Optional[str] = None
     current_dimensions: Dict[str, str] = {}
+    current_metrics: list = []  # 多指标列表，用于多指标查询的上下文继承
     time_inherited: bool = False
     dimensions_inherited: bool = False
 
@@ -109,6 +112,7 @@ class ConversationContext(BaseModel):
             "current_metric_name": self.current_metric_name,
             "current_time_expr": self.current_time_expr,
             "current_dimensions": self.current_dimensions,
+            "current_metrics": self.current_metrics,
             "time_inherited": self.time_inherited,
             "dimensions_inherited": self.dimensions_inherited,
         }

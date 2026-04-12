@@ -198,11 +198,7 @@ class RuleEngine:
             self._init_builtin_templates()
 
     def _load_nlp_templates(self):
-        """从 Go API 加载 NLP 模板"""
-        # 先初始化内置的基础意图模式
-        self._init_builtin_patterns()
-        self._init_builtin_sql_templates()
-
+        """从 Go API 加载 NLP 模板（配置驱动：DB 优先，builtin 作为 fallback）"""
         try:
             response = httpx.get(f"{self.api_base}/api/v1/nlp/templates", timeout=10)
             if response.status_code == 200:
@@ -210,32 +206,51 @@ class RuleEngine:
                 if data.get("code") == 0:
                     nlp_data = data.get("data", {})
 
-                    # 加载意图模板（追加而不是覆盖）
+                    # 加载意图模板
                     intent_templates = nlp_data.get("intent_templates", [])
-                    for tpl in intent_templates:
-                        patterns = tpl.get("patterns", "")
-                        for p in patterns.split(","):
-                            p = p.strip()
-                            if p:
-                                self.intent_patterns.append({
-                                    "pattern": p,
-                                    "intent": tpl.get("intent"),
-                                    "priority": tpl.get("priority", 0),
-                                })
-                    # 按优先级排序
-                    self.intent_patterns.sort(key=lambda x: x["priority"], reverse=True)
+                    if intent_templates:
+                        # DB 有配置，清空 builtin，使用 DB 配置
+                        self.intent_patterns = []
+                        for tpl in intent_templates:
+                            patterns = tpl.get("patterns", "")
+                            for p in patterns.split(","):
+                                p = p.strip()
+                                if p:
+                                    self.intent_patterns.append({
+                                        "pattern": p,
+                                        "intent": tpl.get("intent"),
+                                        "priority": tpl.get("priority", 0),
+                                    })
+                        # 按优先级排序
+                        self.intent_patterns.sort(key=lambda x: x["priority"], reverse=True)
+                        logger.info(f"[RuleEngine] 已从 DB 加载 {len(self.intent_patterns)} 个意图模式")
+                    else:
+                        # DB 没有配置，使用 builtin
+                        logger.info("[RuleEngine] DB 无意图模板，使用 builtin 模式")
+                        self._init_builtin_patterns()
 
-                    # 加载 SQL 模板
+                    # 加载 SQL 模板（仅 legacy 类型）
                     sql_tpls = nlp_data.get("sql_templates", [])
-                    for tpl in sql_tpls:
-                        key = f"{tpl.get('metric_code')}_{tpl.get('intent')}"
-                        self.sql_templates[key] = tpl.get("sql_template", "")
+                    if sql_tpls:
+                        self.sql_templates = {}
+                        for tpl in sql_tpls:
+                            # 只加载 legacy 类型模板，忽略 engine 类型
+                            template_type = tpl.get("template_type", "legacy")
+                            if template_type != "legacy":
+                                continue
+                            key = f"{tpl.get('metric_code')}_{tpl.get('intent')}"
+                            self.sql_templates[key] = tpl.get("sql_template", "")
+                        logger.info(f"[RuleEngine] 已从 DB 加载 {len(self.sql_templates)} 个 SQL 模板（legacy）")
+                    else:
+                        self._init_builtin_sql_templates()
 
-                    logger.info(f"已加载 {len(self.intent_patterns)} 个意图模式, {len(self.sql_templates)} 个 SQL 模板")
+                    return
         except Exception as e:
-            logger.warning(f"加载 NLP 模板失败: {e}, 将使用内置模式")
-            self._init_builtin_patterns()
-            self._init_builtin_sql_templates()
+            logger.warning(f"[RuleEngine] 加载 NLP 模板失败: {e}, 使用内置模式")
+
+        # Fallback: 使用内置模式
+        self._init_builtin_patterns()
+        self._init_builtin_sql_templates()
 
     def _init_builtin_templates(self):
         """内置指标模板"""

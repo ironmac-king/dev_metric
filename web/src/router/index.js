@@ -75,11 +75,6 @@ const routes = [
         component: () => import('../views/DimensionConfig.vue')
       },
       {
-        path: 'prompt-config',
-        name: 'PromptConfig',
-        component: () => import('../views/PromptConfig.vue')
-      },
-      {
         path: 'user-management',
         name: 'UserManagement',
         component: () => import('../views/UserManagement.vue')

@@ -722,6 +722,9 @@ onMounted(() => {
   font-size: 12px;
   color: #64748b;
   margin-left: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 600px;
 }
 
 /* Pagination */

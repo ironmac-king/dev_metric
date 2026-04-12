@@ -1,31 +1,79 @@
 """
-Prompt 配置管理器 - 从数据库加载 Prompt 配置
+Prompt 配置管理器 - 从数据库加载 Prompt 配置，支持 Redis 多级缓存
 """
 import httpx
+import redis
+import json
 from typing import Dict, Any, Optional
 from ai.config.logging_config import get_logger
 
 logger = get_logger("ai.prompt_manager")
 
+# Redis 配置
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+REDIS_DB = 0
+REDIS_KEY_PREFIX = "prompt:"
+REDIS_TTL = 300  # 5分钟
+
 
 class PromptManager:
-    """Prompt 配置管理器"""
+    """Prompt 配置管理器 - 支持 Redis + DB + 代码常量 三级缓存"""
+
+    _redis_client: Optional[redis.Redis] = None
 
     def __init__(self, base_url: str = "http://localhost:8080"):
         self.base_url = base_url
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_version: Dict[str, int] = {}
+        self._init_redis()
 
-    def get_prompt_config(self, name: str) -> Optional[Dict[str, Any]]:
-        """
-        获取指定名称的 Prompt 配置
+    def _init_redis(self):
+        """初始化 Redis 客户端"""
+        try:
+            PromptManager._redis_client = redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                db=REDIS_DB,
+                decode_responses=True,
+                socket_connect_timeout=2
+            )
+            # 测试连接
+            PromptManager._redis_client.ping()
+            logger.info(f"[PromptManager] Redis 连接成功: {REDIS_HOST}:{REDIS_PORT}")
+        except Exception as e:
+            logger.warning(f"[PromptManager] Redis 连接失败: {e}，将使用 DB + 内存缓存")
+            PromptManager._redis_client = None
 
-        Args:
-            name: Prompt 配置名称，如 "nl2structure"
+    def _get_from_redis(self, name: str) -> Optional[Dict[str, Any]]:
+        """从 Redis 获取配置"""
+        if not PromptManager._redis_client:
+            return None
+        try:
+            key = f"{REDIS_KEY_PREFIX}{name}"
+            data = PromptManager._redis_client.get(key)
+            if data:
+                logger.debug(f"[PromptManager] Redis 命中: {name}")
+                return json.loads(data)
+            logger.debug(f"[PromptManager] Redis 未命中: {name}")
+            return None
+        except Exception as e:
+            logger.warning(f"[PromptManager] Redis 获取失败: {name}, error={e}")
+            return None
 
-        Returns:
-            Prompt 配置字典，包含 prompt_text, variables 等
-        """
+    def _set_to_redis(self, name: str, config: Dict[str, Any]):
+        """写入 Redis"""
+        if not PromptManager._redis_client:
+            return
+        try:
+            key = f"{REDIS_KEY_PREFIX}{name}"
+            PromptManager._redis_client.setex(key, REDIS_TTL, json.dumps(config, ensure_ascii=False))
+            logger.debug(f"[PromptManager] Redis 写入: {name}, TTL={REDIS_TTL}s")
+        except Exception as e:
+            logger.warning(f"[PromptManager] Redis 写入失败: {name}, error={e}")
+
+    def _get_from_db(self, name: str) -> Optional[Dict[str, Any]]:
+        """从数据库获取配置"""
         try:
             response = httpx.get(
                 f"{self.base_url}/api/v1/prompt-configs/active",
@@ -36,19 +84,72 @@ class PromptManager:
                 data = response.json()
                 config = data.get("data")
                 if config:
-                    self._cache[name] = config
-                    self._cache_version[name] = config.get("version", 0)
-                    logger.info(f"[PromptManager] 已加载 Prompt 配置: {name} v{config.get('version')}")
+                    logger.info(f"[PromptManager] DB 加载: {name} v{config.get('version')}")
                     return config
                 else:
-                    logger.warning(f"[PromptManager] Prompt 配置不存在: {name}")
+                    logger.warning(f"[PromptManager] DB 配置不存在: {name}")
                     return None
             else:
-                logger.warning(f"[PromptManager] 获取 Prompt 配置失败: {name}, status={response.status_code}")
-                return self._cache.get(name)
+                logger.warning(f"[PromptManager] DB 获取失败: {name}, status={response.status_code}")
+                return None
         except Exception as e:
-            logger.warning(f"[PromptManager] 获取 Prompt 配置异常: {name}, error={e}")
-            return self._cache.get(name)
+            logger.warning(f"[PromptManager] DB 获取异常: {name}, error={e}")
+            return None
+
+    def get_prompt_config(self, name: str) -> Optional[Dict[str, Any]]:
+        """
+        获取指定名称的 Prompt 配置
+
+        三级缓存：Redis → DB → 内存缓存 → 返回 None
+
+        Args:
+            name: Prompt 配置名称，如 "nl2structure"
+
+        Returns:
+            Prompt 配置字典，包含 prompt_text, variables 等
+        """
+        # 1. 先查 Redis
+        config = self._get_from_redis(name)
+        if config:
+            self._cache[name] = config
+            self._cache_version[name] = config.get("version", 0)
+            return config
+
+        # 2. Redis miss，查 DB
+        config = self._get_from_db(name)
+        if config:
+            # 写入 Redis 和内存缓存
+            self._set_to_redis(name, config)
+            self._cache[name] = config
+            self._cache_version[name] = config.get("version", 0)
+            return config
+
+        # 3. DB 也 miss，回退到内存缓存
+        cached = self._cache.get(name)
+        if cached:
+            logger.info(f"[PromptManager] 回退到内存缓存: {name}")
+            return cached
+
+        logger.warning(f"[PromptManager] 配置不存在: {name}")
+        return None
+
+    def get_prompt(self, name: str, default: str = "") -> str:
+        """
+        获取指定名称的 Prompt 文本
+
+        便捷方法：获取配置后返回 prompt_text，无配置时返回 default
+
+        Args:
+            name: Prompt 配置名称
+            default: 默认值（当 DB 和缓存都没有时返回）
+
+        Returns:
+            Prompt 文本
+        """
+        config = self.get_prompt_config(name)
+        if config:
+            return config.get("prompt_text", default)
+        return default
 
     def get_nl2structure_prompt(self) -> str:
         """
@@ -259,18 +360,38 @@ class PromptManager:
 
     def reload_config(self, name: str = None):
         """
-        重新加载配置
+        重新加载配置（清除缓存）
 
         Args:
             name: 指定要重新加载的配置名称，None 表示全部
         """
         if name:
+            # 清除内存缓存
             self._cache.pop(name, None)
             self._cache_version.pop(name, None)
+            # 清除 Redis 缓存
+            if PromptManager._redis_client:
+                try:
+                    key = f"{REDIS_KEY_PREFIX}{name}"
+                    PromptManager._redis_client.delete(key)
+                    logger.debug(f"[PromptManager] Redis 清除: {name}")
+                except Exception as e:
+                    logger.warning(f"[PromptManager] Redis 清除失败: {name}, error={e}")
+            # 重新加载
             self.get_prompt_config(name)
         else:
+            # 清除所有内存缓存
             self._cache.clear()
             self._cache_version.clear()
+            # 清除所有 Redis 缓存
+            if PromptManager._redis_client:
+                try:
+                    keys = PromptManager._redis_client.keys(f"{REDIS_KEY_PREFIX}*")
+                    if keys:
+                        PromptManager._redis_client.delete(*keys)
+                    logger.info(f"[PromptManager] 已清空 Redis 缓存")
+                except Exception as e:
+                    logger.warning(f"[PromptManager] Redis 清空失败: error={e}")
             logger.info("[PromptManager] 已清空 Prompt 缓存")
 
     @staticmethod

@@ -79,8 +79,9 @@ class AskRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
     page: int = 1
-    page_size: int = 10
+    page_size: int = 100
     engine_type: Optional[str] = "langgraph"  # "langgraph" | "llm"
+    sql_mode: Optional[str] = "llm"  # SQL生成模式: "llm" | "template" (A/B测试)
     user_id: Optional[str] = "default"  # 用户ID，用于日志隔离
     dept_id: Optional[int] = 0  # 部门ID，用于数据权限
     data_filter: Optional[str] = ""  # 自定义SQL WHERE条件
@@ -286,7 +287,8 @@ async def ask_question(req: AskRequest):
             page_size=req.page_size,
             user_id=req.user_id,
             dept_id=req.dept_id,
-            data_filter=req.data_filter
+            data_filter=req.data_filter,
+            sql_mode=req.sql_mode or "llm"
         )
 
         # 异步写入分析日志（不阻塞响应）

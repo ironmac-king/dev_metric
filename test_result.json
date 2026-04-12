@@ -1,1 +1,0 @@
-{"turn1": {"answer_preview": "抱歉，没有查到 页面访问量 的数据。\n\n查询的数据为空可能是因为指标名称不匹配或", "ctx_metric": "页面访问量", "ctx_metric_id": 4}, "turn2": {"intent": "query_value", "entities": {"metric_name": "页面访问量", "metric_code": "MKI-02-0004", "metric_id": 4, "time_range": "昨天"}, "metric_after_entity": "页面访问量"}}

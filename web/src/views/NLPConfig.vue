@@ -71,7 +71,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="tpl in intentTemplates" :key="tpl.id">
+                  <tr v-for="tpl in paginatedIntents" :key="tpl.id">
                     <td class="name-cell">{{ tpl.name }}</td>
                     <td><span class="intent-badge">{{ tpl.intent }}</span></td>
                     <td class="patterns-cell">{{ tpl.patterns }}</td>
@@ -93,6 +93,15 @@
                   </tr>
                 </tbody>
               </table>
+              <div class="table-pagination" v-if="intentTemplates.length > 0">
+                <el-pagination
+                  v-model:current-page="intentPage.current"
+                  :page-size="intentPage.size"
+                  :total="intentTemplates.length"
+                  layout="prev, pager, next"
+                  background
+                />
+              </div>
             </div>
           </div>
         </el-tab-pane>
@@ -122,7 +131,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="tpl in sqlTemplates" :key="tpl.id">
+                  <tr v-for="tpl in paginatedSqlTemplates" :key="tpl.id">
                     <td class="name-cell">{{ tpl.name }}</td>
                     <td><code class="metric-code">{{ tpl.metric_code }}</code></td>
                     <td><span class="intent-badge">{{ tpl.intent }}</span></td>
@@ -144,6 +153,15 @@
                   </tr>
                 </tbody>
               </table>
+              <div class="table-pagination" v-if="sqlTemplates.length > 0">
+                <el-pagination
+                  v-model:current-page="sqlPage.current"
+                  :page-size="sqlPage.size"
+                  :total="sqlTemplates.length"
+                  layout="prev, pager, next"
+                  background
+                />
+              </div>
             </div>
           </div>
         </el-tab-pane>
@@ -153,12 +171,21 @@
           <div class="section">
             <div class="section-header">
               <h2 class="section-title">公式语法配置</h2>
-              <el-button type="primary" class="btn-primary" @click="showFormulaDialog('create')">
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                </svg>
-                添加配置
-              </el-button>
+              <div class="header-right">
+                <el-input
+                  v-model="formulaSearch"
+                  placeholder="搜索规则名称、关键词..."
+                  prefix-icon="Search"
+                  clearable
+                  class="search-input"
+                />
+                <el-button type="primary" class="btn-primary" @click="showFormulaDialog('create')">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                  </svg>
+                  添加配置
+                </el-button>
+              </div>
             </div>
             <div class="table-card">
               <table class="config-table">
@@ -175,7 +202,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="cfg in formulaConfigs" :key="cfg.id">
+                  <tr v-for="cfg in paginatedFormulaConfigs" :key="cfg.id">
                     <td class="name-cell">{{ cfg.name }}</td>
                     <td><span class="category-badge">{{ cfg.category }}</span></td>
                     <td><span class="intent-badge">{{ cfg.intent_type }}</span></td>
@@ -199,6 +226,15 @@
                   </tr>
                 </tbody>
               </table>
+              <div class="table-pagination" v-if="filteredFormulaConfigs.length > 0">
+                <el-pagination
+                  v-model:current-page="formulaPage.current"
+                  :page-size="formulaPage.size"
+                  :total="filteredFormulaConfigs.length"
+                  layout="prev, pager, next"
+                  small
+                />
+              </div>
             </div>
           </div>
         </el-tab-pane>
@@ -208,12 +244,21 @@
           <div class="section">
             <div class="section-header">
               <h2 class="section-title">业务术语映射</h2>
-              <el-button type="primary" class="btn-primary" @click="showTermDialog('create')">
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                </svg>
-                添加映射
-              </el-button>
+              <div class="header-right">
+                <el-input
+                  v-model="termSearch"
+                  placeholder="搜索术语、同义词..."
+                  prefix-icon="Search"
+                  clearable
+                  class="search-input"
+                />
+                <el-button type="primary" class="btn-primary" @click="showTermDialog('create')">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                  </svg>
+                  添加映射
+                </el-button>
+              </div>
             </div>
             <div class="table-card">
               <table class="config-table">
@@ -221,18 +266,29 @@
                   <tr>
                     <th>术语</th>
                     <th>同义词</th>
+                    <th>维度字段</th>
+                    <th>维度值</th>
+                    <th>关联指标</th>
                     <th>描述</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="term in businessTerms" :key="term.id">
+                  <tr v-for="term in paginatedBusinessTerms" :key="term.id">
                     <td class="name-cell">{{ term.term }}</td>
                     <td>
                       <div class="synonym-tags">
                         <el-tag v-for="syn in (term.synonyms || [])" :key="syn" size="small" type="info" style="margin: 2px">{{ syn }}</el-tag>
                         <span v-if="!term.synonyms || term.synonyms.length === 0" class="no-synonym">暂无</span>
                       </div>
+                    </td>
+                    <td><code>{{ term.dimension_field || '-' }}</code></td>
+                    <td><code>{{ term.dimension_value || '-' }}</code></td>
+                    <td>
+                      <span v-if="term.metric_ids && term.metric_ids.length > 0" class="metric-ids">
+                        {{ term.metric_ids.length }}个
+                      </span>
+                      <span v-else class="no-synonym">-</span>
                     </td>
                     <td class="desc-cell">{{ term.description || '-' }}</td>
                     <td>
@@ -244,6 +300,119 @@
                   </tr>
                 </tbody>
               </table>
+              <div class="table-pagination" v-if="filteredBusinessTerms.length > 0">
+                <el-pagination
+                  v-model:current-page="termPage.current"
+                  :page-size="termPage.size"
+                  :total="filteredBusinessTerms.length"
+                  layout="prev, pager, next"
+                  small
+                />
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <!-- Prompt 配置 -->
+        <el-tab-pane label="Prompt 配置" name="prompts">
+          <div class="section">
+            <div class="section-header">
+              <div class="header-left">
+                <h2 class="section-title">Prompt 模板管理</h2>
+                <span class="data-count">{{ filteredPromptConfigs.length }} 条</span>
+              </div>
+              <div class="header-right">
+                <el-input
+                  v-model="promptSearch"
+                  placeholder="搜索名称、描述..."
+                  prefix-icon="Search"
+                  clearable
+                  class="search-input"
+                  style="width: 180px"
+                />
+                <el-select v-model="promptCategoryFilter" placeholder="全部分类" clearable style="width: 140px">
+                  <el-option label="全部" value="" />
+                  <el-option label="nl2structure" value="nl2structure" />
+                  <el-option label="sql_generation" value="sql_generation" />
+                  <el-option label="general" value="general" />
+                  <el-option label="decision_analysis" value="decision_analysis" />
+                </el-select>
+                <el-select v-model="promptStatusFilter" placeholder="全部状态" clearable style="width: 110px">
+                  <el-option label="全部" value="" />
+                  <el-option label="启用" :value="1" />
+                  <el-option label="停用" :value="0" />
+                </el-select>
+                <el-button @click="loadPrompts" :loading="promptLoading" class="btn-refresh">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M2 7C2 4.2 4.2 2 7 2C9.8 2 12 4.2 12 7M12 7C12 9.8 9.8 12 7 12C4.2 12 2 9.8 2 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                    <path d="M10 5L12 7L10 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  刷新
+                </el-button>
+              </div>
+            </div>
+            <div class="table-card">
+              <table class="config-table prompt-config-table" v-if="filteredPromptConfigs.length > 0">
+                <thead>
+                  <tr>
+                    <th class="col-name">名称</th>
+                    <th class="col-category">分类</th>
+                    <th class="col-desc">描述</th>
+                    <th class="col-preview">内容预览</th>
+                    <th class="col-vars">变量</th>
+                    <th class="col-chars">字符</th>
+                    <th class="col-version">版本</th>
+                    <th class="col-status">状态</th>
+                    <th class="col-actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="cfg in paginatedPromptConfigs" :key="cfg.id">
+                    <td class="name-cell">
+                      <span class="prompt-name">{{ cfg.name }}</span>
+                    </td>
+                    <td><span class="category-badge">{{ cfg.category }}</span></td>
+                    <td class="desc-cell" :title="cfg.description">{{ cfg.description || '-' }}</td>
+                    <td class="preview-cell" :title="cfg.prompt_text">{{ truncatePrompt(cfg.prompt_text) }}</td>
+                    <td class="vars-cell">
+                      <el-tag size="small" type="info">{{ getVarCount(cfg.variables) }}个</el-tag>
+                    </td>
+                    <td class="chars-cell">{{ formatChars(cfg.prompt_text) }}</td>
+                    <td class="priority-cell">v{{ cfg.version }}</td>
+                    <td>
+                      <el-tag :type="cfg.status === 1 ? 'success' : 'info'" size="small">
+                        {{ cfg.status === 1 ? '启用' : '停用' }}
+                      </el-tag>
+                    </td>
+                    <td>
+                      <div class="action-group">
+                        <el-button link class="action-btn" @click="viewPromptDetail(cfg)">查看</el-button>
+                        <el-button link class="action-btn" @click="editPrompt(cfg)">编辑</el-button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="table-pagination" v-if="filteredPromptConfigs.length > 0">
+                <el-pagination
+                  v-model:current-page="promptPage.current"
+                  :page-size="promptPage.size"
+                  :total="filteredPromptConfigs.length"
+                  layout="prev, pager, next"
+                  small
+                />
+              </div>
+              <div v-else-if="promptConfigs.length > 0" class="empty-state">
+                <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                  <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="2"/>
+                  <path d="M16 24L22 30L32 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <p>无匹配结果</p>
+                <el-button link @click="clearPromptFilters" class="clear-filter-btn">清除筛选</el-button>
+              </div>
+              <div v-else class="empty-state">
+                <p>暂无 Prompt 配置</p>
+              </div>
             </div>
           </div>
         </el-tab-pane>
@@ -275,7 +444,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="fb in intentFeedbacks" :key="fb.id">
+                  <tr v-for="fb in paginatedFeedbacks" :key="fb.id">
                     <td class="name-cell">{{ fb.user_input }}</td>
                     <td><span class="intent-badge error">{{ fb.predicted_intent }}</span></td>
                     <td><span class="intent-badge success">{{ fb.correct_intent }}</span></td>
@@ -296,6 +465,15 @@
                   </tr>
                 </tbody>
               </table>
+              <div class="table-pagination" v-if="intentFeedbacks.length > 0">
+                <el-pagination
+                  v-model:current-page="feedbackPage.current"
+                  :page-size="feedbackPage.size"
+                  :total="intentFeedbacks.length"
+                  layout="prev, pager, next"
+                  small
+                />
+              </div>
               <div v-else class="empty-state">
                 <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
                   <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="2"/>
@@ -337,6 +515,15 @@
         </el-form-item>
         <el-form-item label="默认回复">
           <el-input v-model="intentForm.response" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="Few-Shot 示例">
+          <el-input
+            v-model="intentForm.few_shot_examples"
+            type="textarea"
+            :rows="3"
+            placeholder='JSON 格式示例，如：[{"input": "昨天数据", "output": "intent: query_value"}]'
+          />
+          <div class="form-tip">JSON 格式，用于 few-shot learning 示例</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -449,10 +636,10 @@
     </el-dialog>
 
     <!-- Term Dialog -->
-    <el-dialog v-model="termDialogVisible" :title="termDialogTitle" width="500px" class="config-dialog">
-      <el-form :model="termForm" label-width="80px" class="config-form">
+    <el-dialog v-model="termDialogVisible" :title="termDialogTitle" width="650px" class="config-dialog">
+      <el-form :model="termForm" label-width="100px" class="config-form">
         <el-form-item label="术语">
-          <el-input v-model="termForm.term" placeholder="如：访客数" />
+          <el-input v-model="termForm.term" placeholder="如：amazon" />
         </el-form-item>
         <el-form-item label="同义词">
           <el-select
@@ -472,6 +659,29 @@
             />
           </el-select>
         </el-form-item>
+        <el-form-item label="关联指标">
+          <el-select
+            v-model="termForm.metric_ids"
+            multiple
+            placeholder="选择关联的指标（可选）"
+            style="width: 100%"
+            filterable
+            clearable
+          >
+            <el-option
+              v-for="m in metricsList"
+              :key="m.id"
+              :label="`${m.metric_code} - ${m.name}`"
+              :value="m.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="维度字段">
+          <el-input v-model="termForm.dimension_field" placeholder="如：FSITECODE（维度列名）" />
+        </el-form-item>
+        <el-form-item label="维度值">
+          <el-input v-model="termForm.dimension_value" placeholder="如：amazon（标准化值）" />
+        </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="termForm.description" type="textarea" :rows="2" />
         </el-form-item>
@@ -481,12 +691,188 @@
         <el-button type="primary" size="large" @click="saveTerm" class="btn-primary">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- Prompt 详情对话框 -->
+    <el-dialog v-model="promptDialogVisible" :title="promptDialogTitle" width="900px" class="config-dialog prompt-detail-dialog">
+      <div v-if="promptDetail" class="prompt-detail">
+        <!-- Meta 信息栏 -->
+        <div class="prompt-meta-bar">
+          <div class="meta-left">
+            <span class="meta-item">
+              <span class="meta-label">分类</span>
+              <el-tag size="small" type="info">{{ promptDetail.category }}</el-tag>
+            </span>
+            <span class="meta-item">
+              <span class="meta-label">版本</span>
+              <span class="meta-value">v{{ promptDetail.version }}</span>
+            </span>
+            <span class="meta-item">
+              <span class="meta-label">状态</span>
+              <el-tag size="small" :type="promptDetail.status === 1 ? 'success' : 'info'">
+                {{ promptDetail.status === 1 ? '启用' : '停用' }}
+              </el-tag>
+            </span>
+          </div>
+          <div class="meta-right">
+            <span class="meta-item">
+              <span class="meta-label">{{ promptDetail.prompt_text?.length || 0 }}</span>
+              <span class="meta-unit">chars</span>
+            </span>
+            <el-button size="small" @click="viewPromptVersions(promptDetail)" class="history-btn">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.2"/>
+                <path d="M7 4.5V7L9 9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+              </svg>
+              版本历史
+            </el-button>
+            <el-button size="small" @click="copyPromptContent" class="copy-btn">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+                <path d="M2 10V2.5C2 2.22386 2.22386 2 2.5 2H10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+              </svg>
+              复制
+            </el-button>
+          </div>
+        </div>
+
+        <!-- 描述 -->
+        <div class="prompt-desc-section" v-if="promptDetail.description">
+          <div class="section-label">描述</div>
+          <div class="section-content">{{ promptDetail.description }}</div>
+        </div>
+
+        <!-- 变量列表 -->
+        <div class="prompt-vars-section" v-if="promptDetail.variables">
+          <div class="section-label">变量</div>
+          <div class="variable-tags">
+            <el-tag
+              v-for="v in parseVariables(promptDetail.variables)"
+              :key="v"
+              size="small"
+              class="var-tag"
+            >
+              {{ v }}
+            </el-tag>
+          </div>
+        </div>
+
+        <!-- 内容区 -->
+        <div class="prompt-content-section">
+          <div class="section-label">内容</div>
+          <div class="code-container">
+            <div class="code-line-numbers">
+              <div v-for="n in getLineNumbers(promptDetail.prompt_text)" :key="n" class="line-number">{{ n }}</div>
+            </div>
+            <pre class="code-content" v-html="highlightVariables(promptDetail.prompt_text)"></pre>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
+
+    <!-- Prompt 编辑对话框 -->
+    <el-dialog v-model="promptEditDialogVisible" title="编辑 Prompt" width="900px" class="config-dialog">
+      <el-form v-if="promptEditForm.id" :model="promptEditForm" label-width="90px" class="config-form">
+        <el-form-item label="名称">
+          <el-input v-model="promptEditForm.name" disabled />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="promptEditForm.description" type="textarea" :rows="2" placeholder="配置描述" />
+        </el-form-item>
+        <el-form-item label="分类">
+          <el-select v-model="promptEditForm.category" disabled style="width: 100%">
+            <el-option label="nl2structure" value="nl2structure" />
+            <el-option label="sql_generation" value="sql_generation" />
+            <el-option label="general" value="general" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="Prompt 内容">
+          <el-input
+            v-model="promptEditForm.prompt_text"
+            type="textarea"
+            :rows="12"
+            placeholder="输入 Prompt 内容..."
+            class="prompt-textarea"
+          />
+          <div class="form-tip">提示：使用 {'{variable}'} 格式声明变量</div>
+        </el-form-item>
+        <el-form-item label="变量">
+          <div class="edit-variables">
+            <el-tag
+              v-for="v in parseVariables(promptEditForm.variables)"
+              :key="v"
+              size="small"
+              class="var-tag"
+              style="margin-right: 6px; margin-bottom: 6px"
+            >
+              {{ v }}
+            </el-tag>
+            <span v-if="!promptEditForm.variables || getVarCount(promptEditForm.variables) === 0" class="no-vars">
+              未检测到变量
+            </span>
+          </div>
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-switch
+            v-model="promptEditForm.status"
+            :active-value="1"
+            :inactive-value="0"
+            active-text="启用"
+            inactive-text="停用"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button size="large" @click="promptEditDialogVisible = false">取消</el-button>
+        <el-button type="primary" size="large" @click="savePrompt" class="btn-primary">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Prompt 版本历史对话框 -->
+    <el-dialog v-model="promptVersionDialogVisible" title="版本历史" width="850px" class="config-dialog">
+      <div v-if="promptVersions.length > 0" class="version-list">
+        <div v-for="v in promptVersions" :key="v.id" class="version-item">
+          <div class="version-header">
+            <div class="version-info">
+              <span class="version-badge">v{{ v.version }}</span>
+              <span class="version-meta">
+                {{ v.created_by || 'admin' }} · {{ formatTime(v.created_at) }}
+              </span>
+              <el-tag v-if="v.version === promptDetail?.version" size="small" type="success">当前版本</el-tag>
+            </div>
+            <div class="version-actions">
+              <el-button
+                v-if="v.version !== promptDetail?.version"
+                link
+                class="action-btn"
+                @click="rollbackPromptVersion(promptDetail.id, v.version)"
+              >
+                回滚此版本
+              </el-button>
+            </div>
+          </div>
+          <div class="version-content">
+            <pre class="version-text">{{ v.prompt_text }}</pre>
+          </div>
+          <div v-if="v.change_reason" class="version-reason">
+            <span class="reason-label">变更原因：</span>{{ v.change_reason }}
+          </div>
+        </div>
+      </div>
+      <div v-else-if="promptVersionLoading" class="version-loading">
+        <el-icon class="is-loading" style="font-size: 24px"><Loading /></el-icon>
+        <span>加载中...</span>
+      </div>
+      <div v-else class="version-empty">
+        <p>暂无版本历史</p>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ref, computed, onMounted, watch } from 'vue'
+import { ElMessage, ElMessageBox, ElIcon } from 'element-plus'
+import { Loading } from '@element-plus/icons-vue'
 import { metricAPI } from '../api'
 
 const activeTab = ref('intents')
@@ -497,6 +883,123 @@ const metricsList = ref([])
 const intentFeedbacks = ref([])
 const feedbackLoading = ref(false)
 
+// 分页状态
+const intentPage = ref({ current: 1, size: 10, total: 0 })
+const sqlPage = ref({ current: 1, size: 10, total: 0 })
+const formulaPage = ref({ current: 1, size: 10, total: 0 })
+const termPage = ref({ current: 1, size: 10, total: 0 })
+const feedbackPage = ref({ current: 1, size: 10, total: 0 })
+const promptPage = ref({ current: 1, size: 10, total: 0 })
+
+// Prompt 配置
+const promptConfigs = ref([])
+const promptLoading = ref(false)
+const promptDialogVisible = ref(false)
+const promptDialogTitle = ref('Prompt 详情')
+const promptDetail = ref(null)
+const promptSearch = ref('')
+const promptCategoryFilter = ref('')
+const promptStatusFilter = ref('')
+
+const filteredPromptConfigs = computed(() => {
+  let list = promptConfigs.value
+  // 名称/描述搜索
+  if (promptSearch.value) {
+    const q = promptSearch.value.toLowerCase()
+    list = list.filter(cfg =>
+      cfg.name?.toLowerCase().includes(q) ||
+      cfg.description?.toLowerCase().includes(q)
+    )
+  }
+  // 分类筛选
+  if (promptCategoryFilter.value) {
+    list = list.filter(cfg => cfg.category === promptCategoryFilter.value)
+  }
+  // 状态筛选
+  if (promptStatusFilter.value !== '') {
+    list = list.filter(cfg => cfg.status === promptStatusFilter.value)
+  }
+  return list
+})
+
+const paginatedPromptConfigs = computed(() => {
+  const start = (promptPage.value.current - 1) * promptPage.value.size
+  const end = start + promptPage.value.size
+  return filteredPromptConfigs.value.slice(start, end)
+})
+
+// Prompt 编辑
+const promptEditDialogVisible = ref(false)
+const promptEditForm = ref({
+  id: null,
+  name: '',
+  description: '',
+  category: '',
+  prompt_text: '',
+  variables: [],
+  status: 1
+})
+
+// Prompt 版本历史
+const promptVersionDialogVisible = ref(false)
+const promptVersions = ref([])
+const promptVersionLoading = ref(false)
+
+// 公式语法搜索
+const formulaSearch = ref('')
+const filteredFormulaConfigs = computed(() => {
+  if (!formulaSearch.value) return formulaConfigs.value
+  const q = formulaSearch.value.toLowerCase()
+  return formulaConfigs.value.filter(cfg =>
+    cfg.name?.toLowerCase().includes(q) ||
+    cfg.keywords?.toLowerCase().includes(q) ||
+    cfg.category?.toLowerCase().includes(q)
+  )
+})
+
+// 业务术语搜索
+const termSearch = ref('')
+const filteredBusinessTerms = computed(() => {
+  if (!termSearch.value) return businessTerms.value
+  const q = termSearch.value.toLowerCase()
+  return businessTerms.value.filter(term =>
+    term.term?.toLowerCase().includes(q) ||
+    term.synonyms?.some(s => s.toLowerCase().includes(q)) ||
+    term.dimension_field?.toLowerCase().includes(q)
+  )
+})
+
+// 分页数据
+const paginatedIntents = computed(() => {
+  const start = (intentPage.value.current - 1) * intentPage.value.size
+  const end = start + intentPage.value.size
+  return intentTemplates.value.slice(start, end)
+})
+
+const paginatedSqlTemplates = computed(() => {
+  const start = (sqlPage.value.current - 1) * sqlPage.value.size
+  const end = start + sqlPage.value.size
+  return sqlTemplates.value.slice(start, end)
+})
+
+const paginatedFormulaConfigs = computed(() => {
+  const start = (formulaPage.value.current - 1) * formulaPage.value.size
+  const end = start + formulaPage.value.size
+  return filteredFormulaConfigs.value.slice(start, end)
+})
+
+const paginatedBusinessTerms = computed(() => {
+  const start = (termPage.value.current - 1) * termPage.value.size
+  const end = start + termPage.value.size
+  return filteredBusinessTerms.value.slice(start, end)
+})
+
+const paginatedFeedbacks = computed(() => {
+  const start = (feedbackPage.value.current - 1) * feedbackPage.value.size
+  const end = start + feedbackPage.value.size
+  return intentFeedbacks.value.slice(start, end)
+})
+
 // Intent Dialog
 const intentDialogVisible = ref(false)
 const intentDialogTitle = ref('添加意图模板')
@@ -506,6 +1009,7 @@ const intentForm = ref({
   patterns: '',
   priority: 0,
   response: '',
+  few_shot_examples: '',
   status: 1
 })
 const editingIntentId = ref(null)
@@ -551,12 +1055,13 @@ const editingTermId = ref(null)
 
 async function loadData() {
   try {
-    const [intentsRes, sqlRes, termsRes, metricsRes, formulaRes] = await Promise.all([
+    const [intentsRes, sqlRes, termsRes, metricsRes, formulaRes, promptsRes] = await Promise.all([
       fetch('/api/v1/nlp/intents').then(r => r.json()),
       fetch('/api/v1/nlp/sql-templates').then(r => r.json()),
       fetch('/api/v1/metadata/terms').then(r => r.json()),
       metricAPI.list({ page: 1, page_size: 500 }),
-      fetch('/api/v1/nlp/formula-syntax').then(r => r.json())
+      fetch('/api/v1/nlp/formula-syntax').then(r => r.json()),
+      fetch('/api/v1/prompt-configs').then(r => r.json())
     ])
 
     intentTemplates.value = intentsRes.data || []
@@ -564,6 +1069,7 @@ async function loadData() {
     businessTerms.value = termsRes.data || []
     metricsList.value = metricsRes.data?.list || []
     formulaConfigs.value = formulaRes.data || []
+    promptConfigs.value = promptsRes.data || []
   } catch (e) {
     console.error('加载数据失败:', e)
   }
@@ -573,7 +1079,7 @@ async function loadData() {
 function showIntentDialog(mode, tpl = null) {
   if (mode === 'create') {
     intentDialogTitle.value = '添加意图模板'
-    intentForm.value = { name: '', intent: 'query_value', patterns: '', priority: 0, response: '', status: 1 }
+    intentForm.value = { name: '', intent: 'query_value', patterns: '', priority: 0, response: '', few_shot_examples: '', status: 1 }
     editingIntentId.value = null
   } else {
     intentDialogTitle.value = '编辑意图模板'
@@ -762,11 +1268,18 @@ async function deleteFormula(id) {
 function showTermDialog(mode, term = null) {
   if (mode === 'create') {
     termDialogTitle.value = '添加术语映射'
-    termForm.value = { term: '', synonyms: [], description: '' }
+    termForm.value = { term: '', synonyms: [], metric_ids: [], dimension_field: '', dimension_value: '', description: '' }
     editingTermId.value = null
   } else {
     termDialogTitle.value = '编辑术语映射'
-    termForm.value = { term: term.term, synonyms: term.synonyms || [], description: term.description }
+    termForm.value = {
+      term: term.term,
+      synonyms: term.synonyms || [],
+      metric_ids: term.metric_ids || [],
+      dimension_field: term.dimension_field || '',
+      dimension_value: term.dimension_value || '',
+      description: term.description
+    }
     editingTermId.value = term.id
   }
   termDialogVisible.value = true
@@ -835,6 +1348,169 @@ async function reviewFeedback(feedback, status) {
   }
 }
 
+// Prompt 配置
+async function loadPrompts() {
+  promptLoading.value = true
+  try {
+    const res = await fetch('/api/v1/prompt-configs')
+    const data = await res.json()
+    promptConfigs.value = data.data || []
+  } catch (e) {
+    console.error('加载 Prompt 配置失败:', e)
+  } finally {
+    promptLoading.value = false
+  }
+}
+
+function clearPromptFilters() {
+  promptSearch.value = ''
+  promptCategoryFilter.value = ''
+  promptStatusFilter.value = ''
+}
+
+function viewPromptDetail(cfg) {
+  promptDetail.value = cfg
+  promptDialogTitle.value = `Prompt 详情 - ${cfg.name}`
+  promptDialogVisible.value = true
+}
+
+function editPrompt(cfg) {
+  promptEditForm.value = {
+    id: cfg.id,
+    name: cfg.name,
+    description: cfg.description || '',
+    category: cfg.category,
+    prompt_text: cfg.prompt_text || '',
+    variables: cfg.variables || [],
+    status: cfg.status
+  }
+  promptEditDialogVisible.value = true
+}
+
+async function savePrompt() {
+  if (!promptEditForm.value.prompt_text.trim()) {
+    ElMessage.warning('Prompt 内容不能为空')
+    return
+  }
+  try {
+    await fetch(`/api/v1/prompt-configs/${promptEditForm.value.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description: promptEditForm.value.description,
+        prompt_text: promptEditForm.value.prompt_text,
+        status: promptEditForm.value.status
+      })
+    })
+    ElMessage.success('保存成功')
+    promptEditDialogVisible.value = false
+    loadPrompts()
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+async function loadPromptVersions(cfgId) {
+  promptVersionLoading.value = true
+  try {
+    const res = await fetch(`/api/v1/prompt-configs/${cfgId}/versions`)
+    const data = await res.json()
+    promptVersions.value = data.data || []
+  } catch (e) {
+    ElMessage.error('加载版本历史失败')
+  } finally {
+    promptVersionLoading.value = false
+  }
+}
+
+function viewPromptVersions(cfg) {
+  loadPromptVersions(cfg.id)
+  promptVersionDialogVisible.value = true
+}
+
+async function rollbackPromptVersion(cfgId, version) {
+  try {
+    await fetch(`/api/v1/prompt-configs/${cfgId}/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version })
+    })
+    ElMessage.success('回滚成功')
+    loadPromptVersions(cfgId)
+    loadPrompts()
+  } catch (e) {
+    ElMessage.error('回滚失败')
+  }
+}
+
+function parseVariables(variables) {
+  if (!variables) return []
+  if (typeof variables === 'string') {
+    return variables.split(',').map(v => v.trim()).filter(v => v)
+  }
+  if (Array.isArray(variables)) {
+    return variables
+  }
+  return []
+}
+
+function truncatePrompt(text) {
+  if (!text) return '-'
+  const maxLen = 40
+  if (text.length <= maxLen) return text
+  return text.substring(0, maxLen) + '...'
+}
+
+function getVarCount(variables) {
+  if (!variables) return 0
+  if (typeof variables === 'string') {
+    return variables.split(',').filter(v => v.trim()).length
+  }
+  if (Array.isArray(variables)) {
+    return variables.length
+  }
+  return 0
+}
+
+function formatChars(text) {
+  if (!text) return '0'
+  if (text.length >= 1000) {
+    return (text.length / 1000).toFixed(1) + 'k'
+  }
+  return text.length.toString()
+}
+
+function getLineNumbers(text) {
+  if (!text) return [1]
+  const lines = text.split('\n').length
+  return Array.from({ length: lines }, (_, i) => i + 1)
+}
+
+function highlightVariables(text) {
+  if (!text) return ''
+  // 转义 HTML 特殊字符
+  let escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  // 高亮 {variable} 格式的变量
+  escaped = escaped.replace(/\{([^}]+)\}/g, '<span class="hl-var">{<span class="hl-var-name">$1</span>}</span>')
+  // 高亮 JSON key
+  escaped = escaped.replace(/"([^"]+)":/g, '<span class="hl-key">"$1"</span>:')
+  // 高亮 JSON 字符串值
+  escaped = escaped.replace(/: "([^"]*)"/g, ': <span class="hl-string">"$1"</span>')
+  return escaped
+}
+
+function copyPromptContent() {
+  if (!promptDetail.value?.prompt_text) return
+  navigator.clipboard.writeText(promptDetail.value.prompt_text).then(() => {
+    ElMessage.success('已复制到剪贴板')
+  }).catch(() => {
+    ElMessage.error('复制失败')
+  })
+}
+
 function formatTime(timeStr) {
   if (!timeStr) return '-'
   const d = new Date(timeStr)
@@ -874,6 +1550,9 @@ onMounted(() => {
 watch(activeTab, (tab) => {
   if (tab === 'feedback' && intentFeedbacks.value.length === 0) {
     loadFeedback()
+  }
+  if (tab === 'prompts' && promptConfigs.value.length === 0) {
+    loadPrompts()
   }
 })
 </script>
@@ -1009,11 +1688,41 @@ watch(activeTab, (tab) => {
   margin-bottom: 16px;
 }
 
+.header-right {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.search-input {
+  width: 220px;
+}
+
 .section-title {
   font-size: 15px;
   font-weight: 700;
   color: var(--text-primary);
   margin: 0;
+}
+
+.section-header .header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.section-header .header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.data-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 2px 8px;
+  border-radius: 10px;
 }
 
 .btn-primary {
@@ -1223,6 +1932,11 @@ watch(activeTab, (tab) => {
   font-size: 13px;
 }
 
+.clear-filter-btn {
+  margin-top: 8px;
+  cursor: pointer;
+}
+
 .btn-refresh {
   display: inline-flex;
   align-items: center;
@@ -1269,5 +1983,443 @@ watch(activeTab, (tab) => {
   color: var(--text-secondary);
   margin-top: 4px;
   line-height: 1.4;
+}
+
+/* Prompt 详情对话框 */
+.prompt-detail {
+  padding: 8px 0;
+}
+
+.prompt-meta {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.prompt-description {
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+
+.prompt-description p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.prompt-variables {
+  margin-bottom: 16px;
+}
+
+.prompt-variables h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 10px 0;
+}
+
+.variable-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prompt-text h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 10px 0;
+}
+
+.prompt-content {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+/* Prompt 表格列宽 */
+.prompt-config-table {
+  table-layout: fixed;
+}
+
+.prompt-config-table .col-name {
+  width: 160px;
+}
+
+.prompt-config-table .col-category {
+  width: 110px;
+}
+
+.prompt-config-table .col-desc {
+  width: 140px;
+}
+
+.prompt-config-table .col-preview {
+  width: 180px;
+}
+
+.prompt-config-table .col-vars {
+  width: 60px;
+}
+
+.prompt-config-table .col-chars {
+  width: 60px;
+}
+
+.prompt-config-table .col-version {
+  width: 60px;
+}
+
+.prompt-config-table .col-status {
+  width: 70px;
+}
+
+.prompt-config-table .col-actions {
+  width: 100px;
+}
+
+.prompt-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.desc-cell {
+  color: var(--text-secondary);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-cell {
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vars-cell {
+  text-align: center;
+}
+
+.chars-cell {
+  text-align: center;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Prompt 详情对话框优化 */
+.prompt-detail-dialog :deep(.el-dialog__body) {
+  padding: 0;
+}
+
+.prompt-detail {
+  padding: 0;
+}
+
+/* Meta 信息栏 */
+.prompt-meta-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+}
+
+.meta-left {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+}
+
+.meta-right {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.meta-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.meta-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.meta-unit {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.copy-btn,
+.history-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 描述区域 */
+.prompt-desc-section {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.section-content {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+/* 变量区域 */
+.prompt-vars-section {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.variable-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.var-tag {
+  font-family: 'SF Mono', Monaco, monospace;
+  background: var(--primary-glow);
+  color: var(--primary);
+  border: none;
+}
+
+/* 内容区域 */
+.prompt-content-section {
+  padding: 14px 20px;
+}
+
+.code-container {
+  display: flex;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.code-line-numbers {
+  padding: 12px 0;
+  background: #f8f9fa;
+  border-right: 1px solid var(--border);
+  user-select: none;
+  min-width: 40px;
+  text-align: right;
+}
+
+.line-number {
+  padding: 0 12px;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #999;
+}
+
+.code-content {
+  flex: 1;
+  padding: 12px 16px;
+  margin: 0;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+  max-height: 450px;
+  overflow-y: auto;
+}
+
+/* 语法高亮 */
+.hl-var {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.hl-var-name {
+  color: var(--primary);
+  background: var(--primary-glow);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.hl-key {
+  color: #690;
+  font-weight: 600;
+}
+
+.hl-string {
+  color: #c05;
+}
+
+/* Prompt 编辑对话框 */
+.prompt-textarea textarea {
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.edit-variables {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  min-height: 36px;
+}
+
+.no-vars {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Prompt 版本历史 */
+.version-list {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.version-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.version-item:last-child {
+  margin-bottom: 0;
+}
+
+.version-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+}
+
+.version-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.version-badge {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--primary);
+  background: var(--primary-glow);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.version-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.version-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.version-content {
+  padding: 12px;
+  background: #fafafa;
+}
+
+.version-text {
+  margin: 0;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.version-reason {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.reason-label {
+  font-weight: 600;
+}
+
+.version-loading,
+.version-empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.version-loading .el-icon {
+  color: var(--primary);
+}
+
+/* Table Pagination */
+.table-pagination {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.table-pagination .el-pagination {
+  font-size: 12px;
 }
 </style>

@@ -91,7 +91,12 @@ func DeleteIntentTemplate(c *gin.Context) {
 
 func ListSQLTemplates(c *gin.Context) {
 	var templates []model.SQLTemplate
-	postgres.Get().Find(&templates)
+	templateType := c.Query("type")
+	if templateType != "" {
+		postgres.Get().Where("template_type = ?", templateType).Find(&templates)
+	} else {
+		postgres.Get().Find(&templates)
+	}
 	response.Success(c, templates)
 }
 
@@ -155,12 +160,21 @@ func DeleteSQLTemplate(c *gin.Context) {
 }
 
 // GetAllNLPTemplates 获取所有 NLP 模板（供 AI 服务调用）
+// Query params:
+//   - type: 过滤 sql_templates 类型 (legacy | engine)，不传则返回所有
 func GetAllNLPTemplates(c *gin.Context) {
 	var intentTemplates []model.IntentTemplate
 	var sqlTemplates []model.SQLTemplate
 
 	postgres.Get().Where("status = ?", 1).Find(&intentTemplates)
-	postgres.Get().Where("status = ?", 1).Find(&sqlTemplates)
+
+	// 按 template_type 过滤 SQL 模板
+	templateType := c.Query("type")
+	if templateType != "" {
+		postgres.Get().Where("status = ? AND template_type = ?", 1, templateType).Find(&sqlTemplates)
+	} else {
+		postgres.Get().Where("status = ?", 1).Find(&sqlTemplates)
+	}
 
 	response.Success(c, gin.H{
 		"intent_templates": intentTemplates,

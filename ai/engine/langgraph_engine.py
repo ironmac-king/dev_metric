@@ -267,7 +267,8 @@ class LangGraphEngine(ConversationEngine):
         page_size: int = 100,
         user_id: str = "default",
         dept_id: int = 0,
-        data_filter: str = ""
+        data_filter: str = "",
+        sql_mode: str = "llm"  # SQL生成模式: "llm" | "template"
     ) -> Dict[str, Any]:
         """处理对话请求"""
         config = {"configurable": {"thread_id": session_id}}
@@ -320,12 +321,14 @@ class LangGraphEngine(ConversationEngine):
                     "user_id": user_id,
                     "dept_id": dept_id,
                     "data_filter": data_filter,
+                    "sql_mode": sql_mode,  # SQL生成模式: "llm" | "template"
                 }
             else:
                 # 复用现有状态
                 initial_state = current_state.values
                 initial_state["page"] = page
                 initial_state["page_size"] = page_size
+                initial_state["sql_mode"] = sql_mode  # 更新 SQL 模式
                 # 清除上轮状态
                 initial_state["needs_clarification"] = False
                 initial_state["clarification_message"] = None

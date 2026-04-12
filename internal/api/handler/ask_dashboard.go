@@ -67,6 +67,10 @@ func GetDashboardStats(c *gin.Context) {
 func GetSessions(c *gin.Context) {
 	db := postgres.Get()
 	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
+	// 与 AskQuestion 保持一致：userID 为 0 时转为 "default"
+	if userID == "0" {
+		userID = "default"
+	}
 
 	var sessions []model.AskSessionSummary
 	db.Where("user_id = ?", userID).Order("updated_at DESC").Limit(50).Find(&sessions)

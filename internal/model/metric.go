@@ -191,15 +191,17 @@ func (SQLAuditLog) TableName() string {
 
 // IntentTemplate 意图模板表
 type IntentTemplate struct {
-	ID         uint      `json:"id" gorm:"primaryKey"`
-	Name       string    `json:"name" gorm:"size:64"`                     // 模板名称
-	Intent     string    `json:"intent" gorm:"size:32"`                  // 意图类型
-	Patterns   string    `json:"patterns" gorm:"type:text"`                // 匹配模式（正则或关键词，逗号分隔）
-	Priority   int       `json:"priority" gorm:"default:0"`                // 优先级
-	Response   string    `json:"response" gorm:"type:text"`               // 默认回复模板
-	Status     int16     `json:"status" gorm:"default:1"`                // 0=禁用 1=启用
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID                uint      `json:"id" gorm:"primaryKey"`
+	Name              string    `json:"name" gorm:"size:64"`                     // 模板名称
+	Intent            string    `json:"intent" gorm:"size:32"`                  // 意图类型
+	IntentDescription string    `json:"intent_description" gorm:"type:text"`    // 意图描述
+	Patterns          string    `json:"patterns" gorm:"type:text"`              // 匹配模式（正则或关键词，逗号分隔）
+	FewShotExamples   string    `json:"few_shot_examples" gorm:"type:jsonb"`  // Few-shot 示例
+	Priority          int       `json:"priority" gorm:"default:0"`              // 优先级
+	Response          string    `json:"response" gorm:"type:text"`               // 默认回复模板
+	Status            int16     `json:"status" gorm:"default:1"`                // 0=禁用 1=启用
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 func (IntentTemplate) TableName() string {
@@ -214,6 +216,7 @@ type SQLTemplate struct {
 	Intent      string    `json:"intent" gorm:"size:32"`                 // 适用意图
 	SQLTemplate string    `json:"sql_template" gorm:"type:text"`          // SQL模板（支持占位符）
 	Description string    `json:"description" gorm:"type:text"`           // 说明
+	TemplateType string    `json:"template_type" gorm:"size:32;default:legacy"` // 模板类型: legacy=旧模板 engine=新模板
 	Status      int16     `json:"status" gorm:"default:1"`               // 0=禁用 1=启用
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

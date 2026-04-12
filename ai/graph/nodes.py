@@ -72,38 +72,24 @@ class ConversationNodes:
         # 场景B: 上一轮返回"暂无数据"后，用户回复短词（如"指标值"），表示确认/重试
 
         # ========== Step 0.5: 闲聊意图检查（优先于满意度确认）==========
-        # 先检查是否是闲聊（打招呼、感谢、告别），避免被误判为满意度确认
-        greeting_patterns = ["你好", "您好", "hi", "hello", "嗨", "hey", "yo", "哈喽", "嗨嗨", "你好呀", "您好呀"]
-        thanks_patterns = ["谢谢", "感谢", "谢了", "多谢", "谢谢你", "感谢你"]
-        bye_patterns = ["再见", "拜拜", "bye", "下次见", "走了", "溜了"]
-        model_question_patterns = ["什么模型", "什么LLM", "什么AI", "你叫什么"]
-
+        # 从 rule_engine 加载的 intent_templates 配置检查闲聊意图
         import re
-        msg_clean = re.sub(r'^[\s,，。、；：""''【】（ ）\-+_]+|[\s,，。、；：""''【】（ ）\-+_]+$', '', last_message.strip())
+        msg_clean = re.sub(r'^[\s,，。、；：""''【】（ ）_\-+]+|[\s,，。、；：""''【】（ ）_\-+]+$', '', last_message.strip())
 
-        for pat in greeting_patterns:
-            if pat in msg_clean:
-                logger.info(f"[intent_node] 闲聊打招呼: '{last_message}' -> '{msg_clean}'")
-                self._add_thinking_step(state, "意图理解", "completed", f"闲聊打招呼")
-                return {"current_intent": "greeting", "entities": {}}
-
-        for pat in thanks_patterns:
-            if pat in msg_clean:
-                logger.info(f"[intent_node] 闲聊感谢: '{last_message}' -> '{msg_clean}'")
-                self._add_thinking_step(state, "意图理解", "completed", f"闲聊感谢")
-                return {"current_intent": "thanks", "entities": {}}
-
-        for pat in bye_patterns:
-            if pat in msg_clean:
-                logger.info(f"[intent_node] 闲聊告别: '{last_message}' -> '{msg_clean}'")
-                self._add_thinking_step(state, "意图理解", "completed", f"闲聊告别")
-                return {"current_intent": "bye", "entities": {}}
-
+        # 模型问题（不在 intent_templates 里，需要硬编码）
+        model_question_patterns = ["什么模型", "什么LLM", "什么AI", "你叫什么"]
         for pat in model_question_patterns:
             if pat in msg_clean:
-                logger.info(f"[intent_node] 闲聊模型问题: '{last_message}' -> '{msg_clean}'")
+                logger.info(f"[intent_node] 闲聊模型问题: '{last_message}'")
                 self._add_thinking_step(state, "意图理解", "completed", f"闲聊模型问题")
                 return {"current_intent": "greeting", "entities": {}}
+
+        # 使用 rule_engine 的意图配置检查闲聊意图
+        rule_intent_result = self.rule_engine.recognize_intent(msg_clean)
+        if rule_intent_result and rule_intent_result.intent in ["greeting", "thanks", "bye"]:
+            logger.info(f"[intent_node] 闲聊意图(Rule): '{last_message}' -> {rule_intent_result.intent}")
+            self._add_thinking_step(state, "意图理解", "completed", f"闲聊{rule_intent_result.intent}")
+            return {"current_intent": rule_intent_result.intent, "entities": {}}
 
         # 闲聊意图检查完成，继续满意度确认检查
         prev_clar_type = getattr(state, '_prev_clarification_type', None)
@@ -1869,6 +1855,95 @@ class ConversationNodes:
 
         return None
 
+    def _sql_build_by_template(self, state: ConversationState) -> Dict[str, Any]:
+        """
+        SQL 构建节点 - 使用 SQL 模板引擎 (A/B Test)
+
+        当 sql_mode == 'template' 时使用此方法:
+        1. 直接使用 intent_node 识别到的 intent
+        2. 调用 sql_template_engine 生成 SQL
+        3. 替换占位符
+        """
+        try:
+            from ai.sql_template_engine import generate_sql
+        except ImportError:
+            logger.warning("[_sql_build_by_template] sql_template_engine 未安装，降级到规则引擎")
+            return {"generated_sql": None, "skip_execution": False}
+
+        intent = getattr(state, 'current_intent', None)
+        if not intent:
+            logger.warning("[_sql_build_by_template] 未识别到意图，降级到规则引擎")
+            return {"generated_sql": None, "skip_execution": False}
+
+        # 非查询意图跳过
+        non_query_intents = ["greeting", "thanks", "bye", "unknown"]
+        if intent in non_query_intents:
+            return {"skip_sql_generation": True, "generated_sql": None}
+
+        # 构建 entities 上下文
+        entities = state.entities or {}
+        metric_code = entities.get("metric_code", "")
+        metric_name = entities.get("metric_name", "")
+
+        # 从 starrocks_sql 提取 field 和 table
+        starrocks_sql = entities.get("starrocks_sql", "")
+        field = "*"
+        table = "metric_table"
+
+        if starrocks_sql:
+            import re
+            # 提取 SELECT 字段
+            select_match = re.search(r'SELECT\s+(.+?)\s+FROM\s+', starrocks_sql, re.IGNORECASE | re.DOTALL)
+            if select_match:
+                field = select_match.group(1).strip()
+            # 提取表名
+            table_match = re.search(r'FROM\s+([^\s;]+)', starrocks_sql, re.IGNORECASE)
+            if table_match:
+                table = table_match.group(1).strip()
+
+        # 获取时间范围
+        time_info = entities.get("time_info", {})
+        start_date = time_info.get("start_date", "2026-01-01")
+        end_date = time_info.get("end_date", "2026-04-12")
+
+        # 构建上下文
+        context = {
+            "metric_code": metric_code,
+            "field": field,
+            "table": table,
+            "start_date": start_date,
+            "end_date": end_date,
+            "dimension": entities.get("dimension", "dt"),
+            "top_n": "10"
+        }
+
+        # 下钻维度
+        drill_dims = getattr(state, 'drill_down_dims', None)
+        drill_dims_list = []
+        if drill_dims and isinstance(drill_dims, list):
+            drill_dims_list = [d.get("dim_name", "") for d in drill_dims if d.get("dim_name")]
+
+        # 生成 SQL
+        logger.info(f"[_sql_build_by_template] intent={intent}, metric={metric_name}({metric_code})")
+        generated_sql = generate_sql(intent, context, drill_dims_list)
+
+        if generated_sql:
+            logger.info(f"[_sql_build_by_template] 模板生成SQL成功 (前100字符): {generated_sql[:100]}")
+
+            # 记录思考步骤
+            self._add_thinking_step(state, "SQL生成(模板)", "completed",
+                f"使用SQL模板生成，指标: {metric_name or '未知指标'}")
+
+            return {
+                "generated_sql": generated_sql,
+                "sql_params": {"metric_code": metric_code},
+                "skip_execution": False,
+                "sql_source": "template"  # 标记SQL来源
+            }
+        else:
+            logger.warning(f"[_sql_build_by_template] 模板未匹配到 intent={intent}，降级到规则引擎")
+            return {"generated_sql": None, "skip_execution": False}
+
     def sql_build_node(self, state: ConversationState) -> Dict[str, Any]:
         """
         SQL 构建节点 - 使用 QueryBuilder 替代 _build_value_sql
@@ -1879,6 +1954,12 @@ class ConversationNodes:
         2. 调用 QueryBuilder.build_sql()
         3. 后处理（SKU占位符移除等）
         """
+
+        # ========== SQL 模板模式 (A/B Test) ==========
+        sql_mode = getattr(state, 'sql_mode', 'llm')
+        if sql_mode == 'template':
+            return self._sql_build_by_template(state)
+
         metric_code = state.entities.get("metric_code")
         metric_id = state.entities.get("metric_id")
         metric_name = state.entities.get("metric_name")

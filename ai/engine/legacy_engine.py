@@ -355,7 +355,7 @@ class LegacyEngine(ConversationEngine):
             return None
 
         # 获取当前分组维度，用于过滤（统一转大写避免大小写问题）
-        current_dimension = state.entities.get("dimension", "").upper()
+        current_dimension = (state.entities.get("dimension") or "").upper()
 
         # 时间维度列表 - 不作为下钻维度
         time_dimension_keywords = ["日", "月", "年", "周", "天", "DAY", "MONTH", "YEAR", "WEEK"]

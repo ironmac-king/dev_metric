@@ -1,0 +1,1 @@
+7日均值 sql_pattern: 'AVG({metric}) OVER(ORDER BY fdate ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)'n

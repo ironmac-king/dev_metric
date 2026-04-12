@@ -36,8 +36,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// API v1
 	v1 := r.Group("/api/v1")
 	{
-		// 指标管理
+		// 指标管理（需要认证）
 		metrics := v1.Group("/metrics")
+		metrics.Use(middleware.AuthMiddleware())
 		{
 			metrics.GET("", handler.ListMetrics)
 			metrics.POST("", handler.CreateMetric)

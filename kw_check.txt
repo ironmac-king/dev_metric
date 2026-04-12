@@ -1,0 +1,3 @@
+keywords: 销售额比上期,销售额环比增长,比上期销售额
+has 销售环比: False
+has plain 环比: True

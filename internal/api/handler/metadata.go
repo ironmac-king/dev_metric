@@ -6,6 +6,7 @@ import (
 	"dev_metric/pkg/response"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 // GetAllMetrics 获取所有指标（供 AI 服务调用）
@@ -122,6 +123,23 @@ func UpdateTerm(c *gin.Context) {
 	if err := c.ShouldBindJSON(&updates); err != nil {
 		response.Error(c, response.CodeBadRequest, "参数错误")
 		return
+	}
+
+	// 处理 pq.StringArray 类型的更新（GORM 需要特殊处理）
+	if syns, ok := updates["synonyms"]; ok {
+		switch v := syns.(type) {
+		case []interface{}:
+			// JSON array -> pq.StringArray
+			strArr := make(pq.StringArray, len(v))
+			for i, item := range v {
+				if s, ok := item.(string); ok {
+					strArr[i] = s
+				}
+			}
+			updates["synonyms"] = strArr
+		case []string:
+			updates["synonyms"] = pq.StringArray(v)
+		}
 	}
 
 	if err := postgres.Get().Model(&term).Updates(updates).Error; err != nil {

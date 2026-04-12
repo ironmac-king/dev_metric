@@ -48,7 +48,7 @@ export const starrocksAPI = {
   testConnection: (data) => api.post('/starrocks/config/test', data)
 }
 
-// 维度配置 API
+// 维度配置 API (dimension_configs 表 - SQL 生成用)
 export const dimensionConfigAPI = {
   list: (params) => api.get('/dimension-configs', { params }),
   getTables: () => api.get('/dimension-configs/tables'),

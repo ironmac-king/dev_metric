@@ -106,22 +106,177 @@ func AskQuestion(c *gin.Context) {
 	var pythonResp map[string]interface{}
 	json.Unmarshal(body, &pythonResp)
 
+	// 获取 session_id（供后续使用）
+	sessionID := ""
+	if sid, ok := pythonResp["session_id"].(string); ok {
+		sessionID = sid
+	}
+
 	// 从 Python 响应获取 session_id，同步到 Go 数据库
-	if sessionID, ok := pythonResp["session_id"].(string); ok && sessionID != "" {
+	if sessionID != "" {
 		now := time.Now()
 		title := ""
 		if answer, ok := pythonResp["answer"].(string); ok {
 			title = answer
+		}
+		userIDStr := strconv.FormatUint(uint64(userID), 10)
+		if userIDStr == "0" {
+			userIDStr = "default"
 		}
 		summary := model.AskSessionSummary{
 			SessionID:     sessionID,
 			Title:        title,
 			FirstQuestion: req.Question,
 			MessageCount: 1,
+			UserID:        userIDStr,
 			UpdatedAt:    now,
 		}
 		postgres.Get().Where("session_id = ?", sessionID).Assign(summary).FirstOrCreate(&model.AskSessionSummary{})
+
+		// 保存用户消息和助手消息到 AskMessage 表
+		saveMessages := func() {
+			ctx := context.Background()
+			cacheKey := fmt.Sprintf("ask:messages:%s", sessionID)
+
+			// 构造用户消息
+			userMsg := model.AskMessage{
+				SessionID:         sessionID,
+				Role:              "user",
+				Content:           req.Question,
+				SQL:               "",
+				ResultData:        "",
+				ComparisonResults: "",
+				DrillDownDims:    "",
+				Breadcrumbs:       "",
+				MetricCode:        "",
+			}
+
+			// 序列化 result_data
+			var resultDataStr string
+			if rd, ok := pythonResp["result_data"].(string); ok {
+				resultDataStr = rd
+			} else if rdMap, ok := pythonResp["result_data"]; ok && rdMap != nil {
+				if rdBytes, err := json.Marshal(rdMap); err == nil {
+					resultDataStr = string(rdBytes)
+				}
+			}
+
+			// 序列化 comparison_results
+			var comparisonResultsStr string
+			if cr, ok := pythonResp["comparison_results"]; ok && cr != nil {
+				if crBytes, err := json.Marshal(cr); err == nil {
+					comparisonResultsStr = string(crBytes)
+				}
+			}
+
+			// 序列化 drill_down_dims
+			var drillDownDimsStr string
+			if dd, ok := pythonResp["drill_down_dims"]; ok && dd != nil {
+				if ddBytes, err := json.Marshal(dd); err == nil {
+					drillDownDimsStr = string(ddBytes)
+				}
+			}
+
+			// 序列化 breadcrumbs
+			var breadcrumbsStr string
+			if bc, ok := pythonResp["breadcrumbs"]; ok && bc != nil {
+				if bcBytes, err := json.Marshal(bc); err == nil {
+					breadcrumbsStr = string(bcBytes)
+				}
+			}
+
+			// 获取 metric_code
+			metricCode := ""
+			if mc, ok := pythonResp["metric_code"].(string); ok {
+				metricCode = mc
+			}
+
+			// 构造助手消息
+			// 安全提取字符串字段，避免 nil 值导致 panic
+			getString := func(key string) string {
+				if v, ok := pythonResp[key].(string); ok {
+					return v
+				}
+				return ""
+			}
+
+			assistantMsg := model.AskMessage{
+				SessionID:         sessionID,
+				Role:              "assistant",
+				Content:           getString("answer"),
+				SQL:               getString("sql"),
+				ResultData:        resultDataStr,
+				ComparisonResults: comparisonResultsStr,
+				DrillDownDims:    drillDownDimsStr,
+				Breadcrumbs:       breadcrumbsStr,
+				MetricCode:        metricCode,
+			}
+
+			// 同步写 Redis（7天过期）
+			var existing []model.AskMessage
+			if err := cache.GetJSON(ctx, cacheKey, &existing); err != nil {
+				existing = []model.AskMessage{}
+			}
+			existing = append(existing, userMsg)
+			existing = append(existing, assistantMsg)
+			cache.SetJSON(ctx, cacheKey, existing, 7*24*time.Hour)
+
+			// 异步写 PostgreSQL
+			go func() {
+				postgres.Get().Create(&userMsg)
+				postgres.Get().Create(&assistantMsg)
+			}()
+		}
+		saveMessages()
 	}
+
+	// 写入问数分析日志
+	userIDStr := strconv.FormatUint(uint64(userID), 10)
+	if userIDStr == "0" {
+		userIDStr = "default"
+	}
+	analysisLog := model.AskAnalysisLog{
+		UserID:     userIDStr,
+		SessionID:  sessionID,
+		Question:   req.Question,
+		Answer:     "",
+		Intent:     "",
+		Success:    true,
+		FailStage:  "",
+		FailReason: "",
+		Suggestion: "",
+	}
+	if answer, ok := pythonResp["answer"].(string); ok {
+		analysisLog.Answer = answer
+	}
+	if intent, ok := pythonResp["intent"].(string); ok {
+		analysisLog.Intent = intent
+	}
+	if needsClarification, ok := pythonResp["needs_clarification"].(bool); ok && needsClarification {
+		analysisLog.Success = false
+		analysisLog.FailStage = "sql"
+		if msg, ok := pythonResp["clarification_message"].(string); ok {
+			analysisLog.FailReason = msg
+		}
+	}
+	if failReason, ok := pythonResp["fail_reason"].(string); ok && failReason != "" {
+		analysisLog.Success = false
+		if analysisLog.FailStage == "" {
+			analysisLog.FailStage = "unknown"
+		}
+		analysisLog.FailReason = failReason
+	}
+	if suggestion, ok := pythonResp["suggestion"].(string); ok {
+		analysisLog.Suggestion = suggestion
+	}
+	if thinkingSteps, ok := pythonResp["thinking_steps"].([]interface{}); ok {
+		if stepsJSON, err := json.Marshal(thinkingSteps); err == nil {
+			analysisLog.ThinkingSteps = string(stepsJSON)
+		}
+	} else if thinkingStepsStr, ok := pythonResp["thinking_steps"].(string); ok {
+		analysisLog.ThinkingSteps = thinkingStepsStr
+	}
+	postgres.Get().Create(&analysisLog)
 
 	// 从原始 JSON 字节中直接提取 result_data（保持 Python 返回的原始列顺序）
 	var resultDataJSON []byte

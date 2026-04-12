@@ -30,7 +30,7 @@ func getFormulaSyntaxConfigs() []model.FormulaSyntaxConfig {
 		{Name: "月初至今累计", Category: "时间序列", IntentType: "query_value", Keywords: "月初至今,MTD,月初到现在,本月累计", SQLPattern: "SUM({metric}) OVER(PARTITION BY YEAR(dt), MONTH(dt) ORDER BY dt)", Priority: 10},
 		{Name: "7日均值", Category: "时间序列", IntentType: "query_value", Keywords: "7日均值,近7天平均,周均,最近7天,7天平均,周平均,近7天均值,7天平均值,最近一周平均,这7天平均,过去7天均值,7日平均,周均值,最近一周是多少", SQLPattern: "AVG({metric}) OVER(ORDER BY dt ROWS 6 PRECEDING)", Priority: 10},
 		{Name: "30日均值", Category: "时间序列", IntentType: "query_value", Keywords: "30日均值,近30天平均,月均,最近1个月,月平均", SQLPattern: "AVG({metric}) OVER(ORDER BY dt ROWS 29 PRECEDING)", Priority: 10},
-		{Name: "环比增长值", Category: "时间序列", IntentType: "query_value", Keywords: "环比增长,比上期,跟上个周期比,和上期比,跟上个月比,跟上期比,比上个月增长,比上周增长,和上个月比怎么样,跟上个周期比增长,近期对比,环比增加,环比上涨,比上一期", SQLPattern: "{metric} - LAG({metric}, 1) OVER(ORDER BY dt)", Priority: 10},
+		{Name: "环比增长值", Category: "时间序列", IntentType: "query_value", Keywords: "比上期增长,跟上个周期比,和上期比,跟上个月比,跟上期比,比上个月增长,比上周增长,和上个月比怎么样,跟上个周期比增长,近期对比,比上一期增长,上期增长", SQLPattern: "{metric} - LAG({metric}, 1) OVER(ORDER BY dt)", Priority: 10},
 		{Name: "同比增长值", Category: "时间序列", IntentType: "query_value", Keywords: "同比增长,比去年同期,跟去年同期比,去年同期的增长,比去年增长,和去年比,跟去年同期比增长,同比增长了多少,去年增长,年际增长", SQLPattern: "{metric} - LAG({metric}, 1) OVER(PARTITION BY QUARTER(dt))", Priority: 10},
 		{Name: "上月同日", Category: "时间序列", IntentType: "query_value", Keywords: "上月同天,上月同期,上月同日,去年同期同天", SQLPattern: "LAG({metric}, 1) OVER(PARTITION BY DAY(dt))", Priority: 10},
 		// 销售分析补充 - 时间序列
@@ -38,7 +38,7 @@ func getFormulaSyntaxConfigs() []model.FormulaSyntaxConfig {
 		{Name: "年环比增长", Category: "时间序列", IntentType: "query_value", Keywords: "年环比,年际增长,年度增长", SQLPattern: "{metric} / LAG({metric}, 4) OVER(PARTITION BY WEEK(dt)) - 1", Priority: 10},
 		{Name: "季度初至今", Category: "时间序列", IntentType: "query_value", Keywords: "QTD,季度初至今,本季度累计", SQLPattern: "SUM({metric}) OVER(PARTITION BY YEAR(dt), QUARTER(dt) ORDER BY dt)", Priority: 10},
 		{Name: "同比增长率", Category: "时间序列", IntentType: "query_value", Keywords: "同比增长率,比去年同期增长,同比增长百分比", SQLPattern: "({metric} - LAG({metric}, 1) OVER(PARTITION BY YEAR(dt), QUARTER(dt))) / NULLIF(LAG({metric}, 1) OVER(PARTITION BY YEAR(dt), QUARTER(dt)), 0) * 100", Priority: 10},
-		{Name: "环比增长率", Category: "时间序列", IntentType: "query_value", Keywords: "环比增长率,比上期增长,环比增长百分比", SQLPattern: "({metric} - LAG({metric}, 1) OVER(ORDER BY dt)) / NULLIF(LAG({metric}, 1) OVER(ORDER BY dt), 0) * 100", Priority: 10},
+		{Name: "环比增长率", Category: "时间序列", IntentType: "query_value", Keywords: "比上期增长率,比上期增长百分比,上期增长百分比", SQLPattern: "({metric} - LAG({metric}, 1) OVER(ORDER BY dt)) / NULLIF(LAG({metric}, 1) OVER(ORDER BY dt), 0) * 100", Priority: 10},
 		{Name: "近7日合计", Category: "时间序列", IntentType: "query_value", Keywords: "近7日,最近7天,最近一周,7日合计,7天累加,近7天总计", SQLPattern: "SUM({metric}) OVER(ORDER BY dt ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)", Priority: 10},
 		{Name: "近30日合计", Category: "时间序列", IntentType: "query_value", Keywords: "近30日,最近30天,最近一个月,30日合计", SQLPattern: "SUM({metric}) OVER(ORDER BY dt ROWS BETWEEN 29 PRECEDING AND CURRENT ROW)", Priority: 10},
 		{Name: "销售同比", Category: "时间序列", IntentType: "query_value", Keywords: "销售同比,销售额同比增长,比去年销售", SQLPattern: "SUM(sales) / LAG(SUM(sales), 1) OVER(PARTITION BY YEAR(dt)) - 1", Priority: 10},
