@@ -1906,15 +1906,17 @@ class ConversationNodes:
         start_date = time_info.get("start_date", "2026-01-01")
         end_date = time_info.get("end_date", "2026-04-12")
 
-        # 构建上下文
+        # 构建上下文 - 传递 starrocks_sql 让 engine._build_context 重新解析
+        # 同时传递已解析的 field/table 作为后备
         context = {
             "metric_code": metric_code,
-            "field": field,
-            "table": table,
+            "starrocks_sql": starrocks_sql,  # 让 engine 重新解析
+            "time_info": time_info,  # 传递完整 time_info
             "start_date": start_date,
             "end_date": end_date,
-            "dimension": entities.get("dimension", "dt"),
-            "top_n": "10"
+            "date_column": entities.get("date_column", "FDATE"),  # 日期列
+            "dimension": entities.get("dimension"),  # 不设默认值，让 engine 处理
+            "top_n": entities.get("top_n", "10")
         }
 
         # 下钻维度
