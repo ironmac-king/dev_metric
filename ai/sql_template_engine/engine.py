@@ -71,12 +71,12 @@ class SQLTemplateEngine:
         match = re.search(r'SELECT\s+(.+?)\s+FROM\s+', starrocks_sql, re.IGNORECASE | re.DOTALL)
         if match:
             field = match.group(1).strip()
-            # 提取 alias（如 "SUM(SPEND) AS SPEND" -> alias="SPEND"）
-            alias_match = re.search(r'\s+AS\s+(\w+)\s*$', field, re.IGNORECASE)
+            # 提取 alias（支持反引号，如 "SUM(SPEND) AS `SPEND`" 或 "SUM(SPEND) AS SPEND"）
+            alias_match = re.search(r'\s+AS\s+`?(\w+)`?\s*$', field, re.IGNORECASE)
             if alias_match:
                 alias = alias_match.group(1)
                 # 提取原始字段表达式（去掉 AS alias 部分）
-                raw_field = re.sub(r'\s+AS\s+\w+\s*$', '', field, flags=re.IGNORECASE).strip()
+                raw_field = re.sub(r'\s+AS\s+`?\w+`?\s*$', '', field, flags=re.IGNORECASE).strip()
             else:
                 alias = "metric_value"
                 raw_field = field

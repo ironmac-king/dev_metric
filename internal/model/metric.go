@@ -343,11 +343,12 @@ type AskMessage struct {
 	SQL       string    `json:"sql" gorm:"type:text"`
 	CreatedAt time.Time `json:"created_at"`
 	// 响应数据（JSON 序列化存储）
-	ResultData       string `json:"result_data" gorm:"type:text"`
-	ComparisonResults string `json:"comparison_results" gorm:"column:comparison_results;type:text"`
-	DrillDownDims    string `json:"drill_down_dims" gorm:"type:text"`
-	Breadcrumbs      string `json:"breadcrumbs" gorm:"type:text"`
-	MetricCode       string `json:"metric_code" gorm:"size:64"`
+	ResultData        string `json:"result_data" gorm:"type:text"`
+	ComparisonResults  string `json:"comparison_results" gorm:"column:comparison_results;type:text"`
+	DrillDownDims     string `json:"drill_down_dims" gorm:"type:text"`
+	Breadcrumbs       string `json:"breadcrumbs" gorm:"type:text"`
+	MetricCode        string `json:"metric_code" gorm:"size:64"`
+	ThinkingSteps     string `json:"thinking_steps" gorm:"type:text"` // 思考过程（JSON序列化）
 }
 
 func (AskMessage) TableName() string {

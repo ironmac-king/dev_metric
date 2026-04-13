@@ -42,11 +42,12 @@ func GetUserRoleFromContext(c *gin.Context) string {
 // AskQuestion 智能问数 - 调用 Python AI 服务
 func AskQuestion(c *gin.Context) {
 	var req struct {
-		Question  string `json:"question" binding:"required"`
-		SessionID string `json:"session_id"`
-		Page      int    `json:"page"`
-		PageSize  int    `json:"page_size"`
+		Question   string `json:"question" binding:"required"`
+		SessionID  string `json:"session_id"`
+		Page       int    `json:"page"`
+		PageSize   int    `json:"page_size"`
 		EngineType string `json:"engine_type"`
+		SqlMode    string `json:"sql_mode"` // SQL生成模式: "llm" | "template"
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -86,6 +87,7 @@ func AskQuestion(c *gin.Context) {
 		"page":       req.Page,
 		"page_size":  req.PageSize,
 		"engine_type": req.EngineType,
+		"sql_mode":   req.SqlMode, // SQL生成模式: "llm" | "template"
 	}
 	jsonData, _ := json.Marshal(payload)
 
@@ -191,6 +193,14 @@ func AskQuestion(c *gin.Context) {
 				metricCode = mc
 			}
 
+			// 序列化 thinking_steps
+			var thinkingStepsStr string
+			if ts, ok := pythonResp["thinking_steps"]; ok && ts != nil {
+				if tsBytes, err := json.Marshal(ts); err == nil {
+					thinkingStepsStr = string(tsBytes)
+				}
+			}
+
 			// 构造助手消息
 			// 安全提取字符串字段，避免 nil 值导致 panic
 			getString := func(key string) string {
@@ -210,6 +220,7 @@ func AskQuestion(c *gin.Context) {
 				DrillDownDims:    drillDownDimsStr,
 				Breadcrumbs:       breadcrumbsStr,
 				MetricCode:        metricCode,
+				ThinkingSteps:     thinkingStepsStr,
 			}
 
 			// 同步写 Redis（7天过期）
@@ -659,6 +670,7 @@ func SaveMessage(c *gin.Context) {
 		DrillDownDims   string `json:"drill_down_dims"`
 		Breadcrumbs     string `json:"breadcrumbs"`
 		MetricCode      string `json:"metric_code"`
+		ThinkingSteps   string `json:"thinking_steps"` // 思考过程
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -677,6 +689,7 @@ func SaveMessage(c *gin.Context) {
 		DrillDownDims:   req.DrillDownDims,
 		Breadcrumbs:     req.Breadcrumbs,
 		MetricCode:      req.MetricCode,
+		ThinkingSteps:   req.ThinkingSteps,
 	}
 
 	// 同步写 Redis（7天过期）
@@ -723,6 +736,7 @@ func GetMessages(c *gin.Context) {
 				"drill_down_dims":    decodeJSON(msg.DrillDownDims),
 				"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 				"metric_code":         msg.MetricCode,
+				"thinking_steps":      decodeJSON(msg.ThinkingSteps),
 			}
 		}
 		response.Success(c, gin.H{"messages": result, "source": "redis"})
@@ -752,6 +766,7 @@ func GetMessages(c *gin.Context) {
 			"drill_down_dims":    decodeJSON(msg.DrillDownDims),
 			"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 			"metric_code":         msg.MetricCode,
+			"thinking_steps":      decodeJSON(msg.ThinkingSteps),
 		}
 	}
 	response.Success(c, gin.H{"messages": result, "source": "db"})

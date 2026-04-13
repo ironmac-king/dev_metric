@@ -7,6 +7,20 @@ from ai.config.logging_config import get_logger
 
 logger = get_logger("ai.metric_client")
 
+# 全局 HTTP 客户端（连接池复用）
+_http_client: Optional[httpx.Client] = None
+
+
+def get_http_client() -> httpx.Client:
+    """获取全局 HTTP 客户端（单例，连接池复用）"""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.Client(
+            timeout=10.0,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        )
+    return _http_client
+
 
 class MetricClient:
     """指标平台 API 客户端"""
@@ -19,14 +33,16 @@ class MetricClient:
     def get_all_metrics(self) -> List[Dict[str, Any]]:
         """获取所有指标（带缓存）"""
         if self._metrics_cache is None:
-            response = httpx.get(f"{self.base_url}/api/v1/metadata/metrics")
+            client = get_http_client()
+            response = client.get(f"{self.base_url}/api/v1/metadata/metrics")
             response.raise_for_status()
             self._metrics_cache = response.json()["data"]
         return self._metrics_cache
 
     def get_metric(self, metric_id: int) -> Dict[str, Any]:
         """获取指标详情"""
-        response = httpx.get(f"{self.base_url}/api/v1/metadata/metrics/{metric_id}")
+        client = get_http_client()
+        response = client.get(f"{self.base_url}/api/v1/metadata/metrics/{metric_id}")
         response.raise_for_status()
         return response.json()["data"]
 
@@ -40,7 +56,11 @@ class MetricClient:
                     # 获取关联的维度
                     metric_id = m.get("id")
                     if metric_id:
-                        response = httpx.get(f"{self.base_url}/api/v1/metadata/metrics/{metric_id}", timeout=5)
+                        client = get_http_client()
+                        response = client.get(
+                            f"{self.base_url}/api/v1/metadata/metrics/{metric_id}",
+                            timeout=5
+                        )
                         if response.status_code == 200:
                             data = response.json().get("data", {})
                             m["dimensions"] = data.get("dimensions", [])
@@ -53,29 +73,33 @@ class MetricClient:
     def get_all_dimensions(self) -> List[Dict[str, Any]]:
         """获取所有维度（带缓存）"""
         if self._dimensions_cache is None:
-            response = httpx.get(f"{self.base_url}/api/v1/metadata/dimensions")
+            client = get_http_client()
+            response = client.get(f"{self.base_url}/api/v1/metadata/dimensions")
             response.raise_for_status()
             self._dimensions_cache = response.json()["data"]
         return self._dimensions_cache
 
     def get_all_terms(self) -> List[Dict[str, Any]]:
         """获取所有业务术语"""
-        response = httpx.get(f"{self.base_url}/api/v1/metadata/terms")
+        client = get_http_client()
+        response = client.get(f"{self.base_url}/api/v1/metadata/terms")
         response.raise_for_status()
         return response.json()["data"]
 
     def get_metric_data(self, metric_id: int) -> Dict[str, Any]:
         """获取指标数据"""
-        response = httpx.get(f"{self.base_url}/api/v1/metrics/{metric_id}/data")
+        client = get_http_client()
+        response = client.get(f"{self.base_url}/api/v1/metrics/{metric_id}/data")
         response.raise_for_status()
         return response.json()["data"]
 
     def get_dimension_configs(self, table_name: str = None) -> List[Dict[str, Any]]:
         """获取维度配置"""
+        client = get_http_client()
         params = {}
         if table_name:
             params["table_name"] = table_name
-        response = httpx.get(
+        response = client.get(
             f"{self.base_url}/api/v1/dimension-configs",
             params=params,
             timeout=10
@@ -86,7 +110,8 @@ class MetricClient:
     def get_formula_syntax_configs(self) -> List[Dict[str, Any]]:
         """获取所有启用的公式语法配置"""
         import json
-        response = httpx.get(
+        client = get_http_client()
+        response = client.get(
             f"{self.base_url}/api/v1/nlp/formula-syntax/enabled",
             timeout=10
         )
@@ -190,8 +215,9 @@ class MetricClient:
                 "suggestion": suggestion,
                 "thinking_steps": thinking_steps
             }
-            response = httpx.post(
-                f"{self.base_url}/api/v1/ask-analysis/logs",
+            client = get_http_client()
+            response = client.post(
+                f"{self.base_url}/api/v1/internal/ask-analysis/logs",
                 json=payload,
                 timeout=10
             )

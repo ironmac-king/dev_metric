@@ -50,8 +50,9 @@ class TemplateManager:
     def _load_from_api(self) -> bool:
         """从 Go API 加载模板，返回是否成功"""
         try:
-            import httpx
-            response = httpx.get(
+            from ai.client.http_client import get_http_client
+            client = get_http_client()
+            response = client.get(
                 f"{self.api_base}/api/v1/nlp/templates",
                 params={"type": "engine"},
                 timeout=5

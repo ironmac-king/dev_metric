@@ -40,6 +40,10 @@ class TimeParser:
         if not text:
             return None
 
+        # 类型检查：防止传入 dict 等非字符串类型
+        if not isinstance(text, str):
+            return None
+
         text = text.strip()
 
         # 1. 带年份的绝对月份: "2024年7月"
@@ -309,7 +313,7 @@ class TimeParser:
             r"今天|今日|本日": ("today", 0, 0),
             r"明天|明日": ("tomorrow", 1, 0),
             r"本周|这周": ("this_week", 0, 0),
-            r"本月|这月": ("this_month", 0, 0),
+            r"本月|当月|这月": ("this_month", 0, 0),
             r"上周|上一周": ("last_week", -1, 0),
             r"上月|上一月|上个月|上个月份": ("last_month", -1, 0),
             r"去年|上年": ("last_year", -1, 0),

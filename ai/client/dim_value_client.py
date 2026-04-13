@@ -7,6 +7,20 @@ from ai.config.logging_config import get_logger
 
 logger = get_logger("ai.dim_value_client")
 
+# 全局 HTTP 客户端（连接池复用）
+_http_client: Optional[httpx.Client] = None
+
+
+def get_http_client() -> httpx.Client:
+    """获取全局 HTTP 客户端（单例，连接池复用）"""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.Client(
+            timeout=10.0,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        )
+    return _http_client
+
 
 class DimValueClient:
     """维度值查询客户端"""
@@ -32,7 +46,8 @@ class DimValueClient:
             [{"dimension_field": "GROUP_3", "dimension_value": "有线网卡", "match_type": "exact|prefix|fuzzy"}]
         """
         try:
-            response = httpx.get(
+            client = get_http_client()
+            response = client.get(
                 f"{self.base_url}/api/v1/dimension-values/search",
                 params={"query": query, "dimension_field": dimension_field, "limit": limit},
                 timeout=5
@@ -47,7 +62,8 @@ class DimValueClient:
     def increment_frequency(self, dimension_field: str, dimension_value: str):
         """用户选择后增加频次"""
         try:
-            httpx.post(
+            client = get_http_client()
+            client.post(
                 f"{self.base_url}/api/v1/dimension-values/frequency",
                 json={"dimension_field": dimension_field, "dimension_value": dimension_value},
                 timeout=3

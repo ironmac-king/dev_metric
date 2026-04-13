@@ -18,14 +18,13 @@ class WindowFragment(SQLFragment):
         date_col = context.get("date_column", "FDATE")
 
         if self.window_type == "LAG":
-            return f"""{raw_field} AS metric_value,
-    LAG({raw_field}, 1) OVER (ORDER BY {date_col}) AS prev_value,
+            # 只输出分析列，不输出 metric_value（由 MeasureFragment 输出）
+            return f"""LAG({raw_field}, 1) OVER (ORDER BY {date_col}) AS prev_value,
     {raw_field} - LAG({raw_field}, 1) OVER (ORDER BY {date_col}) AS diff,
     ROUND(({raw_field} - LAG({raw_field}, 1) OVER (ORDER BY {date_col})) / NULLIF(LAG({raw_field}, 1) OVER (ORDER BY {date_col}), 0) * 100, 2) AS mom_rate"""
 
         elif self.window_type == "RANK":
-            return f"""{raw_field} AS metric_value,
-    RANK() OVER (ORDER BY {raw_field} DESC) AS rank_num,
+            return f"""RANK() OVER (ORDER BY {raw_field} DESC) AS rank_num,
     ROUND({raw_field} / SUM({raw_field}) OVER () * 100, 2) AS pct_of_total"""
 
         elif self.window_type == "YoY":

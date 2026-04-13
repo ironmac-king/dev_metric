@@ -60,6 +60,11 @@ def save_message_to_go(session_id: str, role: str, content: str, sql: str = None
 
 app = FastAPI(title="智能问数服务")
 
+# 启动时加载语义向量
+@app.on_event("startup")
+async def startup_load_vectors():
+    load_semantic_vectors()
+
 # CORS 中间件
 app.add_middleware(
     CORSMiddleware,
@@ -1088,8 +1093,10 @@ async def generate_embeddings(request: Request):
     """内部接口：接收文本列表，返回阿里 embedding 向量"""
     from ai.engine.alibaba_embedding import alibaba_embedding
 
-    body = await request.json()
-    texts = body.get("texts", [])
+    body = await request.body()
+    import json
+    data = json.loads(body.decode('utf-8'))
+    texts = data.get("texts", [])
 
     if not texts:
         return {"code": 0, "data": []}

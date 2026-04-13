@@ -6,6 +6,7 @@ import redis
 import json
 from typing import Dict, Any, Optional
 from ai.config.logging_config import get_logger
+from ai.client.http_client import get_http_client
 
 logger = get_logger("ai.prompt_manager")
 
@@ -75,7 +76,8 @@ class PromptManager:
     def _get_from_db(self, name: str) -> Optional[Dict[str, Any]]:
         """从数据库获取配置"""
         try:
-            response = httpx.get(
+            client = get_http_client()
+            response = client.get(
                 f"{self.base_url}/api/v1/prompt-configs/active",
                 params={"name": name},
                 timeout=10
@@ -416,15 +418,19 @@ class PromptManager:
     "end": "结束日期(YYYY-MM-DD)",
     "original": "用户原始表达"
   },
-  "dimension": "维度粒度（如按日、按月）",
+  "dimension": "分组维度（仅限以下值之一：店铺、站点、平台、渠道、品类、商品、SKU、ASIN、国家、地区、区域、部门；或者时间粒度：日、月、年、周）。禁止自行创建维度名！",
   "dimension_values": "具体维度值（如GROUP_3=有线网卡，GROUP_2=配件）",
-  "comparison_period": "对比周期（可选）"
+  "comparison_period": "对比周期（可选）",
+  "formula_type": "公式类型（仅在intent为query_ratio时填写）：ratio",
+  "molecule_metric": "分子指标名称（仅在intent为query_ratio时填写，如退款数量）",
+  "denominator_metric": "分母指标名称（仅在intent为query_ratio时填写，如销量）"
 }
 
 【intent 取值范围 - 必须严格匹配】
 - query_value: 查询指标数值
 - query_trend: 查询趋势变化
 - query_comparison: 对比分析
+- query_ratio: 占比分析（当用户提到"占比"、"比例"、"A在B中的占比"时使用）
 - query_metadata: 查询元数据
 - query_yesterday: 查询昨天数据
 - query_today: 查询今天数据
@@ -475,6 +481,7 @@ class PromptManager:
 - query_value: 查询指标数值
 - query_trend: 查询趋势变化
 - query_comparison: 对比分析
+- query_ratio: 占比分析
 - query_metadata: 查询元数据（业务口径、技术口径）
 - query_yesterday: 查询昨天数据
 - query_today: 查询今天数据
@@ -496,6 +503,20 @@ class PromptManager:
 【指标识别】
 - 如提到"业务口径"、"技术口径"，intent应为 query_metadata
 
+【占比公式识别 - query_ratio】
+当用户询问"计算A在B中的占比"、"A占B的比例"、"占比"等时：
+1. intent 应为 "query_ratio"
+2. formula_type 应为 "ratio"
+3. molecule_metric 应为分子指标名称（A），如"退款数量"、"退货数量"
+4. denominator_metric 应为分母指标名称（B），如"销量"、"订单数量"
+5. dimension 填分组维度（如"店铺"、"平台"），dimension_values 填具体值
+6. 示例："计算亚马逊各店铺退款数量在销量中的占比"
+   - intent: "query_ratio"
+   - formula_type: "ratio"
+   - molecule_metric: "退款数量"
+   - denominator_metric: "销量"
+   - dimension: "店铺"
+
 【追问处理 - 重要】
 当用户说"环比呢"、"同比呢"、"趋势呢"等简短的追问时：
 1. 如果上下文中有上轮查询的指标，intent应继承上轮的意图
@@ -507,6 +528,12 @@ class PromptManager:
 1. 必须输出合法JSON
 2. time_range的start和end在没有具体日期时使用null
 3. confidence低于0.5时，intent使用"unknown"
+4. dimension只输出已知的维度值，禁止自创维度名！
+   - ❌ 错误示例："退款数量在销量中"、"照销售额降序排列"、"按月查看"
+   - ✅ 正确示例：店铺、站点、平台、品类、SKU、ASIN、日、月、年、周
+5. 如果用户提到的是指标计算表达式（如"退款数量在销量中的占比"），这不是维度！
+   - 如果包含"占比"、"比例"关键词，应使用query_ratio意图，并填写molecule_metric和denominator_metric
+   - dimension应填写分组维度（如店铺），而非计算表达式
 
 请只输出JSON，不要有其他内容。"""
 

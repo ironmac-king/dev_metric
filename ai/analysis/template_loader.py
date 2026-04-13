@@ -7,6 +7,7 @@ import json
 import os
 import time
 from functools import lru_cache
+from ai.client.http_client import get_http_client
 
 
 class TemplateLoader:
@@ -39,7 +40,8 @@ class TemplateLoader:
             return self._cache.get("templates", [])
 
         try:
-            response = httpx.get(
+            client = get_http_client()
+            response = client.get(
                 f"{self.api_base}/api/v1/prompt-configs",
                 params={"category": "decision_analysis"},
                 timeout=10

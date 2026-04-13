@@ -8,11 +8,13 @@ class GroupByFragment(SQLFragment):
 
     def render(self, context: Dict[str, Any]) -> str:
         dimension = context.get("dimension")
-        if dimension:
-            return f"GROUP BY {dimension}"
-        # 无 dimension 时默认按日期分组
+        # 时间维度词（日/月/年）不是真正的分组维度，应该用 date_column
+        time_words = {"日", "月", "年", "天", "周", "day", "month", "year", "week"}
+        if dimension and dimension.lower() not in time_words:
+            return dimension
+        # 无有效 dimension 时默认按日期分组
         date_col = context.get("date_column", "FDATE")
-        return f"GROUP BY {date_col}"
+        return date_col
 
     def required_context(self) -> List[str]:
         return ["date_column"]

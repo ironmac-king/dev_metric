@@ -9,7 +9,7 @@ from .fragments.window import WindowFragment
 
 # 意图→片段配置
 INTENT_FRAGMENTS: Dict[str, List[Type[SQLFragment]]] = {
-    "query_value": [MeasureFragment],
+    "query_value": [MeasureFragment, WhereFragment],
     "query_trend": [MeasureFragment, WhereFragment, GroupByFragment],
     "query_ranking": [MeasureFragment, WhereFragment, GroupByFragment],
     "query_comparison": [MeasureFragment, WhereFragment],

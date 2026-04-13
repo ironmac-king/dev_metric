@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -256,37 +257,59 @@ func RebuildMetricEmbeddings(c *gin.Context) {
 	postgres.Get().Find(&metrics)
 
 	count := 0
-	for _, m := range metrics {
-		// 构建待向量化的文本：名称 + 英文名 + 业务定义
-		texts := []string{m.Name}
+	batchSize := 20 // 每批处理的指标数量
+
+	// 辅助函数：构建指标的向量化文本
+	buildText := func(m model.Metric) string {
+		parts := []string{m.Name}
 		if m.NameEn != "" {
-			texts = append(texts, m.NameEn)
+			parts = append(parts, m.NameEn)
 		}
 		if m.BusinessDefinition != "" {
-			texts = append(texts, m.BusinessDefinition)
+			parts = append(parts, m.BusinessDefinition)
 		}
-		combinedText := strings.Join(texts, " ")
+		return strings.Join(parts, " ")
+	}
 
-		// 调用 AI 服务生成向量
-		embedding, err := generateEmbedding(combinedText)
+	// 分批处理
+	for i := 0; i < len(metrics); i += batchSize {
+		end := i + batchSize
+		if end > len(metrics) {
+			end = len(metrics)
+		}
+		batch := metrics[i:end]
+
+		// 准备批量文本和指标映射
+		texts := make([]string, 0, len(batch))
+		textToMetric := make(map[string]model.Metric, len(batch))
+		for _, m := range batch {
+			combinedText := buildText(m)
+			texts = append(texts, combinedText)
+			textToMetric[combinedText] = m
+		}
+
+		// 调用 Python AI 服务批量生成向量（使用阿里 embedding）
+		vectors, err := generateEmbeddingsBatch(texts)
 		if err != nil {
+			log.Printf("批量生成向量失败: %v", err)
 			continue
 		}
 
-		// 存储向量
-		embeddingJSON, _ := json.Marshal(embedding)
-		emb := model.MetricEmbedding{
-			MetricID:   m.ID,
-			MetricCode: m.MetricCode,
-			Text:       combinedText,
-			Embedding:  string(embeddingJSON),
+		// 存储每条向量
+		for combinedText, emb := range vectors {
+			m := textToMetric[combinedText]
+			embeddingJSON, _ := json.Marshal(emb)
+			metricEmb := model.MetricEmbedding{
+				MetricID:   m.ID,
+				MetricCode: m.MetricCode,
+				Text:       combinedText,
+				Embedding:  string(embeddingJSON),
+			}
+			postgres.Get().Where("metric_id = ?", m.ID).
+				Assign(metricEmb).
+				FirstOrCreate(&model.MetricEmbedding{})
+			count++
 		}
-
-		// 使用 upsert
-		postgres.Get().Where("metric_id = ?", m.ID).
-			Assign(emb).
-			FirstOrCreate(&model.MetricEmbedding{})
-		count++
 	}
 
 	response.Success(c, gin.H{"success": true, "count": count})

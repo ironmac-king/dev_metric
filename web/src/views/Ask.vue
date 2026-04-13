@@ -403,8 +403,8 @@ async function loadSession(id) {
         drill_down_dims: m.drill_down_dims || null,
         breadcrumbs: m.breadcrumbs || null,
         metric_code: m.metric_code || null,
-        thinking_expanded: true,
-        thinking_steps: []
+        thinking_expanded: false,
+        thinking_steps: m.thinking_steps || []
       }))
       await scrollToBottom()
     } else {

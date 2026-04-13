@@ -241,7 +241,18 @@ async function fetchLogs() {
     if (filterStatus.value !== 'all') {
       params.success = filterStatus.value
     }
-    // user_id filter could be added here
+    // 添加当前用户ID筛选
+    const userInfo = localStorage.getItem('user_info')
+    if (userInfo) {
+      try {
+        const user = JSON.parse(userInfo)
+        if (user && user.id) {
+          params.user_id = String(user.id)
+        }
+      } catch (e) {
+        console.error('解析用户信息失败:', e)
+      }
+    }
 
     const res = await askAnalysisAPI.getLogs(params)
     if (res.code === 0) {

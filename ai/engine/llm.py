@@ -81,8 +81,9 @@ class LLMEngine:
     def _load_llm_config(self):
         """从数据库加载 LLM 配置"""
         try:
-            import httpx
-            response = httpx.get(
+            from ai.client.http_client import get_http_client
+            client = get_http_client()
+            response = client.get(
                 f"http://localhost:8080/api/v1/llm/configs",
                 timeout=5
             )
@@ -194,7 +195,7 @@ class LLMEngine:
             user_content = f"""用户问题：「{text}」{inherited_context}
 
 请以 JSON 格式返回识别结果，格式如下：
-{{"intent": "意图", "confidence": 0.0-1.0, "metric_name": "指标名称", "time_range": "时间范围", "dimension": "维度", "dimension_values": "维度值", "top_n": 数字}}
+{{"intent": "意图", "confidence": 0.0-1.0, "metric_name": "指标名称", "time_range": "时间范围(简单字符串，如昨天、本月、当月、近7天)", "dimension": "维度", "dimension_values": "维度值", "top_n": 数字, "formula_type": "公式类型(仅在query_ratio时填写：ratio)", "molecule_metric": "分子指标(仅在query_ratio时填写)", "denominator_metric": "分母指标(仅在query_ratio时填写)"}}
 
 只返回 JSON，不要其他内容。"""
 
@@ -233,6 +234,13 @@ class LLMEngine:
                 entities["dimension_values"] = result["dimension_values"]
             if result.get("top_n"):
                 entities["top_n"] = result["top_n"]
+            # 占比公式相关字段
+            if result.get("formula_type"):
+                entities["formula_type"] = result["formula_type"]
+            if result.get("molecule_metric"):
+                entities["molecule_metric"] = result["molecule_metric"]
+            if result.get("denominator_metric"):
+                entities["denominator_metric"] = result["denominator_metric"]
 
             return IntentResult(
                 intent=result.get("intent", "unknown"),
@@ -664,8 +672,9 @@ class LLMEngine:
     def _get_available_metrics(self) -> list:
         """获取可用指标列表"""
         try:
-            import httpx
-            response = httpx.get(
+            from ai.client.http_client import get_http_client
+            client = get_http_client()
+            response = client.get(
                 f"http://localhost:8080/api/v1/metadata/metrics",
                 timeout=10
             )
