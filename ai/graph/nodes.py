@@ -1699,6 +1699,122 @@ class ConversationNodes:
         # 其他意图（趋势、对比等）也查数值
         return self._build_value_sql(state)
 
+    def _build_ratio_sql(self, state: ConversationState) -> Dict[str, Any]:
+        """
+        构建占比查询 SQL
+        格式: SELECT {dimension}, SUM(molecule_col)/SUM(denominator_col) AS ratio
+              FROM {table} GROUP BY {dimension}
+        """
+        import re as regex_module
+        re = regex_module
+
+        logger.info(f"[_build_ratio_sql] 开始构建占比SQL: intent={state.current_intent}")
+
+        # 获取 molecule 和 denominator 信息
+        molecule_info = state.entities.get('molecule_metric_info', {})
+        denominator_info = state.entities.get('denominator_metric_info', {})
+
+        logger.info(f"[_build_ratio_sql] molecule_info={molecule_info}")
+        logger.info(f"[_build_ratio_sql] denominator_info={denominator_info}")
+
+        # 提取分子列名
+        molecule_col = "molecule_value"
+        if molecule_info:
+            starrocks_sql = molecule_info.get('starrocks_sql', '')
+            if starrocks_sql:
+                col_match = re.search(r'(sum|avg|count|min|max)\s*\(\s*(\w+)\s*\)', starrocks_sql, re.IGNORECASE)
+                if col_match:
+                    molecule_col = col_match.group(2)
+                else:
+                    select_match = re.search(r'select\s+(.+?)\s+from', starrocks_sql, re.IGNORECASE | re.DOTALL)
+                    if select_match:
+                        molecule_col = select_match.group(1).strip().split(',')[0].strip()
+
+        # 提取分母列名
+        denominator_col = "denominator_value"
+        if denominator_info:
+            starrocks_sql = denominator_info.get('starrocks_sql', '')
+            if starrocks_sql:
+                col_match = re.search(r'(sum|avg|count|min|max)\s*\(\s*(\w+)\s*\)', starrocks_sql, re.IGNORECASE)
+                if col_match:
+                    denominator_col = col_match.group(2)
+                else:
+                    select_match = re.search(r'select\s+(.+?)\s+from', starrocks_sql, re.IGNORECASE | re.DOTALL)
+                    if select_match:
+                        denominator_col = select_match.group(1).strip().split(',')[0].strip()
+
+        logger.info(f"[_build_ratio_sql] molecule_col={molecule_col}, denominator_col={denominator_col}")
+
+        # 提取表名（优先使用 denominator 的 starrocks_sql，因为更可能完整）
+        table_name = None
+        for info in [denominator_info, molecule_info]:
+            starrocks_sql = info.get('starrocks_sql', '')
+            if starrocks_sql:
+                table_match = re.search(r'FROM\s+([^\s;]+)', starrocks_sql, re.IGNORECASE)
+                if table_match:
+                    table_name = table_match.group(1).strip()
+                    break
+
+        if not table_name:
+            table_name = "ids.IDS_AMZ_COMPREHENSIVE_DI"  # 默认表
+
+        logger.info(f"[_build_ratio_sql] table_name={table_name}")
+
+        # 获取维度（GROUP BY 列）
+        dimension = state.entities.get("dimension", "")  # 如 "FSITE"
+        dimension_value = None
+
+        # 如果 dimension 是中文，需要映射到数据库列名
+        if dimension and dimension not in ["FSITE", "GROUP_3", "MONTHS", "DAYS"]:
+            # 从 dimension_configs 获取映射
+            dim_configs = self._get_table_dimensions_cached(table_name)
+            if dim_configs and dimension in dim_configs:
+                dimension = dim_configs[dimension].get("column_name", dimension)
+
+        # 如果有 dimensions 列表，取第一个作为 GROUP BY 维度
+        dimensions_list = state.entities.get("dimensions", [])
+        if dimensions_list and not dimension:
+            dimension = dimensions_list[0]
+            if dimension not in ["FSITE", "GROUP_3", "MONTHS", "DAYS"]:
+                dim_configs = self._get_table_dimensions_cached(table_name)
+                if dim_configs and dimension in dim_configs:
+                    dimension = dim_configs[dimension].get("column_name", dimension)
+
+        # 处理时间维度（如果有 time_info，需要添加到 WHERE 条件）
+        time_info = state.entities.get("time_info")
+        time_where = ""
+        if time_info:
+            time_type = time_info.get("type", "")
+            if time_type == "relative":
+                start = time_info.get("start")
+                end = time_info.get("end")
+                if start and end:
+                    time_where = f" AND {dimension} BETWEEN '{start}' AND '{end}'"
+
+        # 构建 SQL
+        # 格式: SELECT {dim}, SUM(molecule_col)/SUM(denominator_col) AS ratio FROM {table} GROUP BY {dim}
+        if dimension:
+            generated_sql = f"SELECT `{dimension}`, SUM({molecule_col})/SUM({denominator_col}) AS ratio FROM {table_name} WHERE 1=1{time_where} GROUP BY `{dimension}`"
+        else:
+            # 没有维度时，计算总体占比
+            generated_sql = f"SELECT SUM({molecule_col})/SUM({denominator_col}) AS ratio FROM {table_name} WHERE 1=1{time_where}"
+
+        logger.info(f"[_build_ratio_sql] 生成的SQL: {generated_sql}")
+
+        # 记录思考步骤
+        self._add_thinking_step(state, "SQL 生成", "completed",
+            f"占比查询 SQL：{generated_sql[:100]}...")
+        self._add_thinking_step(state, "generated_sql", "completed", generated_sql)
+
+        return {
+            "generated_sql": generated_sql,
+            "sql_params": {
+                "metric_id": molecule_info.get("metric_id"),
+                "metric_code": molecule_info.get("metric_code"),
+            },
+            "needs_clarification": False,
+        }
+
     def _build_value_sql(self, state: ConversationState) -> Dict[str, Any]:
         """构建数值查询 SQL - 支持维度参数调整"""
         metric_code = state.entities.get("metric_code")
@@ -2183,6 +2299,10 @@ class ConversationNodes:
         sql_mode = getattr(state, 'sql_mode', 'llm')
         if sql_mode == 'template':
             return self._sql_build_by_template(state)
+
+        # ========== 占比查询 (query_ratio) ==========
+        if state.current_intent == "query_ratio":
+            return self._build_ratio_sql(state)
 
         metric_code = state.entities.get("metric_code")
         metric_id = state.entities.get("metric_id")

@@ -104,7 +104,7 @@ class QueryIntent(BaseModel):
     - QueryIntent 是语义层描述，更接近自然语言理解
     """
     # 核心意图
-    intent_type: str = "query_value"  # query_value / query_trend / query_comparison / query_metadata
+    intent_type: str = "query_value"  # query_value / query_trend / query_comparison / query_metadata / query_ratio
 
     # 指标信息
     metric_code: Optional[str] = None
