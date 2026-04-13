@@ -497,6 +497,17 @@ function formatCellValue(value, key, msg) {
       if (isTimeCol || /^\d{4}[-\/]\d{2}[-\/]?\d*$/.test(value) || /^\d{4}[-\/]\d{2}$/.test(value)) {
         return value
       }
+      // 如果已经是百分比格式（包含%），格式化后保留%
+      if (value.includes('%')) {
+        const num = parseFloat(value)
+        if (!isNaN(num)) {
+          return new Intl.NumberFormat('zh-CN', {
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 2
+          }).format(num) + '%'
+        }
+        return value
+      }
       const num = parseFloat(value)
       if (!isNaN(num)) {
         return new Intl.NumberFormat('zh-CN', {
