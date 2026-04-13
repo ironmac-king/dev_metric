@@ -177,6 +177,7 @@ class RuleEngine:
 
     def _load_metrics(self):
         """从 Go API 加载指标数据"""
+        api_loaded = False
         try:
             client = get_http_client()
             response = client.get(f"{self.api_base}/api/v1/metadata/metrics", timeout=10)
@@ -196,10 +197,26 @@ class RuleEngine:
                         }
                         if name_en:
                             self.metric_templates[name_en.lower()] = self.metric_templates[name]
+                    api_loaded = True
                     logger.info(f"已加载 {len(self.metric_templates)} 个指标到规则引擎")
         except Exception as e:
             logger.warning(f"加载指标数据失败: {e}, 将使用内置模板")
+
+        # 内置模板作为补充：API加载失败时完全替代，API加载成功时补充（防止数据库缺少某些常用指标）
+        if not api_loaded:
             self._init_builtin_templates()
+        else:
+            # 补充加载内置模板（API数据可能缺少某些常用指标如"访客数"）
+            builtin = {
+                "访客数": {"metric_code": "MKI-02-0001", "metric_name": "访客数", "unit": "人"},
+                "visitor": {"metric_code": "MKI-02-0001", "metric_name": "访客数", "unit": "人"},
+                "visitors": {"metric_code": "MKI-02-0001", "metric_name": "访客数", "unit": "人"},
+            }
+            for k, v in builtin.items():
+                if k not in self.metric_templates:
+                    self.metric_templates[k] = v
+            if builtin:
+                logger.info(f"补充加载 {len(builtin)} 个内置指标模板")
 
     def _load_nlp_templates(self):
         """从 Go API 加载 NLP 模板（配置驱动：DB 优先，builtin 作为 fallback）"""
