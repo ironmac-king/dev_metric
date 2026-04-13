@@ -161,6 +161,17 @@ class ResultFormatter:
             row.clear()
             row.update(ordered_row)
 
+        # Step 7: 占比列的值加 % 后缀（让前端直接显示）
+        if ratio_cols:
+            for row in result_data:
+                for col in ratio_cols:
+                    if col in row and row[col] is not None:
+                        val = row[col]
+                        if isinstance(val, (int, float)):
+                            row[col] = f"{val}%"
+                        elif isinstance(val, str) and val.replace('.', '').replace('-', '').isdigit():
+                            row[col] = f"{val}%"
+
         return result_data
 
     def reorder_result_columns(
