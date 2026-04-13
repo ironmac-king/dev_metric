@@ -804,9 +804,23 @@ class ConversationNodes:
             )
 
             if molecule_links:
+                # 优先选择精确匹配 molecule_metric 的那个
+                if molecule_links.get('_multi_metrics'):
+                    for m in molecule_links['_multi_metrics']:
+                        if m.get('term') == molecule_metric:
+                            molecule_links = {k: v for k, v in m.items() if k != 'term'}
+                            logger.info(f"[entity_node] 分子指标精确匹配: {molecule_links.get('metric_name')}")
+                            break
                 entities["molecule_metric_info"] = molecule_links
                 logger.info(f"[entity_node] 分子指标链接成功: {molecule_links.get('metric_name')}")
             if denominator_links:
+                # 优先选择精确匹配 denominator_metric 的那个
+                if denominator_links.get('_multi_metrics'):
+                    for m in denominator_links['_multi_metrics']:
+                        if m.get('term') == denominator_metric:
+                            denominator_links = {k: v for k, v in m.items() if k != 'term'}
+                            logger.info(f"[entity_node] 分母指标精确匹配: {denominator_links.get('metric_name')}")
+                            break
                 entities["denominator_metric_info"] = denominator_links
                 logger.info(f"[entity_node] 分母指标链接成功: {denominator_links.get('metric_name')}")
 
