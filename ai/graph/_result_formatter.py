@@ -79,15 +79,16 @@ class ResultFormatter:
         other_cols = []
 
         comparison_patterns = ['去年同期', '同比变化率', '上月同期', '环比变化率']
-        ratio_patterns = ['占比', '比率']
+        ratio_patterns = ['占比', '比率', 'ratio', ' Ratio']
 
         first_row = result_data[0]
         for k in first_row.keys():
+            k_lower = k.lower() if isinstance(k, str) else ''
             # 对比列
             if any(p in k for p in comparison_patterns):
                 comparison_cols.append(k)
-            # 占比列
-            elif any(p in k for p in ratio_patterns):
+            # 占比列：匹配关键词或SQL别名ratio
+            elif any(p in k for p in ratio_patterns) or k_lower == 'ratio':
                 ratio_cols.append(k)
             # 维度列：SQL GROUP BY 列 或 dim_configs 映射的列
             elif k.upper() in sql_group_by_cols or k.upper() in col_to_dim_name:
