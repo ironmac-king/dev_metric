@@ -26,6 +26,28 @@ api.interceptors.response.use(
   }
 )
 
+// 文件下载（绕过响应拦截器，直接返回完整response）
+export const downloadFile = (url, filename) => {
+  const token = localStorage.getItem('access_token')
+  return axios({
+    url: url,
+    baseURL: '/api/v1',
+    method: 'GET',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    responseType: 'blob'
+  }).then(res => {
+    const blob = new Blob([res.data])
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  })
+}
+
 // 指标 API
 export const metricAPI = {
   list: (params) => api.get('/metrics', { params }),

@@ -285,7 +285,7 @@ class ConversationNodes:
 
             # 检查用户输入是否包含时间词
             has_explicit_time = bool(re.search(
-                r'昨天|今日|明日|昨日|本周|本月|上周|上月|去年|今年|明年|上个月|'
+                r'昨天|今日|明日|昨日|本周|本月|当月|上周|上月|去年|今年|明年|上个月|'
                 r'近几|最近|过去|前几|天前|月前|周前|年前|'
                 r'\d+月|\d+天|\d+周',
                 last_message
@@ -299,10 +299,18 @@ class ConversationNodes:
                 intent_result.entities.pop("time_key", None)
 
             # 如果用户说了时间，提取 time_info（不依赖 confidence）
-            if has_explicit_time and not intent_result.entities.get("time_info"):
+            if has_explicit_time:
                 time_info = self._extract_time_info(last_message)
                 if time_info:
                     intent_result.entities["time_info"] = time_info
+                    # 如果 LLM 返回的 time_range 与实际解析的时间不一致，覆盖为正确的时间表达
+                    llm_time_range = intent_result.entities.get("time_range", "")
+                    parsed_time_original = time_info.get("original", "")
+                    if llm_time_range and parsed_time_original and llm_time_range != parsed_time_original:
+                        logger.info(f"[intent_node] 时间修正: LLM返回={llm_time_range}, 实际解析={parsed_time_original}, 覆盖为正确值")
+                        intent_result.entities["time_range"] = parsed_time_original
+                    elif not llm_time_range:
+                        intent_result.entities["time_range"] = parsed_time_original
                     logger.info(f"[intent_node] 时间解析: {time_info.get('time_key')}, original={time_info.get('original')}")
 
             # ========== Bug Fix 2: 公式语法匹配修正 intent ==========
@@ -337,6 +345,8 @@ class ConversationNodes:
                 state.clarification_message = "抱歉，我没理解您的意思。您是想查询指标值、趋势、还是对比数据呢？"
                 self._add_thinking_step(state, "意图理解", "requires_clarification",
                     f"LLM 置信度 {intent_result.confidence:.2f} < 0.4，需要追问")
+                # 【修复】早期返回前保存上下文，确保 dimension 等信息不丢失
+                self._update_context(state, intent_result.entities)
                 return {"current_intent": None, "entities": intent_result.entities}
 
             # 补充 top_n 排名信息（检测"前三"、"前十"、"前13"等模式）
@@ -461,9 +471,10 @@ class ConversationNodes:
             ctx.current_metrics = entities.get("metrics")
             logger.info(f"[_update_context] 保存 metrics: {[m.get('metric_name') for m in ctx.current_metrics]}")
 
-        # 更新时间表达式
-        if entities.get("time_range"):
-            ctx.current_time_expr = entities.get("time_range")
+        # 更新时间表达式（只接受字符串类型，防止 LLM 返回 dict 污染）
+        time_range_val = entities.get("time_range")
+        if time_range_val and isinstance(time_range_val, str):
+            ctx.current_time_expr = time_range_val
 
         # 更新维度（同时保存业务维度名和数据库列名）
         for dim_key in ["platform", "region", "department", "site", "category", "device"]:
@@ -476,6 +487,17 @@ class ConversationNodes:
             if entities.get(dim_key):
                 ctx.current_dimensions[dim_key] = entities.get(dim_key)
                 logger.info(f"[_update_context] 保存数据库维度: {dim_key}={entities.get(dim_key)}")
+
+        # 保存 GROUP BY 维度（dimension 用于单维度，dimensions 用于多维度）
+        # 例如：用户问"哪个品类"，entities = {"dimension": "GROUP_3"}
+        if entities.get("dimension"):
+            ctx.current_dimensions["dimension"] = entities.get("dimension")
+            state.entities["dimension"] = entities.get("dimension")  # 同时更新 state.entities，防止被清除
+            logger.info(f"[_update_context] 保存 dimension: {entities.get('dimension')}")
+        if entities.get("dimensions"):
+            ctx.current_dimensions["dimensions"] = entities.get("dimensions")
+            state.entities["dimensions"] = entities.get("dimensions")  # 同时更新 state.entities，防止被清除
+            logger.info(f"[_update_context] 保存 dimensions: {entities.get('dimensions')}")
 
         state.conversation_context = ctx
 
@@ -651,19 +673,19 @@ class ConversationNodes:
         # ========== 继承上轮的时间表达式 ==========
         # 检查用户是否明确指定了新的时间
         last_message = state.messages[-1].content if state.messages else ""
-        has_explicit_time = any(kw in last_message for kw in ["昨天", "今日", "本周", "本月", "去年"])
+        has_explicit_time = any(kw in last_message for kw in ["昨天", "今日", "本周", "本月", "当月", "去年", "上月"])
         # 特殊处理：环比/同比追问应该继承时间，保持和上轮一样的时间周期
         is_comparison_followup = any(kw in last_message for kw in ["环比呢", "同比呢", "环比", "同比"])
 
         # 如果是纯追问（环比/同比追问），强制继承上下文时间，不使用 LLM 识别的错误时间
-        if is_comparison_followup and ctx and ctx.current_time_expr:
+        if is_comparison_followup and ctx and ctx.current_time_expr and isinstance(ctx.current_time_expr, str):
             entities["time_range"] = ctx.current_time_expr
             # 同时提取 time_info（用于对比计算）
             time_info = self._extract_time_info(ctx.current_time_expr)
             if time_info:
                 entities["time_info"] = time_info
             logger.info(f"[entity_node] 环比/同比追问，强制继承上轮时间: {ctx.current_time_expr}, time_info={time_info}")
-        elif ctx and not entities.get("time_range") and ctx.current_time_expr:
+        elif ctx and not entities.get("time_range") and ctx.current_time_expr and isinstance(ctx.current_time_expr, str):
             if not has_explicit_time:
                 entities.setdefault("time_range", ctx.current_time_expr)
                 logger.debug(f"[entity_node] 继承上轮时间: {ctx.current_time_expr}")
@@ -704,6 +726,17 @@ class ConversationNodes:
                 state.clarification_type = None  # 清除追问类型
                 state.clarification_message = None  # 清除追问消息
                 user_just_selected_metric = True  # 标记用户刚选择了指标
+
+                # 【修复】用户选择指标后，恢复上轮的 GROUP BY 维度（如"哪个品类"→GROUP_3）
+                # 因为 chosen_metric 不包含 dimension/dimensions，需要从 context 恢复
+                logger.info(f"[entity_node] 恢复dimension检查: state.entities.dimension={getattr(state, 'entities', {}).get('dimension')}, ctx.dimension={getattr(ctx, 'current_dimensions', {}).get('dimension') if ctx else 'ctx is None'}")
+                if ctx and ctx.current_dimensions:
+                    if ctx.current_dimensions.get("dimension") and not entities.get("dimension"):
+                        entities["dimension"] = ctx.current_dimensions.get("dimension")
+                        logger.info(f"[entity_node] 从context恢复dimension: {entities['dimension']}")
+                    if ctx.current_dimensions.get("dimensions") and not entities.get("dimensions"):
+                        entities["dimensions"] = ctx.current_dimensions.get("dimensions")
+                        logger.info(f"[entity_node] 从context恢复dimensions: {entities['dimensions']}")
 
         # 检查是否是回应上轮的 dimension_value 追问（用户选择维度值）
         if getattr(state, 'clarification_type', None) == 'dimension_value' and hasattr(state, 'dimension_value_candidates'):
@@ -833,10 +866,10 @@ class ConversationNodes:
                     if dim_key in entities:
                         entities[dim_key] = None
                         logger.info(f"[entity_node] 清除旧维度过滤: {dim_key}")
-                # 同时清除 dimensions 列表，避免残留的维度名被 sql_build_node 误用
+                # 【修复】只清除 dimensions 列表（过滤条件），保护 dimension（GROUP BY 维度）
+                # dimension 是语义维度（如 GROUP_3），不应该被清除，否则"哪个品类"等 GROUP BY 语义会丢失
                 entities["dimensions"] = []
-                entities["dimension"] = None
-                logger.info(f"[entity_node] 清除 dimensions 列表和 dimension 字段")
+                logger.info(f"[entity_node] 清除 dimensions 列表，保留 dimension={entities.get('dimension')}")
 
         # 如果实体链接返回空，检查是否是新的指标查询
         # 新指标查询的特征：包含指标相关的词（如"数"、"量"、"用户"等）
@@ -1042,6 +1075,22 @@ class ConversationNodes:
             if tm in time_dim_map:
                 all_dims.append(time_dim_map[tm])
 
+        # 【修复】使用 jieba 分词精确提取"各X"模式的维度词
+        # 例如："各站点" -> "站点"（jieba分词为["各", "站点"]）
+        # 问题：正则 biz_dim_pattern 会贪婪匹配"各站点上个月不含税收入"
+        # 解决：检测到"各"后，提取紧跟的下一个词作为维度词
+        ge_prefix_words = ["各", "每个", "各个"]
+        for i, word in enumerate(words):
+            if word in ge_prefix_words and i + 1 < len(words):
+                next_word = words[i + 1]
+                # 验证这是有效的维度词（2-6个中文字，不含时间词）
+                if 2 <= len(next_word) <= 6 and re.match(r'^[\u4e00-\u9fa5]+$', next_word):
+                    if not any(time_kw in next_word for time_kw in ["最近", "天", "日", "月", "年", "周", "今日", "昨日", "明日", "本周", "本月", "去年", "今日", "上个月", "下个月"]):
+                        if next_word not in biz_matches:
+                            biz_matches.append(next_word)
+                            logger.info(f"[entity_node] 【修复】从jieba分词提取'各X'维度: {next_word} (from '各' + {words[i+1]})")
+        # 【修复结束】
+
         # 输出原始字节，避免中文显示乱码
         print(f"[DEBUG entity_node] time_matches={time_matches}, biz_matches={biz_matches}")
         for i, bm in enumerate(biz_matches):
@@ -1246,6 +1295,11 @@ class ConversationNodes:
 
         # 若 metric_code 已确定但没有未匹配文本，跳过维度值搜索
         if entities.get("metric_code") and not unmatched_texts:
+            # 【修复】返回前恢复 dimension
+            ctx = getattr(state, 'conversation_context', None)
+            if ctx and ctx.current_dimensions.get("dimension") and not entities.get("dimension"):
+                entities["dimension"] = ctx.current_dimensions.get("dimension")
+                logger.info(f"[entity_node] RETURN前恢复dimension: {entities['dimension']}")
             logger.info(f"[entity_node] metric_code已确定但无未匹配文本，跳过维度值搜索")
             logger.info(f"[entity_node] RETURN")
             return {"entities": entities}
@@ -1317,8 +1371,20 @@ class ConversationNodes:
                         state.clarification_message = f"您说的是哪个维度：{[c['dimension_value'] for c in candidates]}？"
                         state.dimension_value_candidates = candidates  # 保存候选列表供后续解析
                         state.dimension_value_matched_text = text  # 保存匹配的原始文本（如"1011"）
+                        # 【修复】返回前恢复 dimension
+                        ctx = getattr(state, 'conversation_context', None)
+                        if ctx and ctx.current_dimensions.get("dimension") and not entities.get("dimension"):
+                            entities["dimension"] = ctx.current_dimensions.get("dimension")
+                            logger.info(f"[entity_node] RETURN前恢复dimension: {entities['dimension']}")
                         logger.info(f"[entity_node] RETURN(dim_val_clar)")
                         return {"entities": entities}
+
+        # 【修复】返回前：从 ctx 恢复 dimension 到 entities，防止被清除的 GROUP BY 维度丢失
+        ctx = getattr(state, 'conversation_context', None)
+        if ctx and ctx.current_dimensions.get("dimension"):
+            if not entities.get("dimension"):
+                entities["dimension"] = ctx.current_dimensions.get("dimension")
+                logger.info(f"[entity_node] RETURN前恢复dimension: {entities['dimension']}")
 
         logger.info(f"[entity_node] RETURN")
         return {"entities": entities}
@@ -1774,6 +1840,8 @@ class ConversationNodes:
             state.needs_clarification = True
             state.clarification_message = f"您是否想查询以下相关指标？\n\n{metric_list}\n\n请选择或描述更具体一些"
             state.clarification_type = "metric_enum"
+            # 【修复】早期返回前保存上下文，确保 dimension 等信息不丢失
+            self._update_context(state, entities)
             return {
                 "error": "无法生成 SQL",
                 "needs_clarification": True,
@@ -3987,6 +4055,9 @@ class ConversationNodes:
         """
         # 需要追问的情况
         if state.needs_clarification:
+            # 【修复】追问前保存上下文，确保 dimension 等信息被持久化
+            self._update_context(state, state.entities)
+
             # metric_enum 类型：直接显示匹配指标列表
             clarification_type = getattr(state, 'clarification_type', None)
             if clarification_type == "metric_enum":

@@ -586,7 +586,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { metricAPI } from '../api'
+import { metricAPI, downloadFile } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const token = localStorage.getItem('access_token') || ''
@@ -838,11 +838,13 @@ function confirmImport() {
 }
 
 function downloadTemplate() {
-  window.open('/api/v1/metrics/export-template')
+  downloadFile('/metrics/export-template', 'metrics_template.xlsx')
+    .catch(() => ElMessage.error('下载失败'))
 }
 
 function downloadSample() {
-  window.open('/api/v1/metrics/export-sample')
+  downloadFile('/metrics/export-sample', 'metrics_sample.xlsx')
+    .catch(() => ElMessage.error('下载失败'))
 }
 
 function copySQL() {

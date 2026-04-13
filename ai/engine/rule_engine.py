@@ -7,6 +7,7 @@ import httpx
 from typing import Optional, Dict, Any, List, Tuple
 from ai.graph.state import IntentResult, SQLGenerationResult
 from ai.config.logging_config import get_logger
+from ai.client.http_client import get_http_client
 
 logger = get_logger("ai.rule_engine")
 
@@ -71,7 +72,8 @@ class RuleEngine:
     def _load_business_terms(self):
         """从 Go API 加载业务术语"""
         try:
-            response = httpx.get(f"{self.api_base}/api/v1/metadata/terms", timeout=10)
+            client = get_http_client()
+            response = client.get(f"{self.api_base}/api/v1/metadata/terms", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
@@ -114,7 +116,8 @@ class RuleEngine:
 
         try:
             # 从 dimension_configs 获取维度配置（支持"三级品类"等多级维度）
-            response = httpx.get(f"{self.api_base}/api/v1/dimension-configs", timeout=10)
+            client = get_http_client()
+            response = client.get(f"{self.api_base}/api/v1/dimension-configs", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
@@ -175,7 +178,8 @@ class RuleEngine:
     def _load_metrics(self):
         """从 Go API 加载指标数据"""
         try:
-            response = httpx.get(f"{self.api_base}/api/v1/metadata/metrics", timeout=10)
+            client = get_http_client()
+            response = client.get(f"{self.api_base}/api/v1/metadata/metrics", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
@@ -200,7 +204,8 @@ class RuleEngine:
     def _load_nlp_templates(self):
         """从 Go API 加载 NLP 模板（配置驱动：DB 优先，builtin 作为 fallback）"""
         try:
-            response = httpx.get(f"{self.api_base}/api/v1/nlp/templates", timeout=10)
+            client = get_http_client()
+            response = client.get(f"{self.api_base}/api/v1/nlp/templates", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
@@ -260,9 +265,9 @@ class RuleEngine:
             "visitors": {"metric_code": "MKI-02-0001", "metric_name": "访客数", "unit": "人"},
             "订单量": {"metric_code": "MKI-03-0001", "metric_name": "订单量", "unit": "笔"},
             "订单数": {"metric_code": "MKI-03-0001", "metric_name": "订单量", "unit": "笔"},
-            "销售额": {"metric_code": "MKI-01-0001", "metric_name": "销售额", "unit": "元"},
-            "营收": {"metric_code": "MKI-01-0001", "metric_name": "销售额", "unit": "元"},
-            "收入": {"metric_code": "MKI-01-0001", "metric_name": "销售额", "unit": "元"},
+            "销售额": {"metric_code": "MKI-02-0009", "metric_name": "销售额", "unit": "元"},
+            "营收": {"metric_code": "MKI-02-0009", "metric_name": "销售额", "unit": "元"},
+            "收入": {"metric_code": "MKI-02-0009", "metric_name": "销售额", "unit": "元"},
         }
 
     def _init_builtin_patterns(self):
@@ -434,12 +439,25 @@ class RuleEngine:
         logger.debug(f"实体链接，输入文本: {text}")
         logger.debug(f"可用的指标模板数量: {len(self.metric_templates)}")
 
+        # 标志：是否成功匹配到指标（用于判断是否需要同义词兜底）
+        found_metric = False
+
         # ========== Step 0: 规则优先提取维度信息 ==========
         # 维度提取不依赖于指标匹配，应该在任何匹配之前进行
         extracted_dimensions = self._extract_dimensions(text)
         if extracted_dimensions:
-            result.update(extracted_dimensions)
             logger.debug(f"规则提取维度: {extracted_dimensions}")
+
+        # ========== Step 0.5: 否定检测（处理"不含税收入"vs"含税收入"等）==========
+        # 当查询包含否定词时，优先匹配也包含"未"/"不含"的指标，而非"含"的指标
+        negation_prefixes = ["不含", "未", "无", "非"]
+        has_negation = any(neg in text for neg in negation_prefixes)
+        negation_term = None
+        for neg in negation_prefixes:
+            if neg in text:
+                negation_term = neg
+                break
+        logger.debug(f"否定检测: has_negation={has_negation}, negation_term={negation_term}")
 
         # 收集所有匹配（精确+模糊），不 early return
         all_matches = []  # (score, metric_info) tuples
@@ -468,6 +486,49 @@ class RuleEngine:
                     if score > 0.25:  # 降低阈值到 0.25
                         all_matches.append((score, term, metric_info))
 
+        # ========== Step 2.5: 语义搜索增强 ==========
+        # 语义搜索能理解"未税收入"是"不含税收入"的语义匹配，
+        # 而不是字符重叠的"含税收入"(子串匹配得1.0分但语义错误)
+        semantic_info, semantic_confidence = self.semantic_search_metric(text)
+        if semantic_info and semantic_confidence == "high":
+            # 高置信度语义匹配：直接覆盖字符重叠结果
+            logger.debug(f"语义搜索高置信度命中: {text} -> {semantic_info.get('metric_name')}")
+            result.update(semantic_info)
+            result.update(extracted_dimensions)
+            return result
+
+        # 中低置信度语义匹配：增加加成权重以克服字符子串匹配
+        semantic_boost = 0.0
+        if semantic_info and semantic_info.get("metric_code"):
+            if semantic_confidence == "medium":
+                semantic_boost = 0.25  # 中置信度加 0.25
+            elif semantic_confidence == "low":
+                semantic_boost = 0.15  # 低置信度加 0.15
+
+        # 重新计算所有匹配分数，结合语义加成
+        if semantic_boost > 0 and semantic_info:
+            semantic_code = semantic_info.get("metric_code")
+            for i, (score, term, metric_info) in enumerate(all_matches):
+                if metric_info.get("metric_code") == semantic_code:
+                    new_score = score + semantic_boost
+                    all_matches[i] = (new_score, term, metric_info)
+                    logger.debug(f"语义加成: {term} +{semantic_boost:.2f} -> {new_score:.2f}")
+
+        # ========== Step 2.6: 否定惩罚 ==========
+        # 当查询包含"不含/未/无/非"时，对包含"含"但不含"未/不含/无/非"的指标进行惩罚
+        # 例如："不含税收入"不应匹配"含税收入"，需要惩罚到比未税收入(0.75)还低
+        if has_negation and negation_term:
+            negation_penalty = 0.55  # 必须足够大才能克服子串匹配(1.0)和字符重叠(0.75)
+            for i, (score, term, metric_info) in enumerate(all_matches):
+                term_lower_for_penalty = term.lower()
+                # 如果指标名包含"含"但不含"未"/"不含"/"无"/"非"，施加惩罚
+                has_han = "含" in term_lower_for_penalty
+                has_negation_indicator = any(neg in term_lower_for_penalty for neg in ["未", "不含", "无", "非", "不含税", "未税", "无税", "非税"])
+                if has_han and not has_negation_indicator:
+                    new_score = score - negation_penalty
+                    all_matches[i] = (new_score, term, metric_info)
+                    logger.debug(f"否定惩罚: {term} -{negation_penalty:.2f} -> {new_score:.2f} (因为含但不匹配否定)")
+
         # 按分数排序，取最高分（去重，相同 metric_name 只取最高分）
         seen_metrics = set()
         sorted_matches = []
@@ -481,6 +542,7 @@ class RuleEngine:
             top_score, top_term, top_metric = sorted_matches[0]
             logger.debug(f"最佳匹配: {top_term} (score={top_score:.2f}) -> {top_metric.get('metric_name')}")
             result.update(top_metric)
+            found_metric = True
             result.update(extracted_dimensions)
             # 如果有多个不同指标，返回多指标列表
             if len(sorted_matches) > 1:
@@ -490,7 +552,7 @@ class RuleEngine:
                 ]
 
         # 如果仍未匹配，使用ML实体抽取
-        if not result and self.use_ml and self.ml_extractor:
+        if not found_metric and self.use_ml and self.ml_extractor:
             try:
                 ml_entities = self.ml_extractor.extract(text)
                 metric_name = ml_entities.get("metric_name")
@@ -499,6 +561,7 @@ class RuleEngine:
                     for term, metric_info in self.metric_templates.items():
                         if metric_name in term or term in metric_name:
                             result.update(metric_info)
+                            found_metric = True
                             logger.debug(f"ML实体抽取匹配成功: {metric_name} -> {metric_info.get('metric_name')}")
                             break
                 # 提取时间范围（即使没有匹配到指标也提取）
@@ -516,7 +579,7 @@ class RuleEngine:
                 logger.info(f"[RuleEngine] ML实体抽取失败: {e}")
 
         # ========== Step 5: 同义词匹配（规则+ML失败后兜底）==========
-        if not result:
+        if not found_metric:
             matched_term = self._match_by_synonyms(text)
             if matched_term:
                 # 处理维度值映射格式: __DIM_VALUE__{dimension_field}__{dimension_value}
