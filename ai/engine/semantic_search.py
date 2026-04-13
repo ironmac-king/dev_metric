@@ -9,6 +9,7 @@ import httpx
 import json
 import os
 from ai.engine.embedding_client import embedding_client, alibaba_embedding_client
+from ai.client.http_client import get_http_client
 
 
 class SemanticSearch:
@@ -16,8 +17,8 @@ class SemanticSearch:
 
     # 相似度阈值
     HIGH_THRESHOLD = 0.85   # >0.85 直接确认
-    MEDIUM_THRESHOLD = 0.70  # 0.70-0.85 LLM确认
-    LOW_THRESHOLD = 0.0     # <0.70 LLM兜底
+    MEDIUM_THRESHOLD = 0.55  # 0.55-0.85 LLM确认 (降低以支持中文近义词)
+    LOW_THRESHOLD = 0.0     # <0.55 LLM兜底
 
     def __init__(self, api_base: str = "http://localhost:8080"):
         self.api_base = api_base
@@ -79,8 +80,9 @@ class SemanticSearch:
     def _load_vectors_from_api(self):
         """从 Go API 加载向量数据"""
         try:
+            client = get_http_client()
             # 加载意图向量
-            response = httpx.get(f"{self.api_base}/api/v1/nlp/vectors/intents", timeout=10)
+            response = client.get(f"{self.api_base}/api/v1/nlp/vectors/intents", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
@@ -88,7 +90,7 @@ class SemanticSearch:
                     self.load_intent_vectors(intents)
 
             # 加载指标向量
-            response = httpx.get(f"{self.api_base}/api/v1/nlp/vectors/metrics", timeout=10)
+            response = client.get(f"{self.api_base}/api/v1/nlp/vectors/metrics", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 if data.get("code") == 0:
@@ -119,8 +121,13 @@ class SemanticSearch:
                 self._intent_vectors[text] = np.array(embedding)
                 self._intent_types[text] = intent_type
 
-            # 加载指标向量
-            cur.execute("SELECT metric_code, text, embedding FROM metric_embeddings")
+            # 加载指标向量（只加载status='在用'的指标，避免停用指标干扰）
+            cur.execute("""
+                SELECT me.metric_code, me.text, me.embedding
+                FROM metric_embeddings me
+                JOIN metrics m ON me.metric_code = m.metric_code
+                WHERE m.status = '在用'
+            """)
             for row in cur.fetchall():
                 metric_code, text, embedding_str = row
                 embedding = json.loads(embedding_str)
