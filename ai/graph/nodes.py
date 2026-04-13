@@ -1806,12 +1806,13 @@ class ConversationNodes:
                     time_where = f" AND {dimension} BETWEEN '{start}' AND '{end}'"
 
         # 构建 SQL
-        # 格式: SELECT {dim}, SUM(molecule_col)/SUM(denominator_col) AS ratio FROM {table} GROUP BY {dim}
+        # 格式: SELECT {dim}, ROUND(SUM(molecule_col)/SUM(denominator_col)*100, 2) AS ratio FROM {table} GROUP BY {dim}
+        # 注意：返回的是百分比数值（如 22.03），前端展示时添加 % 符号
         if dimension:
-            generated_sql = f"SELECT `{dimension}`, SUM({molecule_col})/SUM({denominator_col}) AS ratio FROM {table_name} WHERE 1=1{time_where} GROUP BY `{dimension}`"
+            generated_sql = f"SELECT `{dimension}`, ROUND(SUM({molecule_col})/SUM({denominator_col})*100, 2) AS ratio FROM {table_name} WHERE 1=1{time_where} GROUP BY `{dimension}`"
         else:
             # 没有维度时，计算总体占比
-            generated_sql = f"SELECT SUM({molecule_col})/SUM({denominator_col}) AS ratio FROM {table_name} WHERE 1=1{time_where}"
+            generated_sql = f"SELECT ROUND(SUM({molecule_col})/SUM({denominator_col})*100, 2) AS ratio FROM {table_name} WHERE 1=1{time_where}"
 
         logger.info(f"[_build_ratio_sql] 生成的SQL: {generated_sql}")
 
@@ -1820,11 +1821,15 @@ class ConversationNodes:
             f"占比查询 SQL：{generated_sql[:100]}...")
         self._add_thinking_step(state, "generated_sql", "completed", generated_sql)
 
+        # 设置 unit 为 %，让 response_node 知道格式化百分比
+        state.entities["unit"] = "%"
+
         return {
             "generated_sql": generated_sql,
             "sql_params": {
                 "metric_id": molecule_info.get("metric_id"),
                 "metric_code": molecule_info.get("metric_code"),
+                "unit": "%",  # 占比查询返回百分比数值
             },
             "needs_clarification": False,
         }
