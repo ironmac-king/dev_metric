@@ -1313,6 +1313,10 @@ class ConversationNodes:
                 entities.pop("dimension", None)
             elif any(kw in dim for kw in RATIO_KEYWORDS):
                 entities.pop("dimension", None)
+            # 【防御】过滤纯时间维度词（如"月"、"日"、"年"），这些不是业务维度
+            elif dim in ["月", "日", "年", "天"]:
+                logger.info(f"[entity_node] 清除纯时间维度词: {dim}")
+                entities.pop("dimension", None)
 
         if all_dims:
             # 多维度支持：存储为列表，同时兼容单维度
