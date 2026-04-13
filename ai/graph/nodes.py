@@ -3394,16 +3394,23 @@ class ConversationNodes:
                         col = dim_configs.get("日", {}).get("column_name", "FDATE")
                         time_cond = f"{col} >= '{start_date}' AND {col} <= '{end_date}'"
                     elif time_type in ("absolute_month", "quarter"):
-                        # 月份/季度用 MONTHS 列
-                        col = dim_configs.get("月", {}).get("column_name", "MONTHS")
-                        time_cond = f"{col} = '{start_date[:7]}'"
+                        # 月份/季度：如果 FDATE BETWEEN 已存在（季度时间范围），不重复添加 MONTHS 条件
+                        # 只有在 SQL 中没有 FDATE 条件时才添加 MONTHS 条件
+                        if "FDATE" not in adjusted_sql.upper():
+                            col = dim_configs.get("月", {}).get("column_name", "MONTHS")
+                            time_cond = f"{col} = '{start_date[:7]}'"
+                        else:
+                            logger.info(f"[_apply_dimensions_to_sql] FDATE条件已存在，跳过添加MONTHS条件")
+                            time_cond = None
                     else:
                         # 默认用 FDATE
                         col = dim_configs.get("日", {}).get("column_name", "FDATE")
                         time_cond = f"{col} >= '{start_date}' AND {col} <= '{end_date}'"
 
                     # 检查时间条件是否已存在于 WHERE 子句中
-                    if time_cond in adjusted_sql:
+                    if time_cond is None:
+                        pass  # 跳过，不添加时间条件
+                    elif time_cond in adjusted_sql:
                         logger.info(f"[_apply_dimensions_to_sql] 时间条件已存在于 WHERE，跳过: {time_cond}")
                     elif "WHERE" in adjusted_sql.upper():
                         # 找到 WHERE 子句的位置，在 GROUP BY/LIMIT/ORDER 之前插入
