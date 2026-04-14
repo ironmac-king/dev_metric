@@ -19,6 +19,7 @@ from ai.graph._dimension_resolver import DimensionResolver
 from ai.graph._sql_builder import SQLBuilder
 from ai.graph._result_formatter import ResultFormatter
 from ai.ner.ner_service import get_ner_service
+from ai.engine.semantic_search import semantic_search
 
 logger = get_logger("ai.nodes")
 
@@ -231,12 +232,29 @@ class ConversationNodes:
         # ========== Step 1: 复用上下文 ==========
         inherited_context = getattr(state, 'conversation_context', None) or ConversationContext()
         inherited_entities = {}
-        if inherited_context.current_metric_name:
+
+        # 检测是否在重复问同一个问题（同一句话问两遍），如果是则不恢复 metric 上下文
+        # 注意：如果上一轮用户点了建议去执行查询，即使问题文本相同，也不恢复 metric（因为用户可能在探索不同指标）
+        ctx = getattr(state, 'conversation_context', None) or ConversationContext()
+        just_executed_query = ctx.just_executed_query
+        is_repeated_question = (
+            len(state.messages) >= 2 and
+            state.messages[-1].content.strip() == state.messages[-2].content.strip()
+        )
+        if is_repeated_question or just_executed_query:
+            logger.info(f"[intent_node Step1] 检测到重复问题(重复={is_repeated_question}, 刚执行={just_executed_query})，不恢复 metric 上下文")
+            # 重置 conversation_context 标志
+            ctx.just_executed_query = False
+            state.conversation_context = ctx
+        else:
+            logger.info(f"[intent_node Step1] 未检测到重复，刚执行={just_executed_query}，正常恢复 metric 上下文")
+
+        if inherited_context.current_metric_name and not is_repeated_question and not just_executed_query:
             inherited_entities = {
                 "inherited_metric": inherited_context.current_metric_name,
                 "inherited_metric_name": inherited_context.current_metric_name,
             }
-        else:
+        elif not is_repeated_question and not just_executed_query:
             # conversation_context 为空但 state.entities 可能有继承的指标信息
             inherited_metric = state.entities.get("metric_name")
             inherited_code = state.entities.get("metric_code")
@@ -389,6 +407,23 @@ class ConversationNodes:
                     intent_result.entities["dimension"] = detected_dim
                     logger.debug(f"[intent_node] 检测到排名维度: {detected_dim}")
 
+            # 【新增】当检测到"哪个月"/"哪天"/"哪年" + "最少/最多"模式时，强制改为query_ranking
+            ranking_time_pattern = re.search(r'哪(个月|天|年|周)的.*?(最少|最多|最低|最高)', last_message)
+            if ranking_time_pattern and final_intent not in ["query_ranking", "query_trend"]:
+                logger.info(f"[intent_node] 检测到时间粒度排名查询模式，override intent: {final_intent} → query_ranking")
+                final_intent = "query_ranking"
+                intent_result.intent = "query_ranking"
+                intent_result.confidence = max(intent_result.confidence, 0.8)
+                # 设置 top_n=1（只返回最少/最多的那个）
+                intent_result.entities["top_n"] = 1
+                # 根据"最少"/"最多"设置排序方向
+                sort_keyword = ranking_time_pattern.group(2)
+                if sort_keyword in ["最少", "最低"]:
+                    intent_result.entities["sort_order"] = "ASC"
+                else:
+                    intent_result.entities["sort_order"] = "DESC"
+                logger.info(f"[intent_node] 设置 top_n=1, sort_order={intent_result.entities['sort_order']}")
+
             # ========== 再次检查对比关键词（用于确保最终 intent 正确）==========
             # 注意：此时 has_comparison_kw 已在前面定义并处理过，这里仅用于日志
             if has_comparison_kw and final_intent not in ["query_comparison"]:
@@ -481,9 +516,15 @@ class ConversationNodes:
             logger.info(f"[_update_context] 保存 metric_code: {entities.get('metric_code')}")
 
         # 更新多指标信息（用于环比/同比追问时恢复多指标查询）
-        if entities.get("metrics") and len(entities.get("metrics", [])) >= 2:
-            ctx.current_metrics = entities.get("metrics")
-            logger.info(f"[_update_context] 保存 metrics: {[m.get('metric_name') for m in ctx.current_metrics]}")
+        # 只有当 metrics 是 dict 数组时才保存（LLM 可能返回字符串数组，需要过滤）
+        metrics_val = entities.get("metrics")
+        if metrics_val and isinstance(metrics_val, list) and len(metrics_val) >= 2:
+            # 检查第一个元素是否是 dict（确保是对象数组而非字符串数组）
+            if isinstance(metrics_val[0], dict):
+                ctx.current_metrics = metrics_val
+                logger.info(f"[_update_context] 保存 metrics: {[m.get('metric_name') for m in ctx.current_metrics]}")
+            else:
+                logger.info(f"[_update_context] metrics 是字符串数组，跳过保存: {metrics_val}")
 
         # 更新时间表达式（只接受字符串类型，防止 LLM 返回 dict 污染）
         time_range_val = entities.get("time_range")
@@ -677,6 +718,18 @@ class ConversationNodes:
         """
         logger.info(f"[entity_node] START session_id={getattr(state, 'session_id', None)}")
         entities = state.entities.copy()
+
+        # 【修复】当 metric_code 已确定时（完整指标查询），清除 LLM 错误返回的 dimension
+        # LLM 有时会将指标名的一部分错误识别为维度，如 "B2B APP的会话量" 被识别为 dimension=渠道
+        # 此时应该以 metric_code 为准，不使用 LLM 返回的 dimension
+        # 注意：必须用 = None 而不是 pop()，因为 LangGraph 的 entities.update() 是合并，不会删除 key
+        if entities.get("metric_code") and (entities.get("dimension") or entities.get("dimensions")):
+            # metric_code 已确定但 dimension 是 LLM 错误添加的，清除它
+            original_metric_code = entities.get("metric_code")
+            logger.info(f"[entity_node] 清除LLM错误设置的dimension: {entities.get('dimension')}, dimensions: {entities.get('dimensions')}, metric_code已确定: {original_metric_code}")
+            entities["dimension"] = None
+            entities["dimension_values"] = None
+            entities["dimensions"] = None  # 同时清除 dimensions 列表
 
         # ========== 获取对话上下文 ==========
         ctx = getattr(state, 'conversation_context', None)
@@ -899,6 +952,7 @@ class ConversationNodes:
                 "品牌", "牌子", "站点", "平台", "渠道",
                 "地区", "区域", "地域", "省份", "国家",
                 "部门", "科室", "设备", "广告",
+                "店铺",
             ]
         contains_dimension_keyword = any(dim_kw in last_message for dim_kw in dimension_keywords)
 
@@ -987,6 +1041,69 @@ class ConversationNodes:
 
         entities.update(term_links)
 
+        # 【修复】在 term_links 更新后检查：如果 metric_code 已确定且 dimension 是 LLM 错误添加的，清除它
+        # 问题1：B2B APP会话量 被 LLM 错误识别为 dimension=渠道, dimension_values=B2B APP
+        # 问题2："各自对应的" 被错误拆分为 dimension=自对应, dimension_values=类目各自
+        if entities.get("metric_code") and (entities.get("dimension") or entities.get("dimensions")):
+            metric_name = entities.get("metric_name", "").replace(" ", "").replace("　", "")
+            dimension_value = entities.get("dimension_values", "").replace(" ", "").replace("　", "")
+            dimension = entities.get("dimension", "").replace(" ", "").replace("　", "")
+
+            # 获取 starrocks_table 用于验证 dimension
+            starrocks_table = entities.get("starrocks_table")
+            if not starrocks_table and entities.get("starrocks_sql"):
+                from_match = re.search(r'FROM\s+([a-zA-Z0-9_.]+)', entities.get("starrocks_sql", ""), re.IGNORECASE)
+                if from_match:
+                    starrocks_table = from_match.group(1).strip()
+                    entities["starrocks_table"] = starrocks_table
+
+            # 获取有效的维度列表
+            valid_dims = set()
+            exempt_dims = {"FSITE", "GROUP_3", "MONTHS", "DAYS", "YEARS", "QUARTERS", "WEEKS"}
+            if starrocks_table:
+                dim_configs = self._get_table_dimensions_cached(starrocks_table)
+                if dim_configs:
+                    # dim_configs 的 key 是中文维度名（如"平台"、"品类"）
+                    valid_dims = set(dim_configs.keys())
+                    # 也添加数据库列名（如"FSITE"、"GROUP_3"）
+                    for cfg in dim_configs.values():
+                        if isinstance(cfg, dict) and cfg.get("column_name"):
+                            valid_dims.add(cfg.get("column_name"))
+
+            # 检查 dimensions_list 是否包含无效维度
+            # 如果 dimensions_list 中有任何一项不在有效维度中，清除整个 dimensions
+            dimensions_list = entities.get("dimensions", [])
+            if dimensions_list:
+                has_invalid_in_list = False
+                for dim_item in dimensions_list:
+                    if dim_item is None:
+                        has_invalid_in_list = True
+                        break
+                    dim_item_clean = str(dim_item).replace(" ", "").replace("　", "")
+                    if dim_item_clean and dim_item_clean not in valid_dims and dim_item_clean not in exempt_dims:
+                        logger.info(f"[entity_node] dimensions_list包含无效维度: dim_item={dim_item}, valid_dims={valid_dims}")
+                        has_invalid_in_list = True
+                        break
+                if has_invalid_in_list:
+                    logger.info(f"[entity_node] 清除LLM错误设置的dimensions: dimensions_list={dimensions_list}, valid_dims={valid_dims}")
+                    entities["dimensions"] = None
+                    # 同时清除 dimension，因为它可能也是从错误的 dimensions_list[0] 赋值的
+                    if dimensions_list and dimension == dimensions_list[0]:
+                        entities["dimension"] = None
+                        entities["dimension_values"] = None
+
+            # 检查 dimension 是否有效（单独检查 dimension）
+            is_invalid_dimension = False
+            if dimension and dimension not in valid_dims and dimension not in exempt_dims:
+                # dimension 不在有效维度中，标记为无效
+                is_invalid_dimension = True
+
+            if is_invalid_dimension:
+                logger.info(f"[entity_node] 清除LLM错误设置的dimension: dimension={dimension}, dimension_values={dimension_value}, metric_name={metric_name}, valid_dims={valid_dims}")
+                entities["dimension"] = None
+                entities["dimension_values"] = None
+                # 注意：不在这里清除 dimensions，留给上面的逻辑处理
+
         # ========== 占比公式维度修正：在 term_links 更新之后处理 ==========
         # 当有 molecule_metric 时（ratio 查询），dimension 可能被污染为"店铺退款数量在销量中"
         # 需要修正为正确的分组维度（如"店铺"）
@@ -1030,6 +1147,17 @@ class ConversationNodes:
                             has_multi_conjunction = True
                 else:
                     has_multi_conjunction = True
+        # 【新增】检测"小于"、"大于"、"多于"、"少于"等比较词，也属于多指标查询
+        has_comparison_op = False
+        comparison_op = None
+        for op in ['小于', '大于', '多于', '少于', '低于', '高于']:
+            if op in last_message:
+                has_comparison_op = True
+                comparison_op = op
+                break
+        if has_comparison_op:
+            has_multi_conjunction = True
+            logger.info(f"[entity_node] 检测到比较操作符: {comparison_op}，设置has_multi_conjunction=True")
         logger.info(f"[entity_node] 多指标检测: last_message={last_message!r}, has_multi_conjunction={has_multi_conjunction}, multi_metrics_count={len(multi_metrics)}")
         if len(multi_metrics) >= 2 and has_multi_conjunction:
             # 取前两个最高分的指标（来自不同 metric_name）
@@ -1067,6 +1195,10 @@ class ConversationNodes:
                         }
                         for m in top_metrics
                     ]
+                    # 【新增】保存比较操作符信息
+                    if comparison_op:
+                        entities["comparison_op"] = comparison_op
+                        logger.info(f"[entity_node] 保存比较操作符: {comparison_op}")
                     # 清除单指标字段
                     entities.pop("metric_name", None)
                     entities.pop("metric_code", None)
@@ -1314,9 +1446,14 @@ class ConversationNodes:
             elif any(kw in dim for kw in RATIO_KEYWORDS):
                 entities.pop("dimension", None)
             # 【防御】过滤纯时间维度词（如"月"、"日"、"年"），这些不是业务维度
+            # 但如果是排名查询（query_ranking）或双指标对比查询（query_comparison），时间维度是有效的 GROUP BY 维度，不能清除
             elif dim in ["月", "日", "年", "天"]:
-                logger.info(f"[entity_node] 清除纯时间维度词: {dim}")
-                entities.pop("dimension", None)
+                current_intent = state.current_intent if hasattr(state, 'current_intent') else None
+                if current_intent in ["query_ranking", "query_comparison"]:
+                    logger.info(f"[entity_node] 保留时间维度用于{current_intent}查询: {dim}")
+                else:
+                    logger.info(f"[entity_node] 清除纯时间维度词: {dim}")
+                    entities.pop("dimension", None)
 
         if all_dims:
             # 多维度支持：存储为列表，同时兼容单维度
@@ -1332,25 +1469,53 @@ class ConversationNodes:
                 if from_match:
                     starrocks_table = from_match.group(1).strip()
 
-            unregistered_dims = []
+            # 检查 all_dims 中的每个维度是否有效
+            valid_dimension_names = self._get_all_dimension_keys()
+            invalid_dims_found = []
+            valid_dims_from_synonym = []  # 有效的 __SYNONYM__ 维度
             for dim in all_dims:
                 # 跳过时间维度（日、月、年等）
                 if dim in ["日", "月", "年", "天", "周", "day", "month", "year"]:
                     continue
-                # 跳过"按X"格式的时间维度（如"按月"、"按日"），这不是业务维度
+                # 跳过"按X"格式的时间维度
                 if re.match(r'^按[日月年周天]$', dim):
                     logger.info(f"[entity_node] 跳过'按X'格式时间维度: {dim}")
                     continue
-                if not self._is_dimension_name_registered(dim, starrocks_table):
-                    unregistered_dims.append(dim)
+                # 检查是否是有效的维度名
+                if dim not in valid_dimension_names:
+                    invalid_dims_found.append(dim)
 
-            if unregistered_dims:
-                logger.warning(f"[entity_node] 发现未注册的维度: {unregistered_dims}")
-                # 设置追问状态，提示用户
-                state.needs_clarification = True
-                state.clarification_type = "invalid_dimension"
-                state.clarification_message = f"抱歉，暂时没有配置「{unregistered_dims[0]}」维度，您可以尝试：站点、平台、品类等维度"
-                logger.info(f"[entity_node] 设置追问状态: {state.clarification_message}")
+            if invalid_dims_found:
+                logger.warning(f"[entity_node] 发现无效维度: {invalid_dims_found}")
+                # 当所有维度都无效时，检查 entities 中是否有 __SYNONYM__ 标记的维度
+                # 这些代表用户提到的维度类型，应该作为 GROUP BY 维度使用
+                if len(invalid_dims_found) == len(all_dims) or not all_dims:
+                    synonym_dims = []
+                    for key, val in entities.items():
+                        if val == "__SYNONYM__":
+                            # 获取维度名称（如 GROUP_1_name = "一级品类"）
+                            dim_name_key = f"{key}_name"
+                            dim_name = entities.get(dim_name_key, key)
+                            synonym_dims.append(dim_name)
+                            logger.info(f"[entity_node] 使用__SYNONYM__维度作为GROUP BY: {dim_name} (对应{key})")
+
+                    if synonym_dims:
+                        entities["dimensions"] = synonym_dims
+                        entities["dimension"] = synonym_dims[0]
+                        all_dims = synonym_dims
+                        logger.info(f"[entity_node] 从__SYNONYM__恢复dimensions: {synonym_dims}")
+                    else:
+                        entities.pop("dimensions", None)
+                        entities.pop("dimension", None)
+                        all_dims = []
+                        logger.info(f"[entity_node] 清除全部 dimensions")
+                else:
+                    # 部分维度无效，只清除无效的
+                    valid_dims = [d for d in all_dims if d not in invalid_dims_found]
+                    entities["dimensions"] = valid_dims
+                    entities["dimension"] = valid_dims[0] if valid_dims else None
+                    all_dims = valid_dims
+                    logger.info(f"[entity_node] 清除无效维度后保留: {valid_dims}")
 
         # 如果没有匹配到指标但有时间范围，也要提取
         if not entities.get("time_range"):
@@ -1442,7 +1607,8 @@ class ConversationNodes:
         logger.info(f"[entity_node] NER识别结果: {ner_results}")
 
         # 如果 NER 识别到维度，直接使用（优先级最高）
-        if ner_results:
+        # 【修复】但如果 metric_code 已确定（完整指标查询），不应通过 NER 结果覆盖 dimension
+        if ner_results and not entities.get("metric_code"):
             # 获取唯一的维度字段（排除 __METRIC__ 类型，因为那是指标不是维度）
             ner_fields = list(set(r["dim_field"] for r in ner_results if r["dim_field"] and r["dim_field"] != "__METRIC__"))
             logger.info(f"[entity_node] NER识别到维度字段（排除指标后）: {ner_fields}")
@@ -1481,17 +1647,31 @@ class ConversationNodes:
         dim_value_client = DimValueClient()
         if unmatched_texts:
             with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = {
-                    executor.submit(dim_value_client.search_dimension_values, text, None, 3): text
-                    for text in unmatched_texts
-                }
+                futures = {}
+                for text in unmatched_texts:
+                    # 搜索策略：优先搜索原文，如果没找到再去空格版本
+                    # 这样可以同时兼容数据库存储格式（可能有空格也可能没空格）
+                    text_no_space = text.replace(" ", "").replace("　", "")  # 同时去掉半角和全角空格
+
+                    # 先提交原文搜索
+                    futures[executor.submit(dim_value_client.search_dimension_values, text, None, 3)] = (text, text)
+                    # 如果原文和去空格版本不同，再提交去空格版本搜索
+                    if text_no_space != text:
+                        futures[executor.submit(dim_value_client.search_dimension_values, text_no_space, None, 3)] = (text, text_no_space)
+
+                # 收集结果，去重（每个 text 只取第一个返回结果的搜索）
+                seen_texts = set()
                 for future in as_completed(futures):
-                    text = futures[future]
+                    text, search_key = futures[future]
+                    if text in seen_texts:
+                        continue  # 这个 text 已经有过结果了，跳过
                     try:
                         candidates = future.result()
                     except Exception:
                         candidates = []
-                    candidate_results.append((text, candidates))
+                    if candidates:
+                        candidate_results.append((text, candidates))
+                        seen_texts.add(text)
 
         # 按提取顺序处理结果（保持优先级）
         for text, candidates in candidate_results:
@@ -1550,6 +1730,20 @@ class ConversationNodes:
                             logger.info(f"[entity_node] RETURN前恢复dimension: {entities['dimension']}")
                         logger.info(f"[entity_node] RETURN(dim_val_clar)")
                         return {"entities": entities}
+
+        # 【修复】返回前最终检查：如果 metric_code 已确定但 dimension 是 LLM 错误添加的，清除它
+        # 问题：metric_code 可能是在 entity_node 内部通过 NER 识别出来的（如匹配指标模板），
+        # 此时需要在返回前检查并清除错误添加的 dimension
+        if entities.get("metric_code") and entities.get("dimension"):
+            # 检查 dimension 是否是 LLM 错误添加的（dimension_values 是指标名称的一部分）
+            # 需要去除空格和中文空格后比较
+            metric_name = (entities.get("metric_name") or "").replace(" ", "").replace("　", "")
+            dimension_value = (entities.get("dimension_values") or "").replace(" ", "").replace("　", "")
+            if dimension_value and metric_name and dimension_value in metric_name:
+                logger.info(f"[entity_node] RETURN前清除LLM错误设置的dimension: dimension={entities.get('dimension')}, dimension_values={dimension_value}, metric_name={metric_name}")
+                entities["dimension"] = None
+                entities["dimension_values"] = None
+                entities["dimensions"] = None
 
         # 【修复】返回前：从 ctx 恢复 dimension 到 entities，防止被清除的 GROUP BY 维度丢失
         ctx = getattr(state, 'conversation_context', None)
@@ -2059,7 +2253,9 @@ class ConversationNodes:
 
             # 如果用户输入模糊，即使匹配到指标也要列出相关指标让用户确认
             # 但如果 skip_rule_engine=True（简单确认词+空starrocks_sql），应该直接用 fallback SQL，不应该追问
-            if (is_vague_input or not starrocks_sql) and not (skip_rule_engine and metric_id):
+            # 【修复】如果有维度但无指标，不走 metric_enum 分支，让 response_node 的 _suggest_candidate_metrics 处理
+            has_dimension_but_no_metric = bool(dimensions) and not metric_name and not metric_code
+            if (is_vague_input or not starrocks_sql) and not (skip_rule_engine and metric_id) and not has_dimension_but_no_metric:
                 # 先搜索相关指标列表
                 # 使用 metric_name（如果有的话）而不是完整的用户输入来搜索
                 search_query = metric_name if metric_name else last_message
@@ -2382,19 +2578,51 @@ class ConversationNodes:
                 starrocks_table = list(tables)[0]
                 # 合并 SELECT 部分，用中文 metric_name 作为别名
                 combined_select = []
+                # 保存列表达式映射：metric_name -> (agg_func, col_name)
+                col_expr_map = {}
                 for m_name, select_part, original_sql in all_select_parts:
                     # 提取原始的列表达式（如 SUM(col) 或 sum(col)）
                     col_match = re.search(r'(sum|avg|count|max|min)\s*\(\s*(\w+)\s*\)', select_part, re.IGNORECASE)
                     if col_match:
+                        # 保存列表达式
+                        col_expr_map[m_name] = (col_match.group(1), col_match.group(2))
                         # 直接用中文名作为别名，替换整个表达式
                         new_select = f"{col_match.group(1)}({col_match.group(2)}) AS `{m_name}`"
                     else:
                         # 没有聚合函数，直接用 metric_name 作为别名
+                        col_expr_map[m_name] = (None, select_part)
                         new_select = f"{select_part} AS `{m_name}`"
                     combined_select.append(new_select)
                 starrocks_sql = f"SELECT {', '.join(combined_select)} FROM {starrocks_table}"
                 if base_where:
                     starrocks_sql += f" WHERE {base_where}"
+
+                # 【新增】生成 HAVING 子句（当有比较操作符时）
+                comparison_op = state.entities.get("comparison_op")
+                if comparison_op and len(col_expr_map) >= 2:
+                    # 获取前两个指标的列表达式
+                    metric_names = list(col_expr_map.keys())
+                    if len(metric_names) >= 2:
+                        m1_name, m2_name = metric_names[0], metric_names[1]
+                        agg1, col1 = col_expr_map[m1_name]
+                        agg2, col2 = col_expr_map[m2_name]
+                        # 映射比较操作符
+                        op_map = {
+                            '小于': '<', '大于': '>', '少于': '<',
+                            '多于': '>', '低于': '<', '高于': '>'
+                        }
+                        sql_op = op_map.get(comparison_op, '<')
+                        # 生成 HAVING 条件
+                        if agg1 and agg2:
+                            having_clause = f"HAVING {agg1}({col1}) {sql_op} {agg2}({col2})"
+                        elif agg1:
+                            having_clause = f"HAVING {agg1}({col1}) {sql_op} {agg2}"
+                        elif agg2:
+                            having_clause = f"HAVING {col1} {sql_op} {agg2}({col2})"
+                        else:
+                            having_clause = f"HAVING {col1} {sql_op} {col2}"
+                        state.entities["having_clause"] = having_clause
+
                 logger.info(f"[sql_build_node] 多指标合并 SQL: {starrocks_sql[:200]}")
             else:
                 # 不同表，降级到单指标（取第一个）
@@ -2442,14 +2670,30 @@ class ConversationNodes:
 
         # 构建 TimeSpec
         if time_info:
+            # 处理 time_range 可能是 dict 的情况
+            original_val = time_info.get("original")
+            if not original_val:
+                if isinstance(time_range, str):
+                    original_val = time_range
+                elif isinstance(time_range, dict):
+                    original_val = time_range.get("original", "")
+                else:
+                    original_val = ""
             time_spec = TimeSpec(
                 type=time_info.get("type", "date_range"),
                 start=time_info.get("start"),
                 end=time_info.get("end"),
-                original_expr=time_info.get("original_expr") or time_range
+                original_expr=original_val
             )
         else:
-            time_spec = TimeSpec(type="date_range", original_expr=time_range or "last_7_days")
+            # time_range 可能是 dict 或 string，需要处理
+            if isinstance(time_range, str):
+                original_expr = time_range or "last_7_days"
+            elif isinstance(time_range, dict):
+                original_expr = time_range.get("original", "last_7_days")
+            else:
+                original_expr = "last_7_days"
+            time_spec = TimeSpec(type="date_range", original_expr=original_expr)
 
         # 构建 dimensions（需要映射中文维度名到数据库列名）
         query_dimensions = []
@@ -2629,15 +2873,16 @@ class ConversationNodes:
 
         # 处理 ORDER BY（当有 top_n 排名需求时）
         top_n = state.entities.get("top_n")
-        logger.info(f"[sql_build_node] DEBUG: top_n={top_n}, type={type(top_n)}, entities keys={list(state.entities.keys())}")
+        sort_order = state.entities.get("sort_order", "DESC")  # 默认DESC，支持"最少"查询用ASC
+        logger.info(f"[sql_build_node] DEBUG: top_n={top_n}, sort_order={sort_order}, entities keys={list(state.entities.keys())}")
         if top_n and top_n > 0 and "ORDER BY" not in generated_sql.upper():
             # 获取指标列名（用于 ORDER BY）
             metric_col = "ORDERED_PRODUCTSALES"  # 默认指标列
             col_match = re.search(r'(sum|avg)\s*\(\s*(\w+)\s*\)', generated_sql, re.IGNORECASE)
             if col_match:
                 metric_col = col_match.group(2)
-            generated_sql = generated_sql.rstrip() + f" ORDER BY {metric_col} DESC"
-            logger.info(f"[sql_build_node] 添加 ORDER BY {metric_col} DESC for top_n={top_n}")
+            generated_sql = generated_sql.rstrip() + f" ORDER BY {metric_col} {sort_order}"
+            logger.info(f"[sql_build_node] 添加 ORDER BY {metric_col} {sort_order} for top_n={top_n}")
 
         # === B方案：统一后处理 ===
         # 1. 维度后处理：多维度 GROUP BY + 列名映射
@@ -2654,7 +2899,8 @@ class ConversationNodes:
                 entities={
                     "dimensions": dimensions_list,
                     "dimension": single_dimension,
-                    "top_n": state.entities.get("top_n")
+                    "top_n": state.entities.get("top_n"),
+                    "having_clause": state.entities.get("having_clause")
                 },
                 time_info=time_info
             )
@@ -2749,7 +2995,8 @@ class ConversationNodes:
 
         # 3. GROUP BY 语法检查 - GROUP BY 后面应该是列名或列别名，不应该有复杂表达式
         # 如果 GROUP BY 后面包含函数调用或运算符，可能是公式语法拼错了
-        group_by_match = re.search(r'GROUP\s+BY\s+(.+?)(?:\s+ORDER\s+BY|\s+LIMIT|\s+;|$)', sql_upper)
+        # 注意：HAVING 也可能是 GROUP BY 后的子句，需要加入结束标记
+        group_by_match = re.search(r'GROUP\s+BY\s+(.+?)(?:\s+HAVING|\s+ORDER\s+BY|\s+LIMIT|\s+;|$)', sql_upper)
         if group_by_match:
             group_by_clause = group_by_match.group(1).strip()
             # 检查是否包含不应该在 GROUP BY 中的内容
@@ -2910,6 +3157,31 @@ class ConversationNodes:
         comparison_enabled = intent_type in ["query_comparison", "query_trend"]
         comparison_types = ["同比", "环比"] if intent_type == "query_comparison" else []
 
+        # time_expr 需要字符串，如果 time_range 是 dict 则取 time_info.original
+        time_range_val = entities.get("time_range")
+        if isinstance(time_range_val, dict):
+            time_expr = time_range_val.get("original", "")
+        elif isinstance(time_range_val, str):
+            time_expr = time_range_val
+        else:
+            time_expr = ""
+
+        # 【修复】确保 multi_metrics 是 List[Dict] 类型，防止字符串污染
+        raw_metrics = entities.get("metrics", [])
+        multi_metrics = []
+        if isinstance(raw_metrics, list):
+            # 过滤掉非字典元素，确保每个元素都是有效的字典
+            for m in raw_metrics:
+                if isinstance(m, dict):
+                    multi_metrics.append(m)
+                else:
+                    logger.warning(f"[_conversation_state_to_query_intent] 过滤掉无效 metrics 元素: {m!r}")
+        elif isinstance(raw_metrics, dict):
+            # 如果是单个字典，包装成列表
+            multi_metrics = [raw_metrics]
+        else:
+            logger.warning(f"[_conversation_state_to_query_intent] metrics 类型异常: {type(raw_metrics)}, 值: {raw_metrics!r}")
+
         return QueryIntent(
             intent_type=intent_type,
             metric_code=entities.get("metric_code"),
@@ -2918,13 +3190,13 @@ class ConversationNodes:
             aggregation=None,  # 可从 starrocks_sql 解析
             time_dimension=entities.get("time_dimension"),
             time_range=time_range,
-            time_expr=entities.get("time_range"),
+            time_expr=time_expr,
             group_by_dims=group_by_dims,
             filters=filters,
             comparison_enabled=comparison_enabled,
             comparison_types=comparison_types,
             top_n=entities.get("top_n"),
-            multi_metrics=entities.get("metrics", []),
+            multi_metrics=multi_metrics,
             raw_starrocks_sql=entities.get("starrocks_sql"),
             raw_starrocks_table=entities.get("starrocks_table"),
             raw_entities=entities,  # 保留原始 entities 用于调试
@@ -3544,9 +3816,11 @@ class ConversationNodes:
                 dim_key = "日" if single_dimension in ["日", "day"] else "月" if single_dimension in ["月", "month"] else "年"
                 if table_name:
                     dim_configs = self._get_table_dimensions_cached(table_name)
-                    col = dim_configs.get(dim_key, {}).get("column_name", dim_key.upper())
-                else:
-                    col = dim_key.upper()
+                    # 使用配置中的列名，如果没有配置则使用合理的默认值
+                    col = dim_configs.get(dim_key, {}).get("column_name")
+                if not col:
+                    # 默认列名：月份用MONTHS，其他用FDATE
+                    col = "MONTHS" if dim_key == "月" else "FDATE"
                 if "GROUP BY" not in adjusted_sql.upper():
                     adjusted_sql += f" GROUP BY {col}"
             elif single_dimension:
@@ -3749,6 +4023,31 @@ class ConversationNodes:
                 elif has_limit:
                     # 有 ORDER BY 但没有 LIMIT
                     adjusted_sql += f" LIMIT {top_n}"
+
+        # === 6. 处理 HAVING 子句 ===
+        having_clause = entities.get("having_clause")
+        if having_clause:
+            # 检查 having_clause 是否已包含 HAVING 关键字
+            having_str = having_clause.strip()
+            if having_str.upper().startswith("HAVING "):
+                # 已包含 HAVING 关键字，直接使用
+                having_cond = having_str[7:].strip()  # 去掉 "HAVING " 前缀
+                prefix = "HAVING "
+            else:
+                # 不包含 HAVING 关键字
+                having_cond = having_str
+                prefix = "HAVING "
+            # 检查是否已有 HAVING 子句
+            if "HAVING " not in adjusted_sql.upper():
+                import re as re_module
+                limit_order_match = re_module.search(r'(\s+(?:LIMIT|ORDER\s+BY))', adjusted_sql, re_module.IGNORECASE)
+                if limit_order_match:
+                    insert_pos = limit_order_match.start()
+                    adjusted_sql = adjusted_sql[:insert_pos] + " " + prefix + having_cond + adjusted_sql[insert_pos:]
+                else:
+                    adjusted_sql = adjusted_sql.rstrip() + " " + prefix + having_cond
+                logger.info(f"[_apply_dimensions_to_sql] 添加 HAVING 子句: {prefix}{having_cond}")
+
 
         return adjusted_sql
 
@@ -4439,8 +4738,27 @@ class ConversationNodes:
         - 元数据查询：展示业务口径、技术口径等
         - 数值查询：展示实际数据或"暂无数据"
         """
+        # 【关键修复】如果 intent_node 已判定为 scope_too_broad（意图模糊无法识别），
+        # 必须进 clarification 块，即使后续 sql_gen_node 把 needs_clarification 设回了 False
+        # （因为 sql_gen_node 成功生成了 SQL 但语义仍不明确）
+        clarification_type = getattr(state, 'clarification_type', None)
+        if clarification_type == "scope_too_broad":
+            state.needs_clarification = True
+            logger.info(f"[response_node] clarification_type=scope_too_broad，强制 needs_clarification=True")
+
         # 需要追问的情况
         if state.needs_clarification:
+            # 【关键修复】在生成任何建议前，清除上轮遗留的 metric
+            # 例如：R2 执行了"上月销售额增长最快"，R3 问"上月增长最快的是哪个店铺"
+            # 此时 state.entities.metric_name="销售额" 是遗留的，需要清除让 _generate_suggestions 走 Case2
+            last_q = state.messages[-1].content if state.messages else ""
+            inherited_metric = state.entities.get("metric_name", "")
+            if inherited_metric and inherited_metric not in last_q:
+                logger.info(f"[response_node clarification] 清除上轮遗留metric: '{inherited_metric}' not in question, 重置has_metric")
+                state.entities.pop("metric_name", None)
+                state.entities.pop("metric_code", None)
+                state.entities.pop("metric_id", None)
+
             # 【修复】追问前保存上下文，确保 dimension 等信息被持久化
             self._update_context(state, state.entities)
 
@@ -4464,22 +4782,49 @@ class ConversationNodes:
                     "thinking_steps": [{k: v for k, v in (s.model_dump() if hasattr(s, 'model_dump') else s).items() if k != 'timestamp'} for s in state.thinking_steps],
                 }
             # 使用 clarification_message 作为追问内容
+            # 【关键修复】始终调用 _generate_suggestions 生成新建议，不复用 state.suggest_questions
+            # 因为 scope_too_broad 时 state.suggest_questions 可能仍是上轮遗留的 CASE1 建议
             return {
                 "answer": state.clarification_message or "抱歉，我需要更多信息来回答您的问题",
-                "suggest_questions": getattr(state, 'suggest_questions', []) or self._generate_suggestions(state),
+                "suggest_questions": self._generate_suggestions(state),
                 "needs_clarification": True,
                 "thinking_steps": [{k: v for k, v in (s.model_dump() if hasattr(s, 'model_dump') else s).items() if k != 'timestamp'} for s in state.thinking_steps],
             }
 
         # ========== 兜底处理：意图置信度低但不是明确指标查询 ==========
-        # 如果意图是 query_value 但没有提取到任何指标，或者意图是 unknown，
-        # 说明用户可能在闲聊或问了一个通用问题，直接走 LLM 回复
-        if state.current_intent in ["query_value", "unknown"]:
+        # 如果意图是 query_value/query_ranking/query_trend/query_comparison 但没有提取到任何指标，
+        # 说明用户可能在问一个通用问题，但没有指定具体指标
+        # 如果没有指标但有维度，走猜你想问流程
+        if state.current_intent in ["query_value", "query_ranking", "query_trend", "query_comparison", "unknown"]:
+            # 【关键修复】如果 metric_name 在当前问题文本中没有出现，说明是上轮遗留的
+            # 例如：R2 执行了"上月销售额增长最快"，R3 问"上月增长最快的是哪个店铺"
+            # 此时 state.entities.metric_name="销售额" 是遗留的，应该清除让 has_metric=False
+            last_q = state.messages[-1].content if state.messages else ""
+            inherited_metric = state.entities.get("metric_name", "")
+            if inherited_metric and inherited_metric not in last_q:
+                logger.info(f"[response_node] 清除上轮遗留metric: '{inherited_metric}' not in question, 重置has_metric")
+                state.entities.pop("metric_name", None)
+                state.entities.pop("metric_code", None)
+                state.entities.pop("metric_id", None)
             has_metric = bool(state.entities.get("metric_name") or state.entities.get("metric_code"))
             has_time = bool(state.entities.get("time_range"))
-            # 既没有指标也没有时间，大概率是闲聊
-            if not has_metric and not has_time:
-                logger.info(f"[response_node] 兜底处理: intent={state.current_intent}, 无指标无时间，判定为闲聊")
+            has_dimension = bool(state.entities.get("dimension") or state.entities.get("dimensions"))
+            # 既没有指标但有维度 → 走猜你想问
+            if not has_metric and has_dimension:
+                logger.info(f"[response_node] 无指标但有维度，进入猜你想问流程: dimension={state.entities.get('dimension')}, intent={state.current_intent}")
+                dimension = state.entities.get("dimension") or state.entities.get("dimensions")
+                suggestions = self._suggest_candidate_metrics(state.current_intent or "", dimension, state)
+                if suggestions:
+                    return {
+                        "answer": "抱歉，我需要确认一下您想知道哪个指标的数据",
+                        "suggest_questions": suggestions,
+                        "needs_clarification": True,
+                        "clarification_type": "metric_ambiguous",
+                        "thinking_steps": [{k: v for k, v in (s.model_dump() if hasattr(s, 'model_dump') else s).items() if k != 'timestamp'} for s in state.thinking_steps],
+                    }
+            # 既没有指标也没有时间也没有维度，大概率是闲聊
+            if not has_metric and not has_time and not has_dimension:
+                logger.info(f"[response_node] 兜底处理: intent={state.current_intent}, 无指标无时间无维度，判定为闲聊")
                 return {
                     "answer": "您好！我是智能问数助手，可以帮您查询指标数据。比如您可以问我：「昨天的销售额是多少」、「本周订单量趋势」等。请问有什么可以帮您？",
                     "suggest_questions": ["昨天的访客数是多少", "本周订单量如何", "查看销售额指标"],
@@ -4537,6 +4882,11 @@ class ConversationNodes:
         # 获取查询结果
         sql_result = getattr(state, 'sql_result', None)
         logger.info(f"[response_node] ENTRY sql_result type={type(sql_result)}, keys={sql_result.keys() if isinstance(sql_result, dict) else 'N/A'}, data_count={len(sql_result.get('data',[])) if isinstance(sql_result, dict) else 'N/A'}")
+
+        # 标记本次执行了查询，下轮对话如果问相同问题不要从 context 恢复 metric
+        ctx = getattr(state, 'conversation_context', None) or ConversationContext()
+        ctx.just_executed_query = True
+        state.conversation_context = ctx
 
         # 多个指标匹配的情况
         if isinstance(sql_result, dict) and sql_result.get("type") == "list":
@@ -4903,22 +5253,277 @@ class ConversationNodes:
             "needs_clarification": False,
         }
 
-    def _generate_suggestions(self, state: ConversationState) -> List[str]:
-        """生成后续问题建议"""
-        suggestions = []
-        metric_name = state.entities.get("metric_name", "")
+    def _infer_metric_properties(self, metric_name: str) -> Dict[str, bool]:
+        """
+        从指标名称推断指标属性（零成本方案）
 
+        Returns:
+            {
+                "ranking": True/False,   # 是否适合排名（增长最快/最多）
+                "trend": True,            # 是否适合看趋势
+                "comparison": True,       # 是否适合对比
+            }
+        """
+        if not metric_name:
+            return {"ranking": True, "trend": True, "comparison": True}
+
+        # 不适合排名的关键词（比率类、平均类）
+        not_ranking_keywords = ["率", "占比", "ROAS", "ACOS", "CPC", "CPM", "客单价", "平均", "人均", "单均"]
+
+        # 适合排名的关键词（可累加的绝对值）
+        ranking_keywords = ["额", "量", "数", "销量", "销售额", "订单量", "访客数", "买家数", "退款额", "成交额"]
+
+        # 适合趋势的关键词
+        trend_keywords = ["趋势", "变化", "走势"]
+
+        # 适合对比的关键词
+        comparison_keywords = ["对比", "差异", "差异", "比较"]
+
+        name_lower = metric_name.lower()
+
+        # 判断是否适合排名
+        is_not_ranking = any(kw in name_lower for kw in not_ranking_keywords)
+        is_ranking = any(kw in name_lower for kw in ranking_keywords) and not is_not_ranking
+
+        # 判断是否适合趋势
+        is_trend = any(kw in name_lower for kw in trend_keywords) or is_ranking
+
+        # 判断是否适合对比
+        is_comparison = any(kw in name_lower for kw in comparison_keywords) or is_ranking
+
+        return {
+            "ranking": is_ranking,
+            "trend": is_trend,
+            "comparison": is_comparison,
+        }
+
+    def _generate_suggestions(self, state: ConversationState) -> List[str]:
+        """
+        生成后续问题建议
+
+        策略：
+        1. 有指标名 → 基于指标生成多方向追问
+        2. 无指标名但有维度 → 向量搜索猜指标 + 生成追问
+        3. 兜底通用示例
+        """
+        intent = state.current_intent or ""
+        entities = state.entities or {}
+        metric_name = entities.get("metric_name", "")
+        dimension = entities.get("dimension_name", "") or entities.get("dimension", "")
+        logger.info(f"[_suggest] metric_name='{metric_name}', dimension='{dimension}', intent='{intent}'")
+
+        # 如果 metric_name 有值但当前问题文本中没有明确提到这个指标，说明 metric 是从上轮遗留的
+        # （上轮执行了查询，带出了 metric 上下文）→ 强制走 Case 2 猜指标
+        user_question = state.messages[-1].content if state.messages else ""
+        if metric_name and metric_name not in user_question:
+            logger.info(f"[_suggest] 强制走 Case2: metric_name='{metric_name}' 在当前问题中未提及，是上轮遗留上下文")
+            metric_name = ""
+
+        # Case 1: 有指标名 → 基于指标生成多方向追问
         if metric_name:
+            logger.info(f"[_suggest] → CASE 1: _suggest_for_known_metric(metric_name='{metric_name}')")
+            return self._suggest_for_known_metric(intent, metric_name, dimension)
+
+        # Case 2: 无指标名但有维度 → 向量搜索猜指标
+        if dimension:
+            logger.info(f"[_suggest] → CASE 2: _suggest_candidate_metrics(dimension='{dimension}')")
+            return self._suggest_candidate_metrics(intent, dimension, state)
+
+        # Case 3: 兜底通用示例
+        logger.info(f"[_suggest] → CASE 3: _get_generic_suggestions")
+        return self._get_generic_suggestions(intent)
+
+    def _suggest_for_known_metric(self, intent: str, metric_name: str, dimension: str) -> List[str]:
+        """基于已知指标生成多方向追问"""
+        props = self._infer_metric_properties(metric_name)
+        suggestions = []
+
+        # 将内部维度字段名转换为显示名
+        display_dim = dimension
+        if dimension:
+            try:
+                dim_configs = self.metric_client.get_dimension_configs()
+                for cfg in dim_configs:
+                    if cfg.get("column_name") == dimension:
+                        display_dim = cfg.get("dimension_name", dimension)
+                        break
+            except Exception:
+                pass
+
+        # 根据意图类型 + 指标属性生成追问
+        if intent == "query_ranking" and props.get("ranking"):
+            suggestions.append(f"查看{metric_name}的排名")
+            suggestions.append(f"哪些{display_dim}的{metric_name}增长最快" if display_dim else f"{metric_name}增长最快的是哪个")
+
+        if intent == "query_trend" and props.get("trend"):
+            suggestions.append(f"查看{metric_name}的趋势变化")
+            suggestions.append(f"查看{metric_name}的本周数据" if not dimension else f"{metric_name}的近期趋势")
+
+        if intent == "query_comparison" and props.get("comparison"):
+            suggestions.append(f"各{display_dim}的{metric_name}对比" if display_dim else f"{metric_name}的对比分析")
+            suggestions.append(f"查看{metric_name}的明细数据")
+
+        if intent == "query_value":
+            suggestions.append(f"查看{metric_name}的具体数值")
+            if props.get("trend"):
+                suggestions.append(f"查看{metric_name}的趋势")
+            if props.get("comparison"):
+                suggestions.append(f"对比{metric_name}的环比数据")
+
+        if intent == "query_metadata":
+            suggestions.append(f"查看{metric_name}的业务口径")
+            suggestions.append(f"查看{metric_name}的技术口径")
+
+        # 默认补充：趋势和对比
+        if not suggestions:
+            if props.get("trend"):
+                suggestions.append(f"查看{metric_name}的趋势")
+            if props.get("comparison"):
+                suggestions.append(f"对比{metric_name}的环比")
+            if props.get("ranking"):
+                suggestions.append(f"查看{metric_name}排名")
+            suggestions.append(f"查看{metric_name}的详细数据")
+
+        return suggestions[:3]
+
+    def _suggest_candidate_metrics(self, intent: str, dimension: str, state: ConversationState) -> List[str]:
+        """向量搜索猜指标 + 生成追问"""
+        try:
+            # 获取用户问题用于向量搜索
+            user_question = ""
+            if state.messages and len(state.messages) > 0:
+                user_question = state.messages[-1].content
+
+            # 检查是否有 metric_name 被遗留到当前问题（从上轮查询上下文带出）
+            # 如果 metric_name 没有在当前问题文本中出现，说明是残留的，应该清除走通用候选
+            entities = getattr(state, 'entities', {}) or {}
+            metric_name_in_ctx = entities.get("metric_name", "")
+            if metric_name_in_ctx and metric_name_in_ctx not in user_question:
+                logger.info(f"[_suggest_candidate_metrics] 清除上轮遗留metric: '{metric_name_in_ctx}' not in question, 改走通用候选")
+                # 清除遗留 metric，让向量搜索自由猜指标
+                entities["metric_name"] = None
+                entities["metric_code"] = None
+
+            if not user_question:
+                return self._get_generic_suggestions(intent)
+
+            # 从数据库 dimension_configs 获取内部字段名 -> 显示名 的映射
+            display_dim = dimension
+            try:
+                dim_configs = self.metric_client.get_dimension_configs()
+                for cfg in dim_configs:
+                    if cfg.get("column_name") == dimension:
+                        display_dim = cfg.get("dimension_name", dimension)
+                        break
+            except Exception as e:
+                logger.debug(f"[_suggest_candidate_metrics] 获取维度配置失败: {e}")
+
+            # 从 entities 获取实际解析到的时间表达，用于生成时间精准的建议
+            time_expr = "上月"  # 默认值
+            entities = getattr(state, "entities", {}) or {}
+            time_range = entities.get("time_range")
+            # time_range 可能是 dict {"start":..., "end":...} 或 string "3月"/"last_month"，需要兼容
+            if time_range:
+                if isinstance(time_range, dict):
+                    start = time_range.get("start", "")
+                    end = time_range.get("end", "")
+                    if start and start == end:
+                        time_expr = start
+                    elif start and end:
+                        time_expr = f"{start}至{end}"
+                elif isinstance(time_range, str):
+                    # 内部时间 key 转中文显示名（time_parser 把"上月"映射为"last_month"）
+                    time_key_to_display = {
+                        "last_month": "上月",
+                        "last_week": "上周",
+                        "last_year": "去年",
+                        "this_month": "本月",
+                        "this_week": "本周",
+                        "this_year": "今年",
+                        "next_month": "下月",
+                        "next_week": "下周",
+                        "next_year": "明年",
+                    }
+                    time_expr = time_key_to_display.get(time_range, time_range)
+
+            # 向量搜索 Top-5 候选指标
+            candidates = semantic_search.search_metric(user_question, top_k=5)
+
+            if not candidates:
+                return self._get_generic_suggestions(intent)
+
+            # 检查候选里有多少率类指标（不适合排名类问题的指标）
+            rate_keywords = ["率", "占比", "ROAS", "ACOS", "CPC", "CPM", "客单价", "平均"]
+            rate_count = 0
+            for m in candidates:
+                mn = m.get("metric_name", "")
+                if any(kw in mn for kw in rate_keywords):
+                    rate_count += 1
+
+            # 如果候选里超过一半是率类指标，用业务价值类 query 重新搜索
+            if rate_count >= len(candidates) // 2 + 1:
+                fallback_query = "销售额 订单量 访客数 买家数 退款 成交额"
+                candidates = semantic_search.search_metric(fallback_query, top_k=5)
+
+            suggestions = []
+            for metric in candidates:
+                metric_name = metric.get("metric_name", "")
+                if not metric_name:
+                    continue
+
+                # 跳过率类指标（不适合"增长最快"的表述）
+                if any(kw in metric_name for kw in rate_keywords):
+                    continue
+
+                # 对于 ranking 类意图，统一生成"上月/近期X增长最快的是哪个维度"格式的建议
+                if intent in ("query_ranking", "query_comparison", "query_trend", "query_value"):
+                    suggestions.append(
+                        f"{time_expr}{metric_name}增长最快的是哪个{display_dim}"
+                    )
+
+            # 去重
+            seen = set()
+            unique_suggestions = []
+            for s in suggestions:
+                if s not in seen:
+                    seen.add(s)
+                    unique_suggestions.append(s)
+
+            logger.info(f"[_suggest_candidate_metrics] intent={intent}, candidates_count={len(candidates)}, suggestions_count={len(unique_suggestions)}, suggestions={unique_suggestions[:3]}")
+            if unique_suggestions:
+                return unique_suggestions[:3]
+
+        except Exception as e:
+            logger.warning(f"[_suggest_candidate_metrics] 向量搜索猜指标失败: {e}")
+
+        logger.info(f"[_suggest_candidate_metrics]  fallback to _get_generic_suggestions, intent={intent}")
+        return self._get_generic_suggestions(intent)
+
+    def _get_generic_suggestions(self, intent: str = "") -> List[str]:
+        """兜底通用示例"""
+        suggestions = [
+            "昨天的访客数是多少",
+            "本周的订单量如何",
+            "本月销售额趋势",
+        ]
+
+        if intent == "query_ranking":
             suggestions = [
-                f"查看{metric_name}的本周数据",
-                f"查看{metric_name}的趋势变化",
-                f"对比{metric_name}的环比数据",
+                "上月销售额增长最快的是哪个店铺",
+                "上月订单量增长最快的是哪个店铺",
+                "上月访客数增长最快的是哪个店铺",
             ]
-        else:
+        elif intent == "query_trend":
             suggestions = [
-                "昨天的访客数是多少",
-                "本周的订单量如何",
                 "本月销售额趋势",
+                "本周订单量变化",
+                "访客数走势",
+            ]
+        elif intent == "query_comparison":
+            suggestions = [
+                "各平台销售额对比",
+                "店铺之间订单量对比",
+                "不同渠道对比分析",
             ]
 
         return suggestions

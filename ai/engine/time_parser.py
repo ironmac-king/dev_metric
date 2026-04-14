@@ -90,7 +90,7 @@ class TimeParser:
             year = int(match.group(1))
             month = int(match.group(2))
             if 1 <= month <= 12:
-                return self._build_month_result(year, month, text, has_explicit_year=True)
+                return self._build_month_result(year, month, match.group(0), has_explicit_year=True)
         return None
 
     def _parse_month_only(self, text: str) -> Optional[Dict[str, Any]]:
@@ -108,7 +108,7 @@ class TimeParser:
                 # 推断年份
                 year = self._infer_year(text)
                 has_explicit_year = any(w in text for w in ["去年", "今年", "明年", "本年", "上年"])
-                return self._build_month_result(year, month, text, has_explicit_year=has_explicit_year)
+                return self._build_month_result(year, month, match.group(0), has_explicit_year=has_explicit_year)
         return None
 
     def _parse_quarter(self, text: str) -> Optional[Dict[str, Any]]:
@@ -210,7 +210,7 @@ class TimeParser:
                 "type": "date_range",
                 "start": f"{year}-{start_month:02d}-{start_day:02d}",
                 "end": f"{year}-{end_month:02d}-{end_day:02d}",
-                "original": text,
+                "original": match.group(0),
                 "has_explicit_year": False,
                 "time_key": f"{year}-{start_month:02d}-{start_day:02d}_{year}-{end_month:02d}-{end_day:02d}"
             }
@@ -229,7 +229,7 @@ class TimeParser:
                     "type": "date_range",
                     "start": f"{year}-{start_month:02d}-01",
                     "end": f"{year}-{end_month:02d}-{end_last}",
-                    "original": text,
+                    "original": match.group(0),
                     "has_explicit_year": False,
                     "time_key": f"{year}-{start_month:02d}_{year}-{end_month:02d}"
                 }
@@ -252,7 +252,7 @@ class TimeParser:
                     "type": "date_range",  # 用 date_range 类型表示具体日期
                     "start": f"{year}-{month:02d}-{day:02d}",
                     "end": f"{year}-{month:02d}-{day:02d}",
-                    "original": text,
+                    "original": match.group(0),
                     "has_explicit_year": False,
                     "time_key": f"{year}-{month:02d}-{day:02d}"
                 }

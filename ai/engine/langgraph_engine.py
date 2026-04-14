@@ -116,8 +116,9 @@ def langgraph_entity_node(state: ConversationState) -> Dict[str, Any]:
     updates = conversation_nodes.entity_node(state)
 
     # 处理 entities 合并（处理字段清除）
+    # 当 entity_node 设置某个字段为 None 时，表示该字段应该被删除
     new_entities = updates.get("entities", {})
-    for key in ["metric_name", "metric_code", "unit", "starrocks_sql"]:
+    for key in ["metric_name", "metric_code", "unit", "starrocks_sql", "dimension", "dimension_values", "dimensions"]:
         if key in new_entities and new_entities[key] is None:
             state.entities.pop(key, None)
             del new_entities[key]
@@ -403,12 +404,26 @@ class LangGraphEngine(ConversationEngine):
             # 说明 graph 内的 response_node 已经执行过，直接复用结果即可
             cached_answer = final_state.get("answer")
             cached_result_data = final_state.get("result_data")
-            if cached_answer is not None or cached_result_data is not None:
+            cached_suggest_questions = final_state.get("suggest_questions", [])
+            # 【关键修复】如果已有缓存的 suggest_questions（来自 graph 内的 langgraph_response_node 执行），
+            # 说明 graph 内的 response_node 已经正确生成了 CASE2 建议，直接复用不再调用 response_node
+            # 避免二次调用 response_node 时走正常路径（needs_clarification=False）产生 CASE1 建议覆盖 CASE2
+            if (cached_answer is not None or cached_result_data is not None) and cached_suggest_questions:
                 response_updates = {
                     "answer": cached_answer or "",
                     "result_data": cached_result_data,
-                    "suggest_questions": final_state.get("suggest_questions", []),
+                    "suggest_questions": cached_suggest_questions,
                     "needs_clarification": final_state.get("needs_clarification", False),
+                }
+            elif cached_suggest_questions:
+                # 有建议但无 answer/result_data，仍然直接用缓存建议（来自 graph 的 clarification 路径）
+                response_updates = {
+                    "answer": final_state.get("clarification_message", ""),
+                    "result_data": None,
+                    "suggest_questions": cached_suggest_questions,
+                    "needs_clarification": final_state.get("needs_clarification", False),
+                    "clarification_message": final_state.get("clarification_message"),
+                    "clarification_type": final_state.get("clarification_type"),
                 }
             else:
                 response_updates = conversation_nodes.response_node(response_state)
@@ -614,8 +629,12 @@ class LangGraphEngine(ConversationEngine):
         if target_metric:
             starrocks_sql = target_metric.get("starrocks_sql", "") or ""
             field_matches = re.findall(r'(?:sum\()?\s*([\w]+)\s*\)?\s*(?:as\s*`?([\w]+)`?)?', starrocks_sql, re.IGNORECASE)
-            if any(m[1] for m in field_matches):
-                field_matches = [m[1] if m[1] else m[0] for m in field_matches]
+            # 确保 field_matches 是字符串列表（而不是元组列表）
+            if field_matches and isinstance(field_matches[0], tuple):
+                if any(m[1] for m in field_matches):
+                    field_matches = [m[1] if m[1] else m[0] for m in field_matches]
+                else:
+                    field_matches = [m[0] for m in field_matches]
             metric_name = target_metric.get("name", metric_code)
             for field in field_matches:
                 field_upper = field.upper()

@@ -160,6 +160,21 @@
             </div>
           </div>
 
+          <!-- 猜你想问建议 -->
+          <div v-if="msg.suggest && msg.suggest.length > 0" class="suggest-questions">
+            <div class="suggest-header">您是否想了解：</div>
+            <div class="suggest-list">
+              <div
+                v-for="(item, idx) in msg.suggest"
+                :key="idx"
+                class="suggest-item"
+                @click="$emit('select-suggestion', item)"
+              >
+                {{ item }}
+              </div>
+            </div>
+          </div>
+
           <!-- 查询结果表格 -->
           <div v-if="msg.result_data && (msg.result_data.length > 0 || (msg.result_data.data && msg.result_data.data.length > 0))" class="result-table">
             <div class="result-table-header">
@@ -170,7 +185,22 @@
               <table>
                 <thead>
                   <tr>
-                    <th v-for="(value, key) in (msg.result_data[0] || (msg.result_data.data && msg.result_data.data[0]) || {})" :key="key">{{ key }}</th>
+                    <th
+                      v-for="(value, key) in (msg.result_data[0] || (msg.result_data.data && msg.result_data.data[0]) || {})"
+                      :key="key"
+                      class="sortable-th"
+                      @click="handleSort(msg, key)"
+                    >
+                      <span class="th-content">
+                        {{ key }}
+                        <span class="sort-icon" :class="{ active: getSortIcon(msg, key) !== 'none' }">
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                            <path d="M5 2L7.5 5.5H2.5L5 2Z" :fill="getSortIcon(msg, key) === 'asc' ? 'var(--primary-color, #1677ff)' : 'currentColor'" :opacity="getSortIcon(msg, key) === 'asc' ? 1 : 0.5"/>
+                            <path d="M5 8L2.5 4.5H7.5L5 8Z" :fill="getSortIcon(msg, key) === 'desc' ? 'var(--primary-color, #1677ff)' : 'currentColor'" :opacity="getSortIcon(msg, key) === 'desc' ? 1 : 0.5"/>
+                          </svg>
+                        </span>
+                      </span>
+                    </th>
                     <template v-if="!hasRowComparison(msg) && msg.comparison_results && msg.comparison_results.length > 0">
                       <th v-for="comp in msg.comparison_results" :key="'th-' + comp.comparison_type">
                         {{ comp.comparison_type === '同比' ? '同比变化率' : '环比变化率' }}
@@ -180,7 +210,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(row, rowIdx) in (msg.result_data.data || msg.result_data)" :key="rowIdx">
+                  <tr v-for="(row, rowIdx) in getSortedData(msg)" :key="rowIdx">
                     <td v-for="(value, key) in row" :key="key" v-html="formatCellValue(value, key, msg)"></td>
                     <template v-if="!hasRowComparison(msg) && msg.comparison_results && msg.comparison_results.length > 0">
                       <td v-for="comp in msg.comparison_results" :key="'td-' + comp.comparison_type">
@@ -412,6 +442,7 @@ const emit = defineEmits<{
   'toggle-thinking': [msg: any]
   'select-metric': [idx: number, metric: any]
   'select-dim-value': [idx: number, dimValue: any]
+  'select-suggestion': [item: string]
   'page-change': [page: number, msg: any]
   'drill-down': [msg: any]
   'breadcrumb-click': [crumb: any, cIdx: number, msg: any]
@@ -426,6 +457,55 @@ const emit = defineEmits<{
 
 const messagesContainer = ref<HTMLElement | null>(null)
 const localEditingContent = ref('')
+
+// ========== 表格排序状态 ==========
+// 格式: { [messageIndex]: { column: string, order: 'asc' | 'desc' } }
+const sortStates = ref<Record<number, { column: string, order: 'asc' | 'desc' }>>({})
+
+function handleSort(msg: any, key: string) {
+  const index = props.messages.indexOf(msg)
+  const current = sortStates.value[index]
+  if (!current || current.column !== key) {
+    // 新列，默认降序（大的在前）
+    sortStates.value[index] = { column: key, order: 'desc' }
+  } else if (current.order === 'desc') {
+    // 同一列，切换为升序
+    sortStates.value[index] = { column: key, order: 'asc' }
+  } else {
+    // 再次点击，取消排序
+    delete sortStates.value[index]
+  }
+}
+
+function getSortIcon(msg: any, key: string): 'none' | 'asc' | 'desc' | 'active' {
+  const index = props.messages.indexOf(msg)
+  const current = sortStates.value[index]
+  if (!current || current.column !== key) return 'none'
+  return current.order === 'asc' ? 'asc' : 'desc'
+}
+
+function getSortedData(msg: any): any[] {
+  const data = msg.result_data?.data || msg.result_data || []
+  const index = props.messages.indexOf(msg)
+  const sortState = sortStates.value[index]
+  if (!sortState) return data
+
+  const { column, order } = sortState
+  return [...data].sort((a, b) => {
+    const valA = a[column]
+    const valB = b[column]
+    // 数字比较
+    const numA = typeof valA === 'number' ? valA : parseFloat(valA)
+    const numB = typeof valB === 'number' ? valB : parseFloat(valB)
+    if (!isNaN(numA) && !isNaN(numB)) {
+      return order === 'asc' ? numA - numB : numB - numA
+    }
+    // 中文字符串比较
+    return order === 'asc'
+      ? String(valA).localeCompare(String(valB), 'zh-CN')
+      : String(valB).localeCompare(String(valA), 'zh-CN')
+  })
+}
 
 // Watch editingMessageIndex to initialize localEditingContent when editing starts
 watch(() => props.editingMessageIndex, (newIndex) => {
@@ -982,6 +1062,33 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
   white-space: nowrap;
 }
 
+/* 可排序列头 */
+.sortable-th {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.sortable-th:hover {
+  background: var(--bg-primary);
+}
+.sortable-th .th-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.sort-icon {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.4;
+  transition: opacity 0.15s;
+}
+.sort-icon.active {
+  opacity: 1;
+}
+.sortable-th:hover .sort-icon {
+  opacity: 0.75;
+}
+
 .result-table td {
   padding: 8px 12px;
   color: var(--text-primary);
@@ -1057,6 +1164,43 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
   font-size: 12px;
   color: var(--text-secondary);
   font-family: monospace;
+}
+
+/* 猜你想问建议 */
+.suggest-questions {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+.suggest-header {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.suggest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.suggest-item {
+  padding: 10px 14px;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.suggest-item:hover {
+  border-color: var(--color-primary);
+  background: var(--bg-primary);
 }
 
 /* 下钻维度 */
