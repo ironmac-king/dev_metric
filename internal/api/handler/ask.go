@@ -520,6 +520,29 @@ func ClearSession(c *gin.Context) {
 	response.SuccessWithMessage(c, "会话已清除", nil)
 }
 
+// ClearSessionInternal 清除会话（内部版本，不需要认证，使用 query 参数）
+func ClearSessionInternal(c *gin.Context) {
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		response.Error(c, response.CodeBadRequest, "session_id 不能为空")
+		return
+	}
+
+	// 调用 Python AI 服务
+	pythonURL := fmt.Sprintf("http://localhost:8081/api/v1/ask/clear?session_id=%s", sessionID)
+	resp, err := http.Post(pythonURL, "application/json", nil)
+	if err != nil {
+		response.Error(c, response.CodeInternalError, "AI 服务调用失败")
+		return
+	}
+	defer resp.Body.Close()
+
+	// 同时删除 Go 后端的会话摘要记录
+	postgres.Get().Delete(&model.AskSessionSummary{}, "session_id = ?", sessionID)
+
+	response.SuccessWithMessage(c, "会话已清除", nil)
+}
+
 // SubmitFeedback 提交反馈（点赞/点踩）
 func SubmitFeedback(c *gin.Context) {
 	var req struct {

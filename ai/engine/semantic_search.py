@@ -187,45 +187,135 @@ class SemanticSearch:
 
         return best_intent, float(best_similarity)
 
-    def search_metric(self, query: str, top_k: int = 5) -> Tuple[Optional[Dict], float]:
+    def search_metric(self, query: str, top_k: int = 5) -> List[Dict]:
         """
-        搜索相似指标
+        搜索相似指标，支持返回多个候选（混合排序）
+
+        混合排序公式：
+        score = 向量相似度 × 0.3 + 使用频率归一化分数 × 0.5 + 核心指标加成 × 0.2
+
+        Args:
+            query: 用户问题
+            top_k: 返回的候选数量，默认5
 
         Returns:
-            (指标信息 dict, 相似度) 如果找到返回指标信息，否则返回 None
+            [{
+                "metric_code": "MKI-02-0001",
+                "metric_name": "销售额",
+                "similarity": 0.85,
+                "info": {}
+            }, ...]
         """
         self.ensure_loaded()
 
         if not self._metric_vectors:
-            return None, 0.0
+            return []
 
         # 生成查询向量（使用阿里 embedding，与 PG 中存储的向量一致）
         query_embedding = alibaba_embedding_client.embed_single(query)
         if query_embedding is None or len(query_embedding) == 0:
-            return None, 0.0
+            return []
 
         query_vec = np.array(query_embedding).reshape(1, -1)
 
-        # 计算所有向量的相似度
-        best_code = None
-        best_similarity = 0.0
+        # 获取使用频率和核心指标配置
+        usage_freq = self._get_usage_frequency()
+        core_metrics = self._get_core_metrics()
+
+        # 计算所有向量的相似度，收集所有候选
+        candidates = []
+        max_freq = max(usage_freq.values()) if usage_freq else 1
 
         for code, vec in self._metric_vectors.items():
             vec = vec.reshape(1, -1)
             sim = cosine_similarity(query_vec, vec)[0][0]
-            if sim > best_similarity:
-                best_similarity = sim
-                best_code = code
+            info = self._metric_info.get(code, {})
 
-        if best_code:
-            info = self._metric_info.get(best_code, {})
-            return {
-                "metric_code": best_code,
-                "metric_name": info.get("text", "").split()[0] if info.get("text") else "",
+            # 从 text 字段提取指标名称（第一个词）
+            metric_name = ""
+            if info.get("text"):
+                metric_name = info.get("text", "").split()[0] if " " in info.get("text", "") else info.get("text", "")
+
+            # 混合评分
+            # 1. 向量相似度分数 (0-1)
+            sim_score = float(sim)
+
+            # 2. 使用频率归一化分数 (0-1)
+            freq = usage_freq.get(code, 0)
+            freq_score = freq / max_freq if max_freq > 0 else 0
+
+            # 3. 核心指标加成 (0 或 0.2)
+            is_core = 1 if code in core_metrics else 0
+            core_score = is_core * 0.2
+
+            # 综合分数
+            hybrid_score = sim_score * 0.3 + freq_score * 0.5 + core_score
+
+            candidates.append({
+                "metric_code": code,
+                "metric_name": metric_name,
+                "similarity": float(sim),
+                "hybrid_score": hybrid_score,
                 "info": info.get("info", {}),
-            }, float(best_similarity)
+            })
 
-        return None, 0.0
+        # 按混合分数降序排序
+        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
+
+        # 返回 Top-K
+        return candidates[:top_k]
+
+    def _get_usage_frequency(self) -> Dict[str, int]:
+        """获取各指标的使用频率（从 sql_audit_logs 表统计）"""
+        try:
+            import psycopg2
+            DATABASE_URL = os.getenv(
+                "DATABASE_URL",
+                "postgresql://postgres:admin123@192.168.1.225:5432/dev_metric"
+            )
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+
+            # 统计 sql_audit_logs 中各指标被查询的次数
+            # sql_audit_logs 表的 metric_id 对应 metrics 表的 id，再获取 metric_code
+            cur.execute("""
+                SELECT m.metric_code, COUNT(*) as cnt
+                FROM sql_audit_logs l
+                JOIN metrics m ON l.metric_id = m.id
+                WHERE l.metric_id IS NOT NULL
+                GROUP BY m.metric_code
+                ORDER BY cnt DESC
+            """)
+            freq = {row[0]: row[1] for row in cur.fetchall()}
+
+            cur.close()
+            conn.close()
+            return freq
+        except Exception as e:
+            print(f"[SemanticSearch] 获取使用频率失败: {e}")
+            return {}
+
+    def _get_core_metrics(self) -> set:
+        """获取核心指标集合"""
+        try:
+            import psycopg2
+            DATABASE_URL = os.getenv(
+                "DATABASE_URL",
+                "postgresql://postgres:admin123@192.168.1.225:5432/dev_metric"
+            )
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+
+            # 获取 is_core=1 的指标
+            cur.execute("SELECT metric_code FROM metrics WHERE is_core = 1")
+            core = {row[0] for row in cur.fetchall()}
+
+            cur.close()
+            conn.close()
+            return core
+        except Exception as e:
+            print(f"[SemanticSearch] 获取核心指标失败: {e}")
+            return {}
 
     def search_dimension_value(self, query: str, top_k: int = 5) -> Tuple[List[Dict], float]:
         """
@@ -345,8 +435,14 @@ class SemanticSearch:
             return None, "none"
 
     def match_metric(self, query: str) -> Tuple[Optional[Dict], str]:
-        """匹配指标 - 三层降级"""
-        metric_info, similarity = self.search_metric(query)
+        """匹配指标 - 三层降级（返回单个最佳匹配）"""
+        candidates = self.search_metric(query, top_k=1)
+
+        if not candidates:
+            return None, "none"
+
+        metric_info = candidates[0]
+        similarity = metric_info.get("similarity", 0)
 
         if similarity > self.HIGH_THRESHOLD:
             return metric_info, "high"

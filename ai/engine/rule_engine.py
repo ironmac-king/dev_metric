@@ -69,6 +69,14 @@ class RuleEngine:
         self._load_nlp_templates()
         self._load_dimensions()  # 加载维度映射
 
+    def reload_business_terms(self):
+        """热更新业务术语（无需重启服务）"""
+        logger.info("[RuleEngine] 热更新业务术语...")
+        self.business_terms = {}
+        self._load_business_terms()
+        RuleEngine._shared_business_terms = self.business_terms
+        logger.info("[RuleEngine] 热更新业务术语完成")
+
     def _load_business_terms(self):
         """从 Go API 加载业务术语"""
         try:
@@ -479,27 +487,43 @@ class RuleEngine:
         # 收集所有匹配（精确+模糊），不 early return
         all_matches = []  # (score, metric_info) tuples
 
-        # 精确匹配（双向包含）
+        # 【修复】创建去空格版本的文本，用于处理用户输入带空格的情况
+        # 如 "B2B APP会话量" -> "b2bapp会话量"
+        text_no_space_lower = text_lower.replace(" ", "").replace("　", "")
+
+        # 精确匹配（双向包含，支持去空格匹配）
         for term, metric_info in self.metric_templates.items():
             term_lower = term.lower()
+            term_no_space_lower = term_lower.replace(" ", "").replace("　", "")
+            # 原文匹配
             if term_lower in text_lower or text_lower in term_lower:
                 logger.debug(f"双向精确匹配: {term} -> {metric_info.get('metric_name')}")
-                # 精确匹配给满分 1.0
                 all_matches.append((1.0, term, metric_info))
+            # 去空格匹配（用户输入带空格，如 "B2B APP" 匹配 "B2BAPP"）
+            elif term_no_space_lower in text_no_space_lower or text_no_space_lower in term_no_space_lower:
+                logger.debug(f"双向精确匹配(去空格): {term} -> {metric_info.get('metric_name')}")
+                all_matches.append((0.99, term, metric_info))  # 略低于原文匹配
 
-        # 模糊匹配（字符重叠）
+        # 模糊匹配（字符重叠，支持去空格）
         for term, metric_info in self.metric_templates.items():
             term_lower = term.lower()
+            term_no_space_lower = term_lower.replace(" ", "").replace("　", "")
             # 跳过已精确匹配的
             if any(term == t for _, t, _ in all_matches):
                 continue
+            # 原文模糊匹配
             if term_lower in text_lower:
                 score = len(term_lower) / max(len(text_lower), 1)
                 all_matches.append((score, term, metric_info))
+            elif term_no_space_lower in text_no_space_lower:
+                # 去空格模糊匹配
+                score = len(term_no_space_lower) / max(len(text_no_space_lower), 1) * 0.95  # 略低
+                all_matches.append((score, term, metric_info))
             else:
-                common_chars = set(term_lower) & set(text_lower)
-                if len(common_chars) >= 2 and len(term_lower) >= 3:
-                    score = len(common_chars) / len(term_lower)
+                # 字符重叠也去掉空格计算
+                common_chars = set(term_no_space_lower) & set(text_no_space_lower)
+                if len(common_chars) >= 2 and len(term_no_space_lower) >= 3:
+                    score = len(common_chars) / len(term_no_space_lower)
                     if score > 0.25:  # 降低阈值到 0.25
                         all_matches.append((score, term, metric_info))
 

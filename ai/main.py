@@ -477,6 +477,14 @@ async def clear_session(session_id: str):
         del sessions[session_id]
     if session_id in session_metadata:
         del session_metadata[session_id]
+    # 清除 LangGraph MemorySaver 中的会话数据
+    try:
+        from ai.engine.langgraph_engine import LangGraphEngine
+        if LangGraphEngine._memory_saver:
+            LangGraphEngine._memory_saver.delete_thread(session_id)
+            logger.info(f"[clear_session] MemorySaver 清除成功: {session_id}")
+    except Exception as e:
+        logger.warning(f"[clear_session] MemorySaver 清除失败: {e}")
     return {"message": "会话已清除"}
 
 
@@ -1043,7 +1051,7 @@ async def health():
 
 @app.post("/api/v1/admin/reload-config")
 async def reload_config():
-    """重新加载指标配置"""
+    """重新加载指标配置和 Prompt 缓存"""
     from ai.graph.nodes import conversation_nodes
     try:
         # 重新初始化 RuleEngine
@@ -1056,7 +1064,11 @@ async def reload_config():
         if hasattr(ConversationNodes, '_formula_syntax_cache'):
             ConversationNodes._formula_syntax_cache = []
 
-        logger.info("指标配置已重新加载")
+        # 刷新 Prompt 配置缓存（清除 Redis + 内存缓存，下次请求会重新加载）
+        from ai.engine.prompt_manager import reload_prompt_manager
+        reload_prompt_manager()
+
+        logger.info("指标配置和 Prompt 缓存已重新加载")
         return {"success": True, "message": "配置已重新加载"}
     except Exception as e:
         logger.error(f"重新加载配置失败: {e}")

@@ -139,6 +139,7 @@
         @cancel-edit="cancelEdit"
         @toggle-dim="toggleDimSelection"
         @clear-dims="clearDimSelection"
+        @select-suggestion="handleSelectSuggestion"
       />
 
       <!-- 操作栏 -->
@@ -507,7 +508,8 @@ async function handleSend() {
         clarification_type: res.clarification_type || null,
         matched_metrics: res.matched_metrics || [],
         dimension_value_candidates: res.dimension_value_candidates || [],
-        dimension_value_matched_text: res.dimension_value_matched_text || ''
+        dimension_value_matched_text: res.dimension_value_matched_text || '',
+        suggest: res.suggest || []  // 猜你想问建议
       })
     }
   } catch (e) {
@@ -596,7 +598,8 @@ async function resendMessage() {
         clarification_type: res.clarification_type || null,
         matched_metrics: res.matched_metrics || [],
         dimension_value_candidates: res.dimension_value_candidates || [],
-        dimension_value_matched_text: res.dimension_value_matched_text || ''
+        dimension_value_matched_text: res.dimension_value_matched_text || '',
+        suggest: res.suggest || []  // 猜你想问建议
       })
     }
   } catch (e) {
@@ -665,6 +668,12 @@ function selectDimensionValueCandidate(idx, dimValue) {
   handleSend()
 }
 
+// 处理猜你想问选择
+function handleSelectSuggestion(item) {
+  question.value = item
+  handleSend()
+}
+
 // 引擎切换
 function setEngineType(type) {
   engineType.value = type
@@ -681,7 +690,16 @@ function onSqlModeChange(mode) {
 // 下拉菜单
 async function handleCommand(command) {
   if (command === 'clear') {
+    const sid = sessionId.value
+    if (sid) {
+      await askAPI.clearSession(sid)
+      await askAPI.deleteMessages(sid)
+    }
     messages.value = []
+    currentMetricCode.value = ''
+    currentSQL.value = ''
+    currentGroupBy.value = ''
+    selectedDims.value = {}
     ElMessage.success('对话已清空')
   } else if (command === 'export') {
     const content = messages.value.map(m =>

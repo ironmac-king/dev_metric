@@ -592,11 +592,23 @@ async function handleStreamMode(text, aiMsgIndex) {
         } catch (e) {
           console.error('解析图表数据失败:', e, 'raw data:', eventData.substring(0, 200))
         }
+      } else if (lastEventType === 'thinking') {
+        // 收到思考步骤，更新 thinkingSteps
+        const { steps, totalTime } = parseThinkingStep(eventData)
+        if (steps.length > 0) {
+          messages.value[aiMsgIndex].thinkingSteps.push(...steps)
+          triggerRef(messages.value)
+        }
+        if (totalTime) {
+          messages.value[aiMsgIndex].totalTime = totalTime
+        }
       } else if (lastEventType === 'done') {
         // 完成，清理可能残留的 [[CHART_BLOCK]] 占位符
         console.log('流式完成')
         fullContent = fullContent.replace(/\[\[CHART_BLOCK\]\]/g, '')
         rawMarkdown.value = fullContent
+        // 清空思考步骤，显示完成状态
+        messages.value[aiMsgIndex].thinkingSteps = []
       }
     }
   }
@@ -635,7 +647,6 @@ async function handleStreamMode(text, aiMsgIndex) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: sessionId.value,
         question: text,
@@ -820,6 +831,7 @@ async function selectReport(idx) {
 
 // 加载历史记录
 async function loadHistory() {
+  console.log('[loadHistory] 开始加载, sessionId:', sessionId.value)
   if (!sessionId.value) {
     sessionId.value = generateSessionId()
     localStorage.setItem('analysis_session_id', sessionId.value)
@@ -832,6 +844,7 @@ async function loadHistory() {
       headers: { 'Authorization': `Bearer ${token}` }
     })
     const data = await res.json()
+    console.log('[loadHistory] API返回, data.data.list.length:', data.data?.list?.length)
     if (data.code === 0 && data.data?.list) {
       // 预渲染所有报告的 HTML
       const renderMarkdown = (text) => {
@@ -864,6 +877,7 @@ async function loadHistory() {
           created_at: log.created_at
         }
       })
+      console.log('[loadHistory] 加载完成, messages.length:', messages.value.length)
       // 缓存所有报告（渲染后的 HTML）
       data.data.list.forEach(log => {
         reportCache.set(log.id, renderMarkdown(log.answer))
@@ -1094,8 +1108,9 @@ function parseChartDataFromText(text, onCleaned) {
   const charts = []
   const prefix = '{CHART_DATA:'
 
-  console.log('[parseChartDataFromText] 文本长度:', text?.length || 0)
-  console.log('[parseChartDataFromText] 是否包含 CHART_DATA:', text?.includes(prefix) || false)
+  if (!text) {
+    return { charts: [], cleanedText: text }
+  }
 
   if (!text) {
     return { charts: [], cleanedText: text }
@@ -1135,19 +1150,15 @@ function parseChartDataFromText(text, onCleaned) {
   }
 
   // 提取每个 CHART_DATA 的 JSON
-  console.log('[parseChartDataFromText] 找到', ranges.length, '个图表数据块')
   for (const range of ranges) {
     const jsonStr = text.substring(range.start + prefix.length, range.end)
     try {
       const chartData = JSON.parse(jsonStr)
       charts.push(chartData)
-      console.log('[parseChartDataFromText] 解析成功，charts 数量:', charts.length)
     } catch (e) {
       console.error('Chart JSON parse error:', e)
     }
   }
-
-  console.log('[parseChartDataFromText] 最终 charts:', charts.length)
 
   // 从文本中移除所有 CHART_DATA 块（从后往前移除，避免索引偏移）
   let cleanedText = text
@@ -1286,7 +1297,10 @@ function handleResize() {
 
 onMounted(() => {
   window.addEventListener('resize', handleResize)
-  loadHistory()
+  // 避免重复加载
+  if (messages.value.length === 0) {
+    loadHistory()
+  }
 })
 
 onUnmounted(() => {
@@ -1298,7 +1312,25 @@ onUnmounted(() => {
   })
 })
 
-function clearChat() {
+async function clearChat() {
+  const sid = sessionId.value
+  // 调用后端清除会话
+  try {
+    const token = localStorage.getItem('access_token') || ''
+    // 1. 清除 Python AI 服务会话（使用内部接口，不需要认证）
+    await fetch(`/api/v1/internal/ask/clear?session_id=${sid}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    })
+    // 2. 清除 Go 后端的日志记录
+    await fetch(`/api/v1/ask-analysis/logs?session_id=${sid}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  } catch (e) {
+    console.error('清除会话失败:', e)
+  }
+  // 清除本地状态
   messages.value = []
   analysisResult.value = ''
   analysisCharts.value = []
@@ -1309,6 +1341,9 @@ function clearChat() {
     if (chart) chart.dispose()
   })
   chartRefs.value = []
+  // 生成新的 sessionId
+  sessionId.value = generateSessionId()
+  localStorage.setItem('analysis_session_id', sessionId.value)
 }
 
 function scrollToBottom() {

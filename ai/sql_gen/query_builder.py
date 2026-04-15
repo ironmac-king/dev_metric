@@ -438,7 +438,12 @@ class QueryBuilder:
             # 确定 GROUP BY 维度
             group_by_dims = [d.field for d in query_state.dimensions if d.value is None]
             if not group_by_dims:
-                group_by_dims = field_mapping.get("group_by_fields", [])
+                # 【修复】只有当 rendered_sql 本身包含 GROUP BY 时，才 fallback 到 field_mapping
+                # 如果 rendered_sql 没有 GROUP BY（用户问"总计"），则不应该添加 GROUP BY
+                if re.search(r'\bGROUP\s+BY\b', rendered_sql, re.IGNORECASE):
+                    group_by_dims = field_mapping.get("group_by_fields", [])
+                else:
+                    group_by_dims = []
 
             logger.info(f"[_build_base_sql] group_by_dims = {group_by_dims}, has GROUP BY in sql: {bool(re.search(r'\\bGROUP\\s+BY\\b', sql, re.IGNORECASE))}")
 

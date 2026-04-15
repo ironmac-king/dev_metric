@@ -174,6 +174,18 @@
               </span>
             </template>
           </el-table-column>
+          <el-table-column prop="is_core" label="核心" width="80" align="center" sortable :sort-orders="['descending', 'ascending']">
+            <template #default="{ row }">
+              <el-tag v-if="row.is_core === 1" type="success" size="small">是</el-tag>
+              <span v-else style="color: #c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="boost_score" label="权重" width="80" align="center" sortable :sort-orders="['descending', 'ascending']">
+            <template #default="{ row }">
+              <span v-if="row.boost_score > 0" style="color: #e6a23c; font-weight: 600">{{ row.boost_score }}</span>
+              <span v-else style="color: #c0c4cc">-</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="updated_by" label="更新人" width="100" align="center">
             <template #default="{ row }">
               <span class="updater-text">{{ row.updated_by || '-' }}</span>
@@ -403,6 +415,14 @@
                   <el-option label="停用" value="停用" />
                 </el-select>
               </el-form-item>
+              <el-form-item label="核心指标" prop="is_core" class="form-item">
+                <el-switch v-model="formData.is_core" :active-value="1" :inactive-value="0" />
+                <span style="margin-left: 8px; color: #909399; font-size: 12px;">开启后优先推荐</span>
+              </el-form-item>
+              <el-form-item label="推荐权重" prop="boost_score" class="form-item">
+                <el-input-number v-model="formData.boost_score" :min="0" :max="10" :step="0.5" precision="1" style="width: 100%" />
+                <span style="margin-left: 8px; color: #909399; font-size: 12px;">0-10，越高越优先</span>
+              </el-form-item>
             </div>
             <div class="form-row">
               <el-form-item label="一级分类" prop="category_1" class="form-item-inline">
@@ -616,7 +636,8 @@ const uploadRef = ref(null)
 
 const formData = ref({
   metric_code: '', name: '', name_en: '', domain: '', category_1: '', category_2: '', category_3: '',
-  metric_type: '', status: '在用', business_definition: '', business_rule: '', technical_rule: '',
+  metric_type: '', status: '在用', is_core: 0, boost_score: 0,
+  business_definition: '', business_rule: '', technical_rule: '',
   applicable_scope: '', statistics_rule: '', unit: '', frequency: '', common_dimensions: '',
   org_level: '', data_format: '', precision: '', owner_dept: '', publish_date: '', expire_date: '', starrocks_sql: ''
 })

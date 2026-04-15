@@ -14,7 +14,7 @@ from .template_loader import template_loader
 from .template_matcher import template_matcher, MatchResult
 from .insights import get_insight_function, INDUSTRY_BENCHMARKS
 from ..engine.time_parser import TimeParser
-from ..engine.llm import get_llm_engine
+from ..engine.llm import get_llm_engine, get_llm_engine_for_analysis
 from ..client.metric_client import MetricClient
 
 
@@ -185,7 +185,7 @@ class AnalysisAgent:
             return []
 
     async def _get_metric_info(self, metric_code: str) -> Optional[Dict[str, Any]]:
-        """从 Go 后端获取指标元数据"""
+        """从 Go 后端获取指标元数据，支持按 metric_code、name 或 name_en 查询"""
         try:
             response = await self.http_client.get(
                 "http://localhost:8080/api/v1/metadata/metrics",
@@ -195,7 +195,14 @@ class AnalysisAgent:
                 data = response.json()
                 metrics = data.get("data", []) if isinstance(data, dict) else []
                 for m in metrics:
+                    # 优先匹配 metric_code（如 MKI-02-0001）
                     if m.get("metric_code") == metric_code:
+                        return m
+                    # 如果 metric_code 没匹配上，尝试匹配 name（指标中文名，如"曝光量"）
+                    if m.get("name") == metric_code:
+                        return m
+                    # 再尝试匹配 name_en（指标英文名）
+                    if m.get("name_en") and m.get("name_en").lower() == metric_code.lower():
                         return m
         except Exception as e:
             print(f"[AnalysisAgent] 获取指标信息失败: {e}")
@@ -399,7 +406,8 @@ class AnalysisAgent:
 
                 for i, col in enumerate(columns):
                     col_lower = col.lower()
-                    if col_lower in ["dt", "date", "stat_date", "report_date", "day"]:
+                    # 扩展日期列的识别范围，包含 FDATE
+                    if col_lower in ["dt", "date", "stat_date", "report_date", "day", "fdate"]:
                         date_col_idx = i
                     elif col_lower in ["value", "metric_value", "cnt", "num"]:
                         value_col_idx = i
@@ -437,8 +445,17 @@ class AnalysisAgent:
                                 "value": float(value_val) if value_val is not None else 0.0
                             })
                         else:
-                            date_val = row.get("dt") or row.get("date") or row.get("stat_date") or list(row.values())[0]
-                            value_val = row.get("value") or row.get("metric_value") or list(row.values())[1] if len(row) > 1 else 0
+                            # 扩展日期列的识别范围，包含 FDATE
+                            date_val = row.get("dt") or row.get("date") or row.get("stat_date") or row.get("fdate") or list(row.values())[0]
+                            value_val = row.get("value") or row.get("metric_value") or (list(row.values())[1] if len(row) > 1 else 0)
+                            # 如果 value_val 是日期字符串（解析错误），尝试用第二列作为值
+                            try:
+                                float(value_val)
+                            except (ValueError, TypeError):
+                                # value_val 不是有效数字，使用第二列
+                                values = list(row.values())
+                                if len(values) > 1:
+                                    value_val = values[1]
                             timeseries.append({
                                 "date": str(date_val),
                                 "value": float(value_val) if value_val is not None else 0.0
@@ -461,10 +478,29 @@ class AnalysisAgent:
                                 "value": float(value_val) if value_val is not None else 0.0
                             })
                         else:
-                            date_val = item.get("dt") or item.get("date") or list(item.values())[0]
-                            value_val = item.get("value") or (list(item.values())[1] if len(item) > 1 else 0)
+                            # 已知日期列
+                            date_keys = {"dt", "date", "stat_date", "fdate", "FDATE", "report_date", "day"}
+                            date_val = None
+                            value_val = None
+                            # 遍历所有 key-value，找出日期列和数值列
+                            for k, v in item.items():
+                                k_lower = str(k).lower()
+                                if k_lower in date_keys:
+                                    date_val = v
+                                else:
+                                    # 尝试作为数值
+                                    try:
+                                        float(v)
+                                        value_val = v
+                                    except (ValueError, TypeError):
+                                        pass
+                            # 如果没有找到日期列，用第一个值作为日期
+                            if date_val is None and value_val is not None:
+                                # 交换：value_val 变成日期
+                                date_val = str(value_val)
+                                value_val = None
                             timeseries.append({
-                                "date": str(date_val),
+                                "date": str(date_val) if date_val else "未知",
                                 "value": float(value_val) if value_val is not None else 0.0
                             })
 
@@ -815,14 +851,14 @@ class AnalysisAgent:
         chart_data_json = self._build_chart_data_json(timeseries_for_chart or {})
 
         # 调用 LLM（异步流式方式，逐块返回）
-        llm_engine = get_llm_engine()
+        llm_engine = get_llm_engine_for_analysis()
         llm_start = time.time()
         log_step(6, "LLM生成分析")
         yield create_sse_event("thinking", make_thinking_event(6, "生成分析"))
 
         # 流式输出：逐块 yield chunk 事件
         full_result = ""
-        async for chunk_text in llm_engine.stream(llm_prompt, temperature=0.7, max_tokens=4000):
+        async for chunk_text in llm_engine.stream(llm_prompt, temperature=llm_engine.temperature, max_tokens=4000):
             full_result += chunk_text
             yield create_sse_event("chunk", chunk_text)
         print(f"[LLM调用] 耗时: {(time.time()-llm_start)*1000:.0f}ms, 总长度: {len(full_result)}")
@@ -946,10 +982,10 @@ class AnalysisAgent:
             llm_prompt = self._build_llm_prompt(template, metric_summaries, benchmark, timeseries_for_chart)
             chart_data_json = self._build_chart_data_json(timeseries_for_chart or {})
 
-            llm_engine = get_llm_engine()
+            llm_engine = get_llm_engine_for_analysis()
 
             # 非流式调用：一次性获取完整结果
-            full_result = await llm_engine.generate(llm_prompt, temperature=0.7, max_tokens=4000)
+            full_result = await llm_engine.generate(llm_prompt, temperature=llm_engine.temperature, max_tokens=4000)
             print(f"[LLM调用] 完成，总长度: {len(full_result)}")
 
             # 6b. 后处理：清理 LLM 输出的格式问题

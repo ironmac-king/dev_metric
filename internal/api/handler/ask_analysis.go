@@ -72,6 +72,7 @@ func GetAnalysisLogs(c *gin.Context) {
 	// 获取筛选参数
 	successFilter := c.Query("success")
 	userID := c.Query("user_id")
+	sessionID := c.Query("session_id")
 	if userID == "" {
 		userID = "default"
 	}
@@ -79,6 +80,11 @@ func GetAnalysisLogs(c *gin.Context) {
 	// 构建查询
 	db := postgres.Get().Model(&model.AskAnalysisLog{})
 	db = db.Where("user_id = ?", userID)
+
+	// 添加 session_id 过滤
+	if sessionID != "" {
+		db = db.Where("session_id = ?", sessionID)
+	}
 
 	if successFilter != "" {
 		if successFilter == "true" || successFilter == "1" {
@@ -141,4 +147,20 @@ func DeleteAnalysisLog(c *gin.Context) {
 	}
 
 	response.Success(c, gin.H{"deleted": true})
+}
+
+// DeleteAnalysisLogsBySession 按会话ID删除所有日志
+func DeleteAnalysisLogsBySession(c *gin.Context) {
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		response.Error(c, response.CodeBadRequest, "session_id 不能为空")
+		return
+	}
+
+	if err := postgres.Get().Where("session_id = ?", sessionID).Delete(&model.AskAnalysisLog{}).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "删除失败")
+		return
+	}
+
+	response.Success(c, gin.H{"deleted": true, "session_id": sessionID})
 }

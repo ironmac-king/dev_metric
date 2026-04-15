@@ -342,6 +342,12 @@
                   <el-option label="启用" :value="1" />
                   <el-option label="停用" :value="0" />
                 </el-select>
+                <el-button type="primary" class="btn-primary" @click="showPromptDialog('create')">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                  </svg>
+                  新增
+                </el-button>
                 <el-button @click="loadPrompts" :loading="promptLoading" class="btn-refresh">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                     <path d="M2 7C2 4.2 4.2 2 7 2C9.8 2 12 4.2 12 7M12 7C12 9.8 9.8 12 7 12C4.2 12 2 9.8 2 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
@@ -388,6 +394,7 @@
                       <div class="action-group">
                         <el-button link class="action-btn" @click="viewPromptDetail(cfg)">查看</el-button>
                         <el-button link class="action-btn" @click="editPrompt(cfg)">编辑</el-button>
+                        <el-button link class="action-btn delete" @click="deletePrompt(cfg.id)">删除</el-button>
                       </div>
                     </td>
                   </tr>
@@ -770,19 +777,20 @@
     </el-dialog>
 
     <!-- Prompt 编辑对话框 -->
-    <el-dialog v-model="promptEditDialogVisible" title="编辑 Prompt" width="900px" class="config-dialog">
-      <el-form v-if="promptEditForm.id" :model="promptEditForm" label-width="90px" class="config-form">
+    <el-dialog v-model="promptEditDialogVisible" :title="promptDialogTitle" width="900px" class="config-dialog">
+      <el-form :model="promptEditForm" label-width="90px" class="config-form">
         <el-form-item label="名称">
-          <el-input v-model="promptEditForm.name" disabled />
+          <el-input v-model="promptEditForm.name" :disabled="!!promptEditForm.id" placeholder="输入 Prompt 名称" />
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="promptEditForm.description" type="textarea" :rows="2" placeholder="配置描述" />
         </el-form-item>
         <el-form-item label="分类">
-          <el-select v-model="promptEditForm.category" disabled style="width: 100%">
+          <el-select v-model="promptEditForm.category" :disabled="!!promptEditForm.id" style="width: 100%">
             <el-option label="nl2structure" value="nl2structure" />
             <el-option label="sql_generation" value="sql_generation" />
             <el-option label="general" value="general" />
+            <el-option label="decision_analysis" value="decision_analysis" />
           </el-select>
         </el-form-item>
         <el-form-item label="Prompt 内容">
@@ -796,20 +804,14 @@
           <div class="form-tip">提示：使用 {'{variable}'} 格式声明变量</div>
         </el-form-item>
         <el-form-item label="变量">
-          <div class="edit-variables">
-            <el-tag
-              v-for="v in parseVariables(promptEditForm.variables)"
-              :key="v"
-              size="small"
-              class="var-tag"
-              style="margin-right: 6px; margin-bottom: 6px"
-            >
-              {{ v }}
-            </el-tag>
-            <span v-if="!promptEditForm.variables || getVarCount(promptEditForm.variables) === 0" class="no-vars">
-              未检测到变量
-            </span>
-          </div>
+          <el-input
+            v-model="promptEditForm.variables_text"
+            type="textarea"
+            :rows="4"
+            placeholder='JSON 格式，如：{"indicators": [{"name": "ROAS", "metric_code": "MKI-02-0020"}]}'
+            class="prompt-textarea"
+          />
+          <div class="form-tip">提示：decision_analysis 模板需要此字段配置指标，格式为 JSON</div>
         </el-form-item>
         <el-form-item label="状态">
           <el-switch
@@ -937,6 +939,7 @@ const promptEditForm = ref({
   category: '',
   prompt_text: '',
   variables: [],
+  variables_text: '',
   status: 1
 })
 
@@ -1304,6 +1307,13 @@ async function saveTerm() {
     }
     termDialogVisible.value = false
     loadData()
+    // 热更新 AI 服务缓存
+    try {
+      await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+      ElMessage.success('AI 服务缓存已刷新')
+    } catch (e) {
+      console.warn('热更新失败:', e)
+    }
   } catch (e) {
     ElMessage.error('保存失败')
   }
@@ -1315,6 +1325,13 @@ async function deleteTerm(id) {
     await fetch(`/api/v1/metadata/terms/${id}`, { method: 'DELETE' })
     ElMessage.success('删除成功')
     loadData()
+    // 热更新 AI 服务缓存
+    try {
+      await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+      ElMessage.success('AI 服务缓存已刷新')
+    } catch (e) {
+      console.warn('热更新失败:', e)
+    }
   } catch (e) {
     ElMessage.error('删除失败')
   }
@@ -1374,37 +1391,122 @@ function viewPromptDetail(cfg) {
   promptDialogVisible.value = true
 }
 
-function editPrompt(cfg) {
-  promptEditForm.value = {
-    id: cfg.id,
-    name: cfg.name,
-    description: cfg.description || '',
-    category: cfg.category,
-    prompt_text: cfg.prompt_text || '',
-    variables: cfg.variables || [],
-    status: cfg.status
+function showPromptDialog(mode, cfg = null) {
+  promptDialogTitle.value = mode === 'create' ? '新增 Prompt' : '编辑 Prompt'
+  if (mode === 'create') {
+    promptEditForm.value = {
+      id: null,
+      name: '',
+      description: '',
+      category: 'general',
+      prompt_text: '',
+      variables: [],
+      variables_text: '',
+      status: 1
+    }
+  } else {
+    // 将 variables 对象转成可编辑的 JSON 字符串
+    let variablesText = ''
+    if (cfg.variables) {
+      if (typeof cfg.variables === 'string') {
+        variablesText = cfg.variables
+      } else {
+        variablesText = JSON.stringify(cfg.variables, null, 2)
+      }
+    }
+    promptEditForm.value = {
+      id: cfg.id,
+      name: cfg.name,
+      description: cfg.description || '',
+      category: cfg.category,
+      prompt_text: cfg.prompt_text || '',
+      variables: cfg.variables || [],
+      variables_text: variablesText,
+      status: cfg.status
+    }
   }
   promptEditDialogVisible.value = true
 }
 
+// 兼容旧的 editPrompt 调用
+function editPrompt(cfg) {
+  showPromptDialog('edit', cfg)
+}
+
+async function deletePrompt(id) {
+  await ElMessageBox.confirm('确定删除这个 Prompt 配置吗？删除后不可恢复。', '提示', { type: 'warning' })
+  try {
+    const res = await fetch(`/api/v1/prompt-configs/${id}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (data.code === 0) {
+      ElMessage.success('删除成功')
+      loadPrompts()
+    } else {
+      ElMessage.error('删除失败: ' + (data.message || '未知错误'))
+    }
+  } catch (e) {
+    ElMessage.error('删除失败')
+  }
+}
+
 async function savePrompt() {
+  if (!promptEditForm.value.name.trim()) {
+    ElMessage.warning('名称不能为空')
+    return
+  }
   if (!promptEditForm.value.prompt_text.trim()) {
     ElMessage.warning('Prompt 内容不能为空')
     return
   }
   try {
-    await fetch(`/api/v1/prompt-configs/${promptEditForm.value.id}`, {
-      method: 'PUT',
+    // 验证 variables_text 是有效的 JSON（如果有内容）
+    let variables = null
+    if (promptEditForm.value.variables_text && promptEditForm.value.variables_text.trim()) {
+      try {
+        JSON.parse(promptEditForm.value.variables_text) // 验证 JSON 格式
+        variables = promptEditForm.value.variables_text // 直接传递字符串
+      } catch (e) {
+        ElMessage.error('变量格式错误，请输入正确的 JSON 格式')
+        return
+      }
+    }
+
+    const isEdit = !!promptEditForm.value.id
+    const url = isEdit ? `/api/v1/prompt-configs/${promptEditForm.value.id}` : '/api/v1/prompt-configs'
+    const method = isEdit ? 'PUT' : 'POST'
+    const body = isEdit ? {
+      description: promptEditForm.value.description,
+      prompt_text: promptEditForm.value.prompt_text,
+      variables: variables,
+      status: promptEditForm.value.status
+    } : {
+      name: promptEditForm.value.name,
+      description: promptEditForm.value.description,
+      category: promptEditForm.value.category,
+      prompt_text: promptEditForm.value.prompt_text,
+      variables: variables,
+      status: promptEditForm.value.status
+    }
+
+    const res = await fetch(url, {
+      method: method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        description: promptEditForm.value.description,
-        prompt_text: promptEditForm.value.prompt_text,
-        status: promptEditForm.value.status
-      })
+      body: JSON.stringify(body)
     })
-    ElMessage.success('保存成功')
-    promptEditDialogVisible.value = false
-    loadPrompts()
+    const data = await res.json()
+    if (data.code === 0) {
+      ElMessage.success(isEdit ? '更新成功' : '创建成功')
+      promptEditDialogVisible.value = false
+      loadPrompts()
+      // 热更新 Prompt 缓存
+      try {
+        await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+      } catch (e) {
+        console.warn('热更新失败:', e)
+      }
+    } else {
+      ElMessage.error(data.message || '保存失败')
+    }
   } catch (e) {
     ElMessage.error('保存失败')
   }
@@ -1446,7 +1548,19 @@ async function rollbackPromptVersion(cfgId, version) {
 function parseVariables(variables) {
   if (!variables) return []
   if (typeof variables === 'string') {
-    return variables.split(',').map(v => v.trim()).filter(v => v)
+    try {
+      // 尝试解析 JSON 对象，如 {"indicators": [...]} 或 [{"name": "ROAS", ...}]
+      const parsed = JSON.parse(variables)
+      if (Array.isArray(parsed)) return parsed
+      if (typeof parsed === 'object' && parsed !== null) {
+        // 如果是 {"indicators": [...]} 格式，返回 indicators 数组
+        if (parsed.indicators) return parsed.indicators
+        return [parsed]
+      }
+    } catch {
+      // 不是 JSON，按逗号分隔处理
+      return variables.split(',').map(v => v.trim()).filter(v => v)
+    }
   }
   if (Array.isArray(variables)) {
     return variables
@@ -1464,7 +1578,16 @@ function truncatePrompt(text) {
 function getVarCount(variables) {
   if (!variables) return 0
   if (typeof variables === 'string') {
-    return variables.split(',').filter(v => v.trim()).length
+    try {
+      const parsed = JSON.parse(variables)
+      if (Array.isArray(parsed)) return parsed.length
+      if (typeof parsed === 'object' && parsed !== null) {
+        if (parsed.indicators) return parsed.indicators.length
+        return 1
+      }
+    } catch {
+      return variables.split(',').filter(v => v.trim()).length
+    }
   }
   if (Array.isArray(variables)) {
     return variables.length
@@ -2089,7 +2212,8 @@ watch(activeTab, (tab) => {
 }
 
 .prompt-config-table .col-actions {
-  width: 100px;
+  width: 160px;
+  white-space: nowrap;
 }
 
 .prompt-name {

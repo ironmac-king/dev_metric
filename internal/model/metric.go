@@ -92,6 +92,11 @@ type LLMConfig struct {
 	APIKey     string          `json:"api_key" gorm:"size:256"`
 	ModelName       string          `json:"model_name" gorm:"size:128"`
 	EmbeddingApiKey string          `json:"embedding_api_key" gorm:"size:256"` // 阿里 dashscope 向量服务 API Key
+	Temperature float64         `json:"temperature" gorm:"default:0.7"`        // LLM 温度参数
+	UseCase    string          `json:"use_case" gorm:"size:32;default:general"` // 用途：general=通用, ask=问数, analysis=决策分析
+	// 指标推荐用字段
+	IsCore     int16           `json:"is_core" gorm:"default:0"`   // 是否为核心指标：0=否，1=是
+	BoostScore float64         `json:"boost_score" gorm:"default:0"` // 推荐boost分数：0-100，越高越优先推荐
 	IsDefault      int16           `json:"is_default" gorm:"default:0"`          // 0=否 1=是
 	ExtraConfig json.RawMessage `json:"extra_config" gorm:"type:jsonb"`
 	Status     int16           `json:"status" gorm:"default:1"`     // 0=禁用 1=启用

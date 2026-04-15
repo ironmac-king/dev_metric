@@ -130,12 +130,19 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			askAnalysis.GET("/logs", handler.GetAnalysisLogs)
 			askAnalysis.GET("/logs/:id", handler.GetAnalysisLog)
 			askAnalysis.DELETE("/logs/:id", handler.DeleteAnalysisLog)
+			askAnalysis.DELETE("/logs", handler.DeleteAnalysisLogsBySession)
 		}
 
 		// 内部问数分析 API（不需要认证，供 Python AI 服务调用）
 		internalAskAnalysis := v1.Group("/internal/ask-analysis")
 		{
 			internalAskAnalysis.POST("/logs", handler.CreateAnalysisLog)
+		}
+
+		// 内部智能问数 API（不需要认证，供前端调用）
+		internalAsk := v1.Group("/internal/ask")
+		{
+			internalAsk.POST("/clear", handler.ClearSessionInternal)
 		}
 
 		// 指标元数据 API（供 AI 服务调用）

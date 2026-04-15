@@ -12,14 +12,23 @@ from ai.engine.prompt_manager import get_prompt_manager
 
 # 全局单例
 _llm_engine = None
+_llm_engine_for_analysis = None
 
 
 def get_llm_engine() -> "LLMEngine":
-    """获取 LLM 引擎单例"""
+    """获取 LLM 引擎单例（用于问数，低温度）"""
     global _llm_engine
     if _llm_engine is None:
-        _llm_engine = LLMEngine()
+        _llm_engine = LLMEngine(use_case="ask")
     return _llm_engine
+
+
+def get_llm_engine_for_analysis() -> "LLMEngine":
+    """获取 LLM 引擎单例（用于决策分析，高温度）"""
+    global _llm_engine_for_analysis
+    if _llm_engine_for_analysis is None:
+        _llm_engine_for_analysis = LLMEngine(use_case="analysis")
+    return _llm_engine_for_analysis
 
 logger = get_logger("ai.llm")
 
@@ -74,8 +83,9 @@ class LLMEngine:
         }
     }
 
-    def __init__(self):
+    def __init__(self, use_case: str = "general"):
         self._config = None
+        self.use_case = use_case
         self._load_llm_config()
 
     def _load_llm_config(self):
@@ -91,29 +101,41 @@ class LLMEngine:
                 data = response.json()
                 configs = data.get("data", [])
 
-                # 找默认配置
-                default_config = None
-                for cfg in configs:
-                    if cfg.get("is_default") == 1 or cfg.get("is_default") == True:
-                        default_config = cfg
-                        break
+                # 根据 use_case 找对应配置
+                selected_config = None
+                if self.use_case != "general":
+                    for cfg in configs:
+                        if cfg.get("use_case") == self.use_case and cfg.get("status") == 1:
+                            selected_config = cfg
+                            break
 
-                # 如果没有默认的，用第一个
-                if not default_config and configs:
-                    default_config = configs[0]
+                # 如果没找到对应 use_case，用默认配置
+                if not selected_config:
+                    for cfg in configs:
+                        if cfg.get("is_default") == 1 or cfg.get("is_default") == True:
+                            selected_config = cfg
+                            break
 
-                if default_config:
-                    self._config = default_config
+                # 如果还是没有默认的，用第一个启用的
+                if not selected_config and configs:
+                    for cfg in configs:
+                        if cfg.get("status") == 1:
+                            selected_config = cfg
+                            break
+
+                if selected_config:
+                    self._config = selected_config
                     # OpenAI SDK expects base_url without /chat/completions
-                    api_url = default_config.get("api_url", "")
+                    api_url = selected_config.get("api_url", "")
                     if api_url.endswith("/chat/completions"):
                         api_url = api_url.rsplit("/chat/completions", 1)[0]
                     self.client = OpenAI(
-                        api_key=default_config.get("api_key", ""),
+                        api_key=selected_config.get("api_key", ""),
                         base_url=api_url,
                     )
-                    self.model = default_config.get("model_name", "deepseek-3.2")
-                    logger.info(f"[LLMEngine] 已加载 LLM 配置: {default_config.get('name')}")
+                    self.model = selected_config.get("model_name", "deepseek-3.2")
+                    self.temperature = selected_config.get("temperature", 0.7)  # 从配置读取 temperature
+                    logger.info(f"[LLMEngine] 已加载 LLM 配置: {selected_config.get('name')}, use_case={self.use_case}, temperature={self.temperature}")
                     return
 
             # 配置加载失败，使用环境变量作为回退
@@ -130,6 +152,7 @@ class LLMEngine:
             base_url=os.getenv("TENCENT_API_URL", ""),
         )
         self.model = os.getenv("LLM_MODEL", "ms-nbgbkz24")
+        self.temperature = 0.7  # 默认 temperature
 
     def reload_config(self):
         """重新加载配置（用于配置变更后刷新）"""
@@ -195,7 +218,7 @@ class LLMEngine:
             user_content = f"""用户问题：「{text}」{inherited_context}
 
 请以 JSON 格式返回识别结果，格式如下：
-{{"intent": "意图", "confidence": 0.0-1.0, "metric_name": "指标名称", "time_range": "时间范围(简单字符串，如昨天、本月、当月、近7天)", "dimension": "维度", "dimension_values": "维度值", "top_n": 数字, "formula_type": "公式类型(仅在query_ratio时填写：ratio)", "molecule_metric": "分子指标(仅在query_ratio时填写)", "denominator_metric": "分母指标(仅在query_ratio时填写)"}}
+{{"intent": "意图", "confidence": 0.0-1.0, "metric_name": "指标名称", "time_range": "时间范围(简单字符串，如昨天、本月、当月、近7天)", "dimension": "维度", "dimension_values": "维度值", "top_n": 数字, "formula_type": "公式类型(仅在query_ratio时填写：ratio)", "molecule_metric": "分子指标(仅在query_ratio时填写)", "denominator_metric": "分母指标(仅在query_ratio时填写)", "metrics": ["指标1", "指标2"]}}
 
 只返回 JSON，不要其他内容。"""
 
@@ -241,6 +264,15 @@ class LLMEngine:
                 entities["molecule_metric"] = result["molecule_metric"]
             if result.get("denominator_metric"):
                 entities["denominator_metric"] = result["denominator_metric"]
+            # 双指标对比：提取 metrics 数组（只接受字典列表，过滤掉字符串列表）
+            raw_metrics = result.get("metrics")
+            if raw_metrics and isinstance(raw_metrics, list):
+                valid_metrics = [m for m in raw_metrics if isinstance(m, dict)]
+                if valid_metrics:
+                    entities["metrics"] = valid_metrics
+                    logger.debug(f"[recognize_intent_enhanced] 提取到 {len(valid_metrics)} 个有效 metrics")
+                elif raw_metrics:
+                    logger.warning(f"[recognize_intent_enhanced] LLM 返回的 metrics 包含无效元素，已过滤: {raw_metrics}")
 
             return IntentResult(
                 intent=result.get("intent", "unknown"),

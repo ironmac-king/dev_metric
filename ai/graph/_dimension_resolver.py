@@ -95,6 +95,18 @@ class DimensionResolver:
                     logger.debug(f"[extract_ranking_dimension] 检测到维度(变体): {dim_type}")
                     return dim_type
 
+        # 【新增】检测"哪个月/哪天/哪年"模式（用于时间粒度排名查询）
+        # 例如："哪个月的订单量最少" → dimension="月"
+        #       "哪天的销售额最高" → dimension="日"
+        time_granularity_pattern = re.search(r'哪(个月|天|年|周)的', text)
+        if time_granularity_pattern:
+            granularity = time_granularity_pattern.group(1)
+            dim_map = {"个月": "月", "天": "日", "年": "年", "周": "周"}
+            dim = dim_map.get(granularity)
+            if dim:
+                logger.debug(f"[extract_ranking_dimension] 检测到时间粒度维度: {dim}")
+                return dim
+
         return None
 
     # ==================== SQL 维度提取 ====================

@@ -132,9 +132,18 @@ func DeletePromptConfig(c *gin.Context) {
 
 	tx := postgres.Get().Begin()
 
+	// 先删除关联的 embedding 记录（decision_analysis_template_embeddings 表）
+	if err := tx.Exec("DELETE FROM decision_analysis_template_embeddings WHERE template_id = ?", id).Error; err != nil {
+		tx.Rollback()
+		log.Printf("[DeletePromptConfig] 删除 embedding 记录失败: %v", err)
+		response.Error(c, response.CodeInternalError, "删除关联embedding失败")
+		return
+	}
+
 	// 删除版本历史
 	if err := tx.Where("config_id = ?", id).Delete(&model.PromptConfigVersion{}).Error; err != nil {
 		tx.Rollback()
+		log.Printf("[DeletePromptConfig] 删除版本历史失败: %v", err)
 		response.Error(c, response.CodeInternalError, "删除版本历史失败")
 		return
 	}
@@ -142,6 +151,7 @@ func DeletePromptConfig(c *gin.Context) {
 	// 删除配置
 	if err := tx.Delete(&model.PromptConfig{}, id).Error; err != nil {
 		tx.Rollback()
+		log.Printf("[DeletePromptConfig] 删除配置失败: %v", err)
 		response.Error(c, response.CodeInternalError, "删除失败")
 		return
 	}

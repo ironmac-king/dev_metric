@@ -60,6 +60,14 @@
             <span class="info-label">API地址</span>
             <span class="info-value url">{{ config.api_url }}</span>
           </div>
+          <div class="info-item">
+            <span class="info-label">Temperature</span>
+            <span class="info-value">{{ config.temperature || 0.7 }}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Embedding</span>
+            <span class="info-value">{{ config.embedding_api_key ? '✅ 已配置' : '❌ 未配置' }}</span>
+          </div>
         </div>
 
         <div class="card-footer">
@@ -93,6 +101,12 @@
         <el-form-item label="模型名称">
           <el-input v-model="form.model_name" placeholder="如：deepseek-3.2" />
         </el-form-item>
+        <el-form-item label="Embedding Key">
+          <el-input v-model="form.embedding_api_key" type="password" placeholder="阿里 DashScope API Key（用于向量检索）" />
+        </el-form-item>
+        <el-form-item label="Temperature">
+          <el-input-number v-model="form.temperature" :min="0" :max="2" :step="0.1" precision="1" />
+        </el-form-item>
         <el-form-item label="状态">
           <el-switch v-model="form.status" :active-value="1" :inactive-value="0" />
         </el-form-item>
@@ -119,6 +133,8 @@ const form = ref({
   api_url: '',
   api_key: '',
   model_name: '',
+  embedding_api_key: '',
+  temperature: 0.7,
   status: 1
 })
 
@@ -160,6 +176,8 @@ function handleCreate() {
     api_url: '',
     api_key: '',
     model_name: '',
+    embedding_api_key: '',
+    temperature: 0.7,
     status: 1
   }
   dialogVisible.value = true
