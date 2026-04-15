@@ -489,6 +489,7 @@ class RuleEngine:
 
         # 【修复】创建去空格版本的文本，用于处理用户输入带空格的情况
         # 如 "B2B APP会话量" -> "b2bapp会话量"
+        text_lower = text.lower().strip()  # 处理前后空白
         text_no_space_lower = text_lower.replace(" ", "").replace("　", "")
 
         # 精确匹配（双向包含，支持去空格匹配）

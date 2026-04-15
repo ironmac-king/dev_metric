@@ -182,7 +182,7 @@
           </el-table-column>
           <el-table-column prop="boost_score" label="权重" width="80" align="center" sortable :sort-orders="['descending', 'ascending']">
             <template #default="{ row }">
-              <span v-if="row.boost_score > 0" style="color: #e6a23c; font-weight: 600">{{ row.boost_score }}</span>
+              <span v-if="row.boost_score !== null && row.boost_score !== undefined && row.boost_score > 0" style="color: #e6a23c; font-weight: 600">{{ row.boost_score }}</span>
               <span v-else style="color: #c0c4cc">-</span>
             </template>
           </el-table-column>

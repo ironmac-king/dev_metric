@@ -105,7 +105,6 @@ class ConversationContext(BaseModel):
     current_metrics: list = []  # 多指标列表，用于多指标查询的上下文继承
     time_inherited: bool = False
     dimensions_inherited: bool = False
-    just_executed_query: bool = False  # 标记上轮是否刚执行了查询，用于猜你想问场景判断
 
     def to_dict(self) -> Dict[str, Any]:
         return {

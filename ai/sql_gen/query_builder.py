@@ -445,7 +445,7 @@ class QueryBuilder:
                 else:
                     group_by_dims = []
 
-            logger.info(f"[_build_base_sql] group_by_dims = {group_by_dims}, has GROUP BY in sql: {bool(re.search(r'\\bGROUP\\s+BY\\b', sql, re.IGNORECASE))}")
+            logger.info(f"[_build_base_sql] group_by_dims = {group_by_dims}, has GROUP BY in rendered_sql: {bool(re.search(r'\\bGROUP\\s+BY\\b', rendered_sql, re.IGNORECASE))}")
 
             # 如果有 GROUP BY 维度
             if group_by_dims:

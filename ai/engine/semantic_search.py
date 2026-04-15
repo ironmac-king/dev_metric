@@ -20,6 +20,19 @@ class SemanticSearch:
     MEDIUM_THRESHOLD = 0.55  # 0.55-0.85 LLM确认 (降低以支持中文近义词)
     LOW_THRESHOLD = 0.0     # <0.55 LLM兜底
 
+    # 混合排序权重
+    HYBRID_WEIGHTS = {
+        "similarity": 0.3,
+        "frequency": 0.5,
+        "core": 0.2
+    }
+
+    # 缓存配置
+    _usage_freq_cache: Optional[Dict[str, int]] = None
+    _core_metrics_cache: Optional[set] = None
+    _cache_timestamp: float = 0
+    _CACHE_TTL: int = 300  # 缓存5分钟
+
     def __init__(self, api_base: str = "http://localhost:8080"):
         self.api_base = api_base
         # 内存向量存储
@@ -249,7 +262,11 @@ class SemanticSearch:
             core_score = is_core * 0.2
 
             # 综合分数
-            hybrid_score = sim_score * 0.3 + freq_score * 0.5 + core_score
+            hybrid_score = (
+                sim_score * self.HYBRID_WEIGHTS["similarity"] +
+                freq_score * self.HYBRID_WEIGHTS["frequency"] +
+                core_score
+            )
 
             candidates.append({
                 "metric_code": code,
@@ -265,57 +282,68 @@ class SemanticSearch:
         # 返回 Top-K
         return candidates[:top_k]
 
-    def _get_usage_frequency(self) -> Dict[str, int]:
-        """获取各指标的使用频率（从 sql_audit_logs 表统计）"""
+    def _get_usage_frequency(self, force_refresh: bool = False) -> Dict[str, int]:
+        """获取各指标的使用频率（从 sql_audit_logs 表统计，带5分钟缓存）"""
+        import time
+        # 检查缓存是否有效
+        if not force_refresh and self._usage_freq_cache is not None:
+            if time.time() - self._cache_timestamp < self._CACHE_TTL:
+                return self._usage_freq_cache
+
         try:
             import psycopg2
-            DATABASE_URL = os.getenv(
-                "DATABASE_URL",
-                "postgresql://postgres:admin123@192.168.1.225:5432/dev_metric"
-            )
-            conn = psycopg2.connect(DATABASE_URL)
-            cur = conn.cursor()
+            DATABASE_URL = os.getenv("DATABASE_URL")
+            if not DATABASE_URL:
+                print("[SemanticSearch] DATABASE_URL 环境变量未设置")
+                return self._usage_freq_cache or {}
 
-            # 统计 sql_audit_logs 中各指标被查询的次数
-            # sql_audit_logs 表的 metric_id 对应 metrics 表的 id，再获取 metric_code
-            cur.execute("""
-                SELECT m.metric_code, COUNT(*) as cnt
-                FROM sql_audit_logs l
-                JOIN metrics m ON l.metric_id = m.id
-                WHERE l.metric_id IS NOT NULL
-                GROUP BY m.metric_code
-                ORDER BY cnt DESC
-            """)
-            freq = {row[0]: row[1] for row in cur.fetchall()}
-
-            cur.close()
-            conn.close()
-            return freq
+            with psycopg2.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    # 统计 sql_audit_logs 中各指标被查询的次数
+                    cur.execute("""
+                        SELECT m.metric_code, COUNT(*) as cnt
+                        FROM sql_audit_logs l
+                        JOIN metrics m ON l.metric_id = m.id
+                        WHERE l.metric_id IS NOT NULL
+                        GROUP BY m.metric_code
+                        ORDER BY cnt DESC
+                    """)
+                    freq = {row[0]: row[1] for row in cur.fetchall()}
+                    # 更新缓存
+                    self._usage_freq_cache = freq
+                    self._cache_timestamp = time.time()
+                    return freq
         except Exception as e:
             print(f"[SemanticSearch] 获取使用频率失败: {e}")
-            return {}
+            return self._usage_freq_cache or {}
 
-    def _get_core_metrics(self) -> set:
-        """获取核心指标集合"""
+    def _get_core_metrics(self, force_refresh: bool = False) -> set:
+        """获取核心指标集合，带5分钟缓存"""
+        import time
+        # 检查缓存是否有效
+        if not force_refresh and self._core_metrics_cache is not None:
+            if time.time() - self._cache_timestamp < self._CACHE_TTL:
+                return self._core_metrics_cache
+
         try:
             import psycopg2
-            DATABASE_URL = os.getenv(
-                "DATABASE_URL",
-                "postgresql://postgres:admin123@192.168.1.225:5432/dev_metric"
-            )
-            conn = psycopg2.connect(DATABASE_URL)
-            cur = conn.cursor()
+            DATABASE_URL = os.getenv("DATABASE_URL")
+            if not DATABASE_URL:
+                print("[SemanticSearch] DATABASE_URL 环境变量未设置")
+                return self._core_metrics_cache or set()
 
-            # 获取 is_core=1 的指标
-            cur.execute("SELECT metric_code FROM metrics WHERE is_core = 1")
-            core = {row[0] for row in cur.fetchall()}
-
-            cur.close()
-            conn.close()
-            return core
+            with psycopg2.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    # 获取 is_core=1 的指标
+                    cur.execute("SELECT metric_code FROM metrics WHERE is_core = 1")
+                    core = {row[0] for row in cur.fetchall()}
+                    # 更新缓存
+                    self._core_metrics_cache = core
+                    self._cache_timestamp = time.time()
+                    return core
         except Exception as e:
             print(f"[SemanticSearch] 获取核心指标失败: {e}")
-            return {}
+            return self._core_metrics_cache or set()
 
     def search_dimension_value(self, query: str, top_k: int = 5) -> Tuple[List[Dict], float]:
         """
