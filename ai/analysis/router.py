@@ -125,12 +125,18 @@ async def analysis_stream(request: AnalysisRequestModel):
                 data_lines = '\n'.join(f'data: {line}' for line in lines)
                 message = f"event: {event.event}\n{data_lines}\n\n"
                 yield message.encode("utf-8")
-                # 小延迟确保前端能逐个处理 chunk
-                await asyncio.sleep(0.01)
+                # 立即让出控制权，确保数据发送到网络
+                await asyncio.sleep(0)
         except Exception as e:
             error_msg = f"分析出错: {str(e)}"
             yield f"event: error\ndata: {error_msg}\n\n".encode("utf-8")
         finally:
+            # 显式发送终止信号，确保连接被正确关闭
+            # 发送空数据表示流结束（符合 SSE 规范）
+            yield b'event: close\ndata: \n\n'
+            # 添加短暂延迟确保终止信号被发送
+            await asyncio.sleep(0.05)
+            # 关闭 agent（包含 HTTP 客户端等资源）
             await agent.close()
 
     return StreamingResponse(
@@ -239,6 +245,9 @@ async def match_and_stream(request: AnalysisRequestModel):
             error_msg = f"分析出错: {str(e)}"
             yield f"event: error\ndata: {error_msg}\n\n".encode("utf-8")
         finally:
+            # 显式发送终止信号，确保连接被正确关闭
+            yield b'event: close\ndata: \n\n'
+            await asyncio.sleep(0.05)
             await agent.close()
 
     return StreamingResponse(

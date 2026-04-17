@@ -30,23 +30,35 @@ class TemplateMatcher:
         self._embeddings_cache: Dict[int, np.ndarray] = {}
         self._initialized = False
 
-    async def _get_embedding(self, text: str) -> Optional[List[float]]:
-        """获取文本的 embedding 向量"""
+    async def _get_embeddings_batch(self, texts: List[str]) -> Dict[int, Optional[List[float]]]:
+        """批量获取文本的 embedding 向量
+
+        Returns:
+            Dict[int, Optional[List[float]]]: 索引到 embedding 向量的映射
+        """
+        if not texts:
+            return {}
+
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
                     f"{self.api_base}/api/v1/nlp/generate-embeddings",
-                    json={"texts": [text]}
+                    json={"texts": texts}
                 )
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("code") == 0:
                         embeddings_list = data.get("data", [])
-                        if embeddings_list and len(embeddings_list) > 0:
-                            return embeddings_list[0].get("embedding")
+                        result = {}
+                        for i, emb_data in enumerate(embeddings_list):
+                            if emb_data and "embedding" in emb_data:
+                                result[i] = emb_data["embedding"]
+                            else:
+                                result[i] = None
+                        return result
         except Exception as e:
-            print(f"[TemplateMatcher] 获取 embedding 失败: {e}")
-        return None
+            print(f"[TemplateMatcher] 批量获取 embedding 失败: {e}")
+        return {i: None for i in range(len(texts))}
 
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """计算余弦相似度"""
@@ -92,22 +104,28 @@ class TemplateMatcher:
         query_text = self._build_query_text(query, context)
 
         # 获取查询向量
-        query_embedding = await self._get_embedding(query_text)
+        query_embeddings_map = await self._get_embeddings_batch([query_text])
+        query_embedding = query_embeddings_map.get(0)
         if not query_embedding:
             # 无法获取 embedding，使用关键词匹配降级
             return self._fallback_keyword_match(query_text, templates)
+
+        # 批量获取所有模板的 embedding
+        template_texts = []
+        for template in templates:
+            template_text = f"{template.get('name', '')} {template.get('keywords', '')}"
+            prompt_preview = template.get('prompt_text', '')[:200]  # 取前200字
+            template_text += f" {prompt_preview}"
+            template_texts.append(template_text)
+
+        embeddings_map = await self._get_embeddings_batch(template_texts)
 
         # 计算与每个模板的相似度
         best_match = None
         best_similarity = 0
 
-        for template in templates:
-            # 使用模板的 name + keywords + prompt_preview 计算相似度
-            template_text = f"{template.get('name', '')} {template.get('keywords', '')}"
-            prompt_preview = template.get('prompt_text', '')[:200]  # 取前200字
-            template_text += f" {prompt_preview}"
-
-            template_embedding = await self._get_embedding(template_text)
+        for i, template in enumerate(templates):
+            template_embedding = embeddings_map.get(i)
             if not template_embedding:
                 continue
 

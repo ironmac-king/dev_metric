@@ -866,7 +866,36 @@ class AnalysisAgent:
         # 6b. 后处理：清理 LLM 输出的格式问题
         full_result = self._clean_llm_output(full_result)
 
-        # 6c. 发送图表数据（作为单独的事件，让前端直接使用而不需要从文本解析）
+        # 6c. 处理图表标记：替换 {{CHART:N}} 为 [[CHART:N]]（支持模板中预设位置）
+        charts = []
+        processed_markdown = full_result  # 默认使用清理后的原始文本
+        try:
+            import json
+            inner_json = chart_data_json[len('{CHART_DATA:'):-1]
+            chart_obj = json.loads(inner_json)
+            charts = chart_obj.get('charts', [])
+            if charts:
+                # 方案1：markdown 中已有 {{CHART:N}} 标记，替换为 [[CHART:N]]
+                chart_count = 0
+                def replace_chart_marker(match):
+                    nonlocal chart_count
+                    idx = chart_count
+                    chart_count += 1
+                    return f'[[CHART:{idx}]]'
+
+                # 替换 {{CHART:N}}（N是数字） 为 [[CHART:idx]]
+                processed_markdown = re.sub(r'\{\{CHART:(\d+)\}\}', replace_chart_marker, full_result)
+                print(f"[图表] 已在 markdown 中替换 {chart_count} 个 {{CHART:N}} 标记")
+
+                # 方案2：如果没有找到任何 {{CHART:N}} 标记，则在末尾插入
+                if chart_count == 0:
+                    chart_markers = ' '.join([f'[[CHART:{i}]]' for i in range(len(charts))])
+                    processed_markdown = full_result.rstrip() + '\n\n' + chart_markers + '\n'
+                    print(f"[图表] 已在 markdown 末尾插入 {len(charts)} 个图表标记")
+        except Exception as e:
+            print(f"[图表] 处理图表标记失败: {e}")
+
+        # 6d. 发送图表数据和处理后的完整 markdown（让前端直接渲染）
         try:
             # chart_data_json 格式是 {CHART_DATA:{"charts":[...]}}，需要解析内部 JSON
             import json
@@ -874,8 +903,13 @@ class AnalysisAgent:
             inner_json = chart_data_json[len('{CHART_DATA:'):-1]
             chart_obj = json.loads(inner_json)
             if chart_obj.get('charts'):
-                yield create_sse_event("chart", json.dumps(chart_obj, ensure_ascii=False))
-                print(f"[图表] 已发送图表数据，charts 数量: {len(chart_obj['charts'])}")
+                # 在 chart 事件中同时发送处理后的 markdown，让前端直接渲染
+                chart_payload = {
+                    "charts": chart_obj.get('charts', []),
+                    "markdown": processed_markdown
+                }
+                yield create_sse_event("chart", json.dumps(chart_payload, ensure_ascii=False))
+                print(f"[图表] 已发送图表数据和处理后的markdown，charts 数量: {len(chart_obj['charts'])}")
         except Exception as e:
             print(f"[图表] 发送图表数据失败: {e}")
 
@@ -991,15 +1025,33 @@ class AnalysisAgent:
             # 6b. 后处理：清理 LLM 输出的格式问题
             full_result = self._clean_llm_output(full_result)
 
-            # 6c. 解析图表数据（charts 数组会单独返回，不需要在 answer 中保留 CHART_DATA）
+            # 6c. 处理图表标记：替换 {{CHART:N}} 为 [[CHART:N]]（支持模板中预设位置）
             charts = []
+            processed_markdown = full_result
             try:
                 inner_json = chart_data_json[len('{CHART_DATA:'):-1]
                 chart_obj = json.loads(inner_json)
                 charts = chart_obj.get('charts', [])
-                print(f"[图表] 解析完成，charts 数量: {len(charts)}")
+                if charts:
+                    # 方案1：markdown 中已有 {{CHART:N}} 标记，替换为 [[CHART:N]]
+                    chart_count = 0
+                    def replace_chart_marker(match):
+                        nonlocal chart_count
+                        idx = chart_count
+                        chart_count += 1
+                        return f'[[CHART:{idx}]]'
+
+                    # 替换 {{CHART:N}}（N是数字） 为 [[CHART:idx]]
+                    processed_markdown = re.sub(r'\{\{CHART:(\d+)\}\}', replace_chart_marker, full_result)
+                    print(f"[图表] 已在 markdown 中替换 {chart_count} 个 {{CHART:N}} 标记")
+
+                    # 方案2：如果没有找到任何 {{CHART:N}} 标记，则在末尾插入
+                    if chart_count == 0:
+                        chart_markers = ' '.join([f'[[CHART:{i}]]' for i in range(len(charts))])
+                        processed_markdown = full_result.rstrip() + '\n\n' + chart_markers + '\n'
+                        print(f"[图表] 已在 markdown 末尾插入 {len(charts)} 个图表标记")
             except Exception as e:
-                print(f"[图表] 解析失败: {e}")
+                print(f"[图表] 处理图表标记失败: {e}")
 
             total_time = time.time() - total_start
             print(f"\n{'='*60}")
@@ -1007,7 +1059,7 @@ class AnalysisAgent:
             print(f"{'='*60}\n")
 
             return {
-                "answer": full_result,
+                "answer": processed_markdown,
                 "charts": charts
             }
         except Exception as e:

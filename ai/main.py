@@ -17,17 +17,18 @@ import uuid
 import json
 import httpx
 
-from ai.graph.state import ConversationState, ConversationMessage
-from ai.graph.nodes import conversation_nodes
+# === 旧版 LLM 依赖已删除 ===
+# from ai.graph.state import ConversationState, ConversationMessage
+# from ai.graph.nodes import conversation_nodes
 from ai.feedback.auto_detector import get_auto_fail_detector, FailReason
 from ai.feedback.collector import get_feedback_collector, FeedbackType
 from ai.feedback.analyzer import get_feedback_analyzer
 from ai.feedback.rule_optimizer import get_rule_optimizer
 from ai.config.logging_config import setup_logging, get_logger
-from ai.engine import get_engine
-from ai.engine.rule_engine import RuleEngine
-from ai.graph._result_formatter import ResultFormatter
-from ai.graph._dimension_resolver import DimensionResolver
+# from ai.engine import get_engine  # 旧引擎工厂，已被 LLM.V1 替代
+# from ai.engine.rule_engine import RuleEngine  # 旧版规则引擎，已被 LLM.V1 替代
+# from ai.graph._result_formatter import ResultFormatter
+# from ai.graph._dimension_resolver import DimensionResolver
 
 # 初始化日志
 setup_logging()
@@ -110,6 +111,7 @@ class AskResponse(BaseModel):
     needs_clarification: Optional[bool] = None
     clarification_message: Optional[str] = None
     clarification_type: Optional[str] = None
+    category_level_options: Optional[List[str]] = None  # 品类级别选项
     matched_metrics: Optional[List[Dict[str, Any]]] = None
     dimension_value_candidates: Optional[List[Dict[str, Any]]] = None  # 维度值候选
     dimension_value_matched_text: Optional[str] = None  # 匹配维度值时的原始文本
@@ -121,6 +123,11 @@ class AskResponse(BaseModel):
     page_size: Optional[int] = None  # 每页条数
     comparison_results: Optional[List[Dict[str, Any]]] = None  # 同比环比结果列表（支持同时展示同比和环比）
     metric_code: Optional[str] = None  # 当前指标代码
+    processed_question: Optional[str] = None  # 处理后的问题（如品类选择组合后）
+    # 槽位追问相关字段（slot_missing）
+    pending_slot_options: Optional[List[str]] = None  # 槽位选项列表
+    pending_slot_name: Optional[str] = None  # 等待填充的槽位名
+    slot_display_name: Optional[str] = None  # 槽位显示名称
 
 
 def _extract_result_data(sql_result) -> Optional[List[Dict[str, Any]]]:
@@ -272,15 +279,18 @@ def _get_drill_down_dims(state) -> List[Dict[str, str]]:
 
 @app.post("/api/v1/ask", response_model=AskResponse)
 async def ask_question(req: AskRequest):
-    """智能问数接口 - 支持引擎切换 A/B Test"""
+    """智能问数接口 - 已弃用，请使用 /api/v1/llm-ask"""
     # 获取或创建会话 ID
     session_id = req.session_id or str(uuid.uuid4())
-
-    # 获取引擎
-    engine_type = req.engine_type or "legacy"
-    engine = get_engine(engine_type)
     logger = get_logger("ai.main")
-    logger.info(f"[ask_question] engine_type={engine_type}, sql_mode={req.sql_mode}, question={req.question[:50]}")
+    logger.warning(f"[ask_question] 旧版接口已弃用，请使用 /api/v1/llm-ask，session_id={session_id}")
+    return AskResponse(
+        session_id=session_id,
+        answer="旧版智能问数已弃用，请使用 LLM.V1 版本（/llm-ask）",
+        sql="",
+        suggest=["请前往 LLM.V1 Tab 页使用智能问数功能"],
+        needs_clarification=False,
+    )
 
     try:
         # 调用引擎处理
@@ -412,6 +422,7 @@ async def ask_question(req: AskRequest):
             needs_clarification=result.get("needs_clarification"),
             clarification_message=result.get("clarification_message"),
             clarification_type=result.get("clarification_type"),
+            category_level_options=result.get("category_level_options"),
             matched_metrics=result.get("matched_metrics"),
             dimension_value_candidates=result.get("dimension_value_candidates"),
             dimension_value_matched_text=result.get("dimension_value_matched_text"),
@@ -422,7 +433,12 @@ async def ask_question(req: AskRequest):
             page=result.get("page", req.page),
             page_size=result.get("page_size", req.page_size),
             comparison_results=result.get("comparison_results"),
-            metric_code=result.get("metric_code")
+            metric_code=result.get("metric_code"),
+            processed_question=result.get("processed_question"),
+            # 槽位追问相关字段
+            pending_slot_options=result.get("pending_slot_options"),
+            pending_slot_name=result.get("pending_slot_name"),
+            slot_display_name=result.get("slot_display_name"),
         )
 
     except Exception as e:
@@ -477,14 +493,14 @@ async def clear_session(session_id: str):
         del sessions[session_id]
     if session_id in session_metadata:
         del session_metadata[session_id]
-    # 清除 LangGraph MemorySaver 中的会话数据
-    try:
-        from ai.engine.langgraph_engine import LangGraphEngine
-        if LangGraphEngine._memory_saver:
-            LangGraphEngine._memory_saver.delete_thread(session_id)
-            logger.info(f"[clear_session] MemorySaver 清除成功: {session_id}")
-    except Exception as e:
-        logger.warning(f"[clear_session] MemorySaver 清除失败: {e}")
+    # === 旧版 LangGraph MemorySaver 已删除，LLM.V1 使用独立会话管理 ===
+    # try:
+    #     from ai.engine.langgraph_engine import LangGraphEngine
+    #     if LangGraphEngine._memory_saver:
+    #         LangGraphEngine._memory_saver.delete_thread(session_id)
+    #         logger.info(f"[clear_session] MemorySaver 清除成功: {session_id}")
+    # except Exception as e:
+    #     logger.warning(f"[clear_session] MemorySaver 清除失败: {e}")
     return {"message": "会话已清除"}
 
 
@@ -1048,28 +1064,46 @@ async def health():
     """健康检查"""
     return {"status": "ok"}
 
+@app.get("/debug/ask-response-fields")
+async def debug_ask_response():
+    """调试：检查 AskResponse 的字段"""
+    from ai.main import AskResponse
+    fields = list(AskResponse.model_fields.keys())
+    return {"fields": fields, "has_category_level_options": "category_level_options" in fields}
+
 
 @app.post("/api/v1/admin/reload-config")
 async def reload_config():
-    """重新加载指标配置和 Prompt 缓存"""
-    from ai.graph.nodes import conversation_nodes
+    """重新加载指标配置和 Prompt 缓存（LLM.V1 版本）"""
     try:
-        # 重新初始化 RuleEngine
-        conversation_nodes.rule_engine = RuleEngine()
+        # === 旧版 conversation_nodes 已删除，只保留 LLM.V1 相关的缓存清除 ===
 
-        # 清除 ConversationNodes 的公式语法配置缓存
-        from ai.graph.nodes import ConversationNodes
-        if hasattr(ConversationNodes, '_formula_syntax_loaded'):
-            ConversationNodes._formula_syntax_loaded = False
-        if hasattr(ConversationNodes, '_formula_syntax_cache'):
-            ConversationNodes._formula_syntax_cache = []
+        # 重新初始化 SlotClarificationEngine（清除类级缓存）
+        from ai.engine.slot_clarification_engine import SlotClarificationEngine
+        SlotClarificationEngine._initialized = False
+        SlotClarificationEngine._shared_slot_definitions = {}
+        SlotClarificationEngine._shared_slot_dependencies = {}
+        SlotClarificationEngine._shared_slot_relations = {}
+        logger.info("[reload-config] SlotClarificationEngine 已重新初始化")
 
         # 刷新 Prompt 配置缓存（清除 Redis + 内存缓存，下次请求会重新加载）
         from ai.engine.prompt_manager import reload_prompt_manager
         reload_prompt_manager()
+        logger.info("[reload-config] PromptManager 已重新加载")
 
-        logger.info("指标配置和 Prompt 缓存已重新加载")
-        return {"success": True, "message": "配置已重新加载"}
+        # 热更新业务术语同义词（LLM.V1）
+        from ai.engine.llm_v1.config_loader import get_config_loader
+        config_loader = get_config_loader()
+        config_loader.reload_business_terms()
+        logger.info("[reload-config] LLM.V1 业务术语已热更新")
+
+        # 热更新旧版 RuleEngine 业务术语（兼容）
+        from ai.engine.rule_engine import RuleEngine
+        rule_engine = RuleEngine()
+        rule_engine.reload_business_terms()
+        logger.info("[reload-config] RuleEngine 业务术语已热更新")
+
+        return {"success": True, "message": "LLM.V1 配置已重新加载"}
     except Exception as e:
         logger.error(f"重新加载配置失败: {e}")
         return {"success": False, "message": str(e)}
@@ -1133,6 +1167,10 @@ def load_semantic_vectors():
 # 注册决策分析路由
 from ai.analysis import router as analysis_router
 app.include_router(analysis_router)
+
+# 注册 LLM.V1 路由
+from ai.engine.llm_v1.router import router as llm_v1_router
+app.include_router(llm_v1_router)
 
 if __name__ == "__main__":
     import uvicorn

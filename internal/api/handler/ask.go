@@ -433,6 +433,27 @@ func AskQuestion(c *gin.Context) {
 	} else {
 		addField("clarification_type", nil)
 	}
+	// 槽位追问相关字段
+	if v := pythonResp["pending_slot_options"]; v != nil {
+		addField("pending_slot_options", v)
+	} else {
+		addField("pending_slot_options", nil)
+	}
+	if v := pythonResp["pending_slot_name"]; v != nil {
+		addField("pending_slot_name", v)
+	} else {
+		addField("pending_slot_name", nil)
+	}
+	if v := pythonResp["pending_slots"]; v != nil {
+		addField("pending_slots", v)
+	} else {
+		addField("pending_slots", nil)
+	}
+	if v := pythonResp["slot_display_name"]; v != nil {
+		addField("slot_display_name", v)
+	} else {
+		addField("slot_display_name", nil)
+	}
 	if v := pythonResp["matched_metrics"]; v != nil {
 		addField("matched_metrics", v)
 	} else {
@@ -683,6 +704,8 @@ func DrillDownQuestion(c *gin.Context) {
 
 // SaveMessage 保存会话消息（Redis 缓存 + 异步落库 PostgreSQL）
 func SaveMessage(c *gin.Context) {
+	fmt.Printf("[DEBUG SaveMessage] 请求到达, session_id=%s\n", c.Query("session_id"))
+
 	var req struct {
 		SessionID        string `json:"session_id" binding:"required"`
 		Role            string `json:"role" binding:"required"` // user / assistant
@@ -697,9 +720,12 @@ func SaveMessage(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		fmt.Printf("[DEBUG SaveMessage] BindJSON失败: %v\n", err)
 		response.Error(c, response.CodeBadRequest, "参数错误")
 		return
 	}
+
+	fmt.Printf("[DEBUG SaveMessage] 解析成功, SessionID=%s, Role=%s, Content长度=%d\n", req.SessionID, req.Role, len(req.Content))
 
 	// 构造消息
 	msg := model.AskMessage{
@@ -736,6 +762,7 @@ ctx := context.Background()
 // GetMessages 获取会话消息（优先 Redis，没有则读 PostgreSQL）
 func GetMessages(c *gin.Context) {
 	sessionID := c.Query("session_id")
+	fmt.Printf("[DEBUG GetMessages] 请求到达, session_id=%s\n", sessionID)
 	if sessionID == "" {
 		response.Error(c, response.CodeBadRequest, "session_id 不能为空")
 		return
@@ -744,8 +771,10 @@ func GetMessages(c *gin.Context) {
 	// 优先从 Redis 读
 	ctx := context.Background()
 	cacheKey := fmt.Sprintf("ask:messages:%s", sessionID)
+	fmt.Printf("[DEBUG GetMessages] cacheKey=%s\n", cacheKey)
 	var messages []model.AskMessage
 	if err := cache.GetJSON(ctx, cacheKey, &messages); err == nil && len(messages) > 0 {
+		fmt.Printf("[DEBUG GetMessages] Redis命中, 消息数=%d\n", len(messages))
 		// 将 JSON 字符串反序列化为对象
 		result := make([]map[string]interface{}, len(messages))
 		for i, msg := range messages {
@@ -767,7 +796,9 @@ func GetMessages(c *gin.Context) {
 	}
 
 	// Redis 没有，从 PostgreSQL 读
+	fmt.Printf("[DEBUG GetMessages] Redis未命中, 查询PostgreSQL, session_id=%s\n", sessionID)
 	postgres.Get().Where("session_id = ?", sessionID).Order("created_at ASC").Find(&messages)
+	fmt.Printf("[DEBUG GetMessages] PostgreSQL查询结果, 消息数=%d\n", len(messages))
 
 	// 回填 Redis
 	if len(messages) > 0 {
