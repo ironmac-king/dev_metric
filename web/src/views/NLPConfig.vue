@@ -239,6 +239,62 @@
           </div>
         </el-tab-pane>
 
+        <!-- 槽位配置 -->
+        <el-tab-pane label="槽位配置" name="slots">
+          <div class="section">
+            <div class="section-header">
+              <h2 class="section-title">槽位定义管理</h2>
+              <el-button type="primary" class="btn-primary" @click="showSlotDialog('create')">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                添加槽位
+              </el-button>
+            </div>
+            <div class="table-card">
+              <table class="config-table">
+                <thead>
+                  <tr>
+                    <th>槽位名称</th>
+                    <th>显示名称</th>
+                    <th>类型</th>
+                    <th>值类型</th>
+                    <th>优先级</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="slot in slotDefinitions" :key="slot.id">
+                    <td class="name-cell">{{ slot.slot_name }}</td>
+                    <td>{{ slot.display_name }}</td>
+                    <td><span class="intent-badge">{{ getSlotTypeText(slot.slot_type) }}</span></td>
+                    <td>{{ getValueTypeText(slot.value_type) }}</td>
+                    <td class="priority-cell">{{ slot.priority }}</td>
+                    <td>
+                      <el-switch
+                        v-model="slot.status"
+                        :active-value="1"
+                        :inactive-value="0"
+                        @change="saveSlotStatus(slot)"
+                      />
+                    </td>
+                    <td>
+                      <div class="action-group">
+                        <el-button link class="action-btn" @click="showSlotDialog('edit', slot)">编辑</el-button>
+                        <el-button link class="action-btn delete" @click="deleteSlot(slot.id)">删除</el-button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="slotDefinitions.length === 0" class="empty-state">
+                <span>暂无槽位配置</span>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
+
         <!-- 业务术语 -->
         <el-tab-pane label="业务术语" name="terms">
           <div class="section">
@@ -700,7 +756,13 @@
     </el-dialog>
 
     <!-- Prompt 详情对话框 -->
-    <el-dialog v-model="promptDialogVisible" :title="promptDialogTitle" width="900px" class="config-dialog prompt-detail-dialog">
+    <el-dialog
+      v-model="promptDialogVisible"
+      :title="promptDialogTitle"
+      :width="promptFullscreen ? '100vw' : '1200px'"
+      :fullscreen="promptFullscreen"
+      class="config-dialog prompt-detail-dialog"
+    >
       <div v-if="promptDetail" class="prompt-detail">
         <!-- Meta 信息栏 -->
         <div class="prompt-meta-bar">
@@ -739,6 +801,19 @@
               </svg>
               复制
             </el-button>
+            <div class="font-size-selector">
+              <el-slider v-model="promptFontSize" :min="10" :max="20" :step="1" size="small" />
+              <span class="font-size-label">{{ promptFontSize }}px</span>
+            </div>
+            <el-button size="small" @click="togglePromptFullscreen" class="fullscreen-btn">
+              <svg v-if="!promptFullscreen" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path d="M2 5V2H5M9 2H12V5M12 9V12H9M5 12H2V9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <svg v-else width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path d="M5 2V5H2M9 2H12V5M12 9V12H9M5 12H2V9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              {{ promptFullscreen ? '退出全屏' : '全屏' }}
+            </el-button>
           </div>
         </div>
 
@@ -770,63 +845,78 @@
             <div class="code-line-numbers">
               <div v-for="n in getLineNumbers(promptDetail.prompt_text)" :key="n" class="line-number">{{ n }}</div>
             </div>
-            <pre class="code-content" v-html="highlightVariables(promptDetail.prompt_text)"></pre>
+            <pre class="code-content" :style="{ fontSize: promptFontSize + 'px' }" v-html="highlightVariables(promptDetail.prompt_text)"></pre>
           </div>
         </div>
       </div>
     </el-dialog>
 
     <!-- Prompt 编辑对话框 -->
-    <el-dialog v-model="promptEditDialogVisible" :title="promptDialogTitle" width="900px" class="config-dialog">
-      <el-form :model="promptEditForm" label-width="90px" class="config-form">
-        <el-form-item label="名称">
-          <el-input v-model="promptEditForm.name" :disabled="!!promptEditForm.id" placeholder="输入 Prompt 名称" />
-        </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="promptEditForm.description" type="textarea" :rows="2" placeholder="配置描述" />
-        </el-form-item>
-        <el-form-item label="分类">
-          <el-select v-model="promptEditForm.category" :disabled="!!promptEditForm.id" style="width: 100%">
-            <el-option label="nl2structure" value="nl2structure" />
-            <el-option label="sql_generation" value="sql_generation" />
-            <el-option label="general" value="general" />
-            <el-option label="decision_analysis" value="decision_analysis" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="Prompt 内容">
-          <el-input
-            v-model="promptEditForm.prompt_text"
-            type="textarea"
-            :rows="12"
-            placeholder="输入 Prompt 内容..."
-            class="prompt-textarea"
-          />
-          <div class="form-tip">提示：使用 {'{variable}'} 格式声明变量</div>
-        </el-form-item>
-        <el-form-item label="变量">
-          <el-input
-            v-model="promptEditForm.variables_text"
-            type="textarea"
-            :rows="4"
-            placeholder='JSON 格式，如：{"indicators": [{"name": "ROAS", "metric_code": "MKI-02-0020"}]}'
-            class="prompt-textarea"
-          />
-          <div class="form-tip">提示：decision_analysis 模板需要此字段配置指标，格式为 JSON</div>
-        </el-form-item>
-        <el-form-item label="状态">
-          <el-switch
-            v-model="promptEditForm.status"
-            :active-value="1"
-            :inactive-value="0"
-            active-text="启用"
-            inactive-text="停用"
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button size="large" @click="promptEditDialogVisible = false">取消</el-button>
-        <el-button type="primary" size="large" @click="savePrompt" class="btn-primary">保存</el-button>
-      </template>
+    <el-dialog v-model="promptEditDialogVisible" :title="promptDialogTitle" width="100vw" class="config-dialog prompt-edit-dialog" fullscreen>
+      <div class="prompt-edit-body">
+        <div class="edit-top-row">
+          <el-form-item label="名称" class="form-item-inline">
+            <el-input v-model="promptEditForm.name" :disabled="!!promptEditForm.id" placeholder="输入 Prompt 名称" />
+          </el-form-item>
+          <el-form-item label="分类" class="form-item-inline">
+            <el-select v-model="promptEditForm.category" :disabled="!!promptEditForm.id">
+              <el-option label="nl2structure" value="nl2structure" />
+              <el-option label="sql_generation" value="sql_generation" />
+              <el-option label="general" value="general" />
+              <el-option label="decision_analysis" value="decision_analysis" />
+              <el-option label="llm_v1" value="llm_v1" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="描述" class="form-item-inline form-item-desc">
+            <el-input v-model="promptEditForm.description" placeholder="配置描述" />
+          </el-form-item>
+        </div>
+        <!-- 左右对比布局 -->
+        <div class="compare-container">
+          <div class="compare-panel compare-current">
+            <div class="panel-header">
+              <span class="panel-title">待编辑</span>
+              <span class="panel-badge" v-if="promptEditForm.id">v{{ promptDetail?.version }}</span>
+            </div>
+            <textarea
+              ref="compareCurrentTextareaRef"
+              v-model="promptEditForm.prompt_text"
+              class="compare-textarea"
+              placeholder="输入 Prompt 内容..."
+              @scroll="onCompareCurrentScroll"
+            ></textarea>
+          </div>
+          <div class="compare-divider"></div>
+          <div class="compare-panel compare-prev">
+            <div class="panel-header">
+              <span class="panel-title">当前版本</span>
+              <span class="panel-badge" v-if="promptEditForm.id">v{{ promptDetail?.version }}</span>
+            </div>
+            <div
+              ref="comparePrevContentRef"
+              class="prev-content"
+              @scroll="onComparePrevScroll"
+            >{{ promptPrevText || '暂无上一版本' }}</div>
+          </div>
+        </div>
+        <div class="edit-bottom-row">
+          <div class="edit-vars">
+            <label class="bottom-label">变量</label>
+            <el-input
+              v-model="promptEditForm.variables_text"
+              type="textarea"
+              :rows="1"
+              placeholder='JSON 格式，如：{"indicators": [...]}'
+              class="vars-input"
+            />
+            <span class="form-tip">decision_analysis 模板需要此字段配置指标</span>
+          </div>
+          <div class="edit-actions">
+            <el-button size="large" @click="promptEditDialogVisible = false">取消</el-button>
+            <el-button type="primary" size="large" @click="savePrompt" class="btn-primary">保存</el-button>
+          </div>
+        </div>
+      </div>
     </el-dialog>
 
     <!-- Prompt 版本历史对话框 -->
@@ -868,6 +958,68 @@
         <p>暂无版本历史</p>
       </div>
     </el-dialog>
+
+    <!-- 槽位编辑对话框 -->
+    <el-dialog v-model="slotDialogVisible" :title="slotDialogTitle" width="700px" class="config-dialog">
+      <el-form :model="slotEditForm" label-width="100px" class="config-form">
+        <el-form-item label="槽位名称" required>
+          <el-input v-model="slotEditForm.slot_name" :disabled="!!slotEditForm.id" placeholder="如：metric, time_range" />
+        </el-form-item>
+        <el-form-item label="显示名称" required>
+          <el-input v-model="slotEditForm.display_name" placeholder="如：指标、时间范围" />
+        </el-form-item>
+        <el-form-item label="槽位类型" required>
+          <el-select v-model="slotEditForm.slot_type" style="width: 100%">
+            <el-option label="必选" value="required" />
+            <el-option label="可选" value="optional" />
+            <el-option label="条件" value="conditional" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="值类型" required>
+          <el-select v-model="slotEditForm.value_type" style="width: 100%">
+            <el-option label="静态枚举" value="static" />
+            <el-option label="动态数据" value="dynamic" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-input-number v-model="slotEditForm.priority" :min="0" :max="100" />
+        </el-form-item>
+        <el-form-item label="最大追问轮次">
+          <el-input-number v-model="slotEditForm.max_clarify_turns" :min="1" :max="10" />
+        </el-form-item>
+        <el-form-item label="默认值">
+          <el-input v-model="slotEditForm.default_value" placeholder="可选的默认值" />
+        </el-form-item>
+        <el-form-item label="可选值" v-if="slotEditForm.value_type === 'static'">
+          <el-input v-model="slotEditForm.allowed_values" type="textarea" :rows="3" placeholder='JSON数组，如：["亚马逊","TikTok","Temu"]' />
+        </el-form-item>
+        <el-form-item label="动态数据源" v-if="slotEditForm.value_type === 'dynamic'">
+          <el-select v-model="slotEditForm.dynamic_source" style="width: 100%">
+            <el-option label="维度配置" value="dimension_config" />
+            <el-option label="指标分类" value="metric_category" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="维度名称" v-if="slotEditForm.value_type === 'dynamic'">
+          <el-input v-model="slotEditForm.dimension_name" placeholder="如：平台、站点" />
+        </el-form-item>
+        <el-form-item label="追问话术" required>
+          <el-input v-model="slotEditForm.question_templates" type="textarea" :rows="2" placeholder='JSON数组，如：["请问想查询哪个平台？","是亚马逊还是TikTok呢？"]' />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-switch
+            v-model="slotEditForm.status"
+            :active-value="1"
+            :inactive-value="0"
+            active-text="启用"
+            inactive-text="停用"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button size="large" @click="slotDialogVisible = false">取消</el-button>
+        <el-button type="primary" size="large" @click="saveSlot" class="btn-primary">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -875,7 +1027,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox, ElIcon } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
-import { metricAPI } from '../api'
+import { metricAPI, slotConfigAPI } from '../api'
 
 const activeTab = ref('intents')
 const intentTemplates = ref([])
@@ -884,6 +1036,28 @@ const businessTerms = ref([])
 const metricsList = ref([])
 const intentFeedbacks = ref([])
 const feedbackLoading = ref(false)
+
+// 槽位配置
+const slotDefinitions = ref([])
+const slotLoading = ref(false)
+const slotDialogVisible = ref(false)
+const slotDialogTitle = ref('添加槽位')
+const slotEditForm = ref({
+  id: null,
+  slot_name: '',
+  display_name: '',
+  slot_type: 'required',
+  priority: 0,
+  max_clarify_turns: 3,
+  default_value: '',
+  value_type: 'static',
+  allowed_values: '',
+  question_templates: '',
+  dynamic_source: '',
+  dimension_name: '',
+  column_name: '',
+  status: 1
+})
 
 // 分页状态
 const intentPage = ref({ current: 1, size: 10, total: 0 })
@@ -899,6 +1073,8 @@ const promptLoading = ref(false)
 const promptDialogVisible = ref(false)
 const promptDialogTitle = ref('Prompt 详情')
 const promptDetail = ref(null)
+const promptFullscreen = ref(false)
+const promptFontSize = ref(13)
 const promptSearch = ref('')
 const promptCategoryFilter = ref('')
 const promptStatusFilter = ref('')
@@ -947,6 +1123,34 @@ const promptEditForm = ref({
 const promptVersionDialogVisible = ref(false)
 const promptVersions = ref([])
 const promptVersionLoading = ref(false)
+
+// Prompt 上一版本内容
+const promptPrevText = ref('')
+
+// 左右对比滚动ref
+const compareCurrentTextareaRef = ref(null)  // 原生textarea
+const comparePrevContentRef = ref(null)      // 右边内容div
+let isScrolling = false
+
+function onCompareCurrentScroll(e) {
+  if (isScrolling) return
+  isScrolling = true
+  // 同步右边面板
+  if (comparePrevContentRef.value) {
+    comparePrevContentRef.value.scrollTop = e.target.scrollTop
+  }
+  isScrolling = false
+}
+
+function onComparePrevScroll(e) {
+  if (isScrolling) return
+  isScrolling = true
+  // 同步左边面板的滚动位置
+  if (compareCurrentTextareaRef.value) {
+    compareCurrentTextareaRef.value.scrollTop = e.target.scrollTop
+  }
+  isScrolling = false
+}
 
 // 公式语法搜索
 const formulaSearch = ref('')
@@ -1391,8 +1595,101 @@ function viewPromptDetail(cfg) {
   promptDialogVisible.value = true
 }
 
+// 槽位配置
+async function loadSlotDefinitions() {
+  slotLoading.value = true
+  try {
+    const res = await slotConfigAPI.list()
+    slotDefinitions.value = res.data || []
+  } catch (e) {
+    console.error('加载槽位配置失败:', e)
+  } finally {
+    slotLoading.value = false
+  }
+}
+
+function showSlotDialog(mode, slot = null) {
+  if (mode === 'create') {
+    slotEditForm.value = {
+      id: null,
+      slot_name: '',
+      display_name: '',
+      slot_type: 'required',
+      priority: 0,
+      max_clarify_turns: 3,
+      default_value: '',
+      value_type: 'static',
+      allowed_values: '',
+      question_templates: '',
+      dynamic_source: '',
+      dimension_name: '',
+      column_name: '',
+      status: 1
+    }
+    slotDialogTitle.value = '添加槽位'
+  } else {
+    slotEditForm.value = { ...slot }
+    slotDialogTitle.value = '编辑槽位'
+  }
+  slotDialogVisible.value = true
+}
+
+async function saveSlot() {
+  const form = slotEditForm.value
+  try {
+    if (form.id) {
+      await slotConfigAPI.update(form.id, form)
+      ElMessage.success('更新成功')
+    } else {
+      await slotConfigAPI.create(form)
+      ElMessage.success('创建成功')
+    }
+    slotDialogVisible.value = false
+    loadSlotDefinitions()
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+async function deleteSlot(id) {
+  try {
+    await ElMessageBox.confirm('确定要删除这个槽位吗？', '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await slotConfigAPI.delete(id)
+    ElMessage.success('删除成功')
+    loadSlotDefinitions()
+  } catch (e) {
+    if (e !== 'cancel') {
+      ElMessage.error('删除失败')
+    }
+  }
+}
+
+async function saveSlotStatus(slot) {
+  try {
+    await slotConfigAPI.update(slot.id, slot)
+    ElMessage.success('状态更新成功')
+  } catch (e) {
+    ElMessage.error('状态更新失败')
+  }
+}
+
+function getValueTypeText(vt) {
+  const map = { 'static': '静态', 'dynamic': '动态', 'enum': '枚举', 'range': '范围', 'free_text': '自由文本' }
+  return map[vt] || vt
+}
+
+function getSlotTypeText(st) {
+  const map = { 'required': '必选', 'optional': '可选', 'conditional': '条件' }
+  return map[st] || st
+}
+
 function showPromptDialog(mode, cfg = null) {
   promptDialogTitle.value = mode === 'create' ? '新增 Prompt' : '编辑 Prompt'
+  promptPrevText.value = '' // 清空上一版本
   if (mode === 'create') {
     promptEditForm.value = {
       id: null,
@@ -1429,8 +1726,28 @@ function showPromptDialog(mode, cfg = null) {
 }
 
 // 兼容旧的 editPrompt 调用
-function editPrompt(cfg) {
+async function editPrompt(cfg) {
+  promptDetail.value = cfg
   showPromptDialog('edit', cfg)
+  // 获取上一版本内容
+  if (cfg.version > 1) {
+    try {
+      const res = await fetch(`/api/v1/prompt-configs/${cfg.id}/versions`)
+      const data = await res.json()
+      const versions = data.data || []
+      const prevVersion = versions.find(v => v.version === cfg.version - 1)
+      if (prevVersion) {
+        promptPrevText.value = prevVersion.prompt_text || ''
+      } else {
+        promptPrevText.value = ''
+      }
+    } catch (e) {
+      console.error('获取上一版本失败:', e)
+      promptPrevText.value = ''
+    }
+  } else {
+    promptPrevText.value = ''
+  }
 }
 
 async function deletePrompt(id) {
@@ -1634,6 +1951,10 @@ function copyPromptContent() {
   })
 }
 
+function togglePromptFullscreen() {
+  promptFullscreen.value = !promptFullscreen.value
+}
+
 function formatTime(timeStr) {
   if (!timeStr) return '-'
   const d = new Date(timeStr)
@@ -1676,6 +1997,9 @@ watch(activeTab, (tab) => {
   }
   if (tab === 'prompts' && promptConfigs.value.length === 0) {
     loadPrompts()
+  }
+  if (tab === 'slots' && slotDefinitions.value.length === 0) {
+    loadSlotDefinitions()
   }
 })
 </script>
@@ -2255,6 +2579,11 @@ watch(activeTab, (tab) => {
   padding: 0;
 }
 
+/* Prompt 详情对话框优化 */
+.prompt-detail-dialog :deep(.el-dialog__body) {
+  padding: 0;
+}
+
 .prompt-detail {
   padding: 0;
 }
@@ -2267,6 +2596,9 @@ watch(activeTab, (tab) => {
   padding: 16px 20px;
   background: var(--bg-primary);
   border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .meta-left {
@@ -2304,10 +2636,27 @@ watch(activeTab, (tab) => {
 }
 
 .copy-btn,
-.history-btn {
+.history-btn,
+.fullscreen-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+}
+
+.font-size-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+}
+
+.font-size-selector :deep(.el-slider) {
+  width: 80px;
+}
+
+.font-size-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 35px;
 }
 
 /* 描述区域 */
@@ -2360,7 +2709,7 @@ watch(activeTab, (tab) => {
   background: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  overflow: hidden;
+  overflow: auto;
 }
 
 .code-line-numbers {
@@ -2391,8 +2740,6 @@ watch(activeTab, (tab) => {
   white-space: pre-wrap;
   word-break: break-all;
   overflow-x: auto;
-  max-height: 450px;
-  overflow-y: auto;
 }
 
 /* 语法高亮 */
@@ -2418,26 +2765,178 @@ watch(activeTab, (tab) => {
 }
 
 /* Prompt 编辑对话框 */
-.prompt-textarea textarea {
-  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
-  font-size: 12.5px;
-  line-height: 1.6;
+.el-dialog.is-fullscreen.prompt-edit-dialog .el-dialog__body {
+  padding: 20px !important;
+  max-height: calc(100vh - 40px) !important;
+  overflow: hidden !important;
 }
 
-.edit-variables {
+.prompt-edit-dialog :deep(.el-dialog__body) {
+  padding: 20px !important;
+  max-height: calc(100vh - 40px) !important;
+  overflow: hidden !important;
+}
+
+.prompt-edit-body {
+  flex: 1;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 12px;
-  background: var(--bg-primary);
-  border-radius: var(--radius-sm);
-  min-height: 36px;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.no-vars {
+/* 顶部一行 */
+.edit-top-row {
+  display: flex;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.form-item-inline {
+  flex: 0 0 auto;
+}
+
+.form-item-inline .el-input,
+.form-item-inline .el-select {
+  width: 140px;
+}
+
+.form-item-desc {
+  flex: 1;
+  min-width: 0;
+}
+
+.form-item-desc .el-input {
+  width: 100%;
+}
+
+/* 左右对比布局 */
+.compare-container {
+  flex: 0 0 750px;
+  display: flex;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.compare-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.compare-panel.compare-current {
+  background: var(--bg-card);
+}
+
+.compare-panel.compare-prev {
+  background: #fafafa;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  height: 42px;
+  box-sizing: border-box;
+}
+
+.panel-title {
   font-size: 12px;
+  font-weight: 600;
   color: var(--text-secondary);
 }
+
+.panel-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  background: var(--primary-glow);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.compare-divider {
+  width: 1px;
+  background: var(--border);
+}
+
+.compare-current {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.compare-textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  border-radius: 0;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px 16px;
+  overflow-y: auto;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
+
+.compare-textarea:focus {
+  outline: none;
+}
+
+.prev-content {
+  flex: 1;
+  padding: 12px 16px;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-y: auto;
+  background: #fafafa;
+}
+
+.prev-content:empty::before {
+  content: '暂无上一版本';
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* 底部区 */
+.edit-bottom-row {
+  display: flex;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.edit-vars {
+  flex: 1;
+}
+
+.vars-input :deep(.el-textarea__inner) {
+  resize: none;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 12px;
+}
+
+.edit-actions {
+  display: flex;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* Prompt 版本历史 */
 
 /* Prompt 版本历史 */
 .version-list {
