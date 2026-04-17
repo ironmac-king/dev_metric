@@ -28,20 +28,20 @@
       <!-- Filter Panel (Glassmorphism) -->
       <div class="filter-panel">
         <div class="filter-group">
-          <el-select v-model="filters.domain" placeholder="所属域" clearable size="large" class="filter-select">
+          <el-select v-model="filters.domain" placeholder="所属域" clearable size="large" class="filter-select" @change="handleFilterChange">
             <template #prefix><span class="filter-tag">域</span></template>
             <el-option label="全部" value="" />
             <el-option label="营销域" value="营销域" />
             <el-option label="供应链域" value="供应链域" />
           </el-select>
-          <el-select v-model="filters.metric_type" placeholder="指标类型" clearable size="large" class="filter-select">
+          <el-select v-model="filters.metric_type" placeholder="指标类型" clearable size="large" class="filter-select" @change="handleFilterChange">
             <template #prefix><span class="filter-tag">类</span></template>
             <el-option label="全部" value="" />
             <el-option label="原子指标" value="原子指标" />
             <el-option label="派生指标" value="派生指标" />
             <el-option label="复合指标" value="复合指标" />
           </el-select>
-          <el-select v-model="filters.status" placeholder="状态" clearable size="large" class="filter-select">
+          <el-select v-model="filters.status" placeholder="状态" clearable size="large" class="filter-select" @change="handleFilterChange">
             <template #prefix><span class="filter-tag">态</span></template>
             <el-option label="全部" value="" />
             <el-option label="在用" value="在用" />
@@ -55,6 +55,7 @@
             size="large"
             clearable
             class="search-input"
+            @input="handleKeywordSearch"
           >
             <template #prefix>
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -685,6 +686,22 @@ function formatTime(time) {
   const hour = String(d.getHours()).padStart(2, '0')
   const minute = String(d.getMinutes()).padStart(2, '0')
   return `${year}-${month}-${day} ${hour}:${minute}`
+}
+
+// 关键词搜索（带防抖）
+let keywordSearchTimer = null
+function handleKeywordSearch() {
+  clearTimeout(keywordSearchTimer)
+  keywordSearchTimer = setTimeout(() => {
+    pagination.value.page = 1
+    loadMetrics()
+  }, 300)
+}
+
+// 筛选条件变化时触发搜索
+function handleFilterChange() {
+  pagination.value.page = 1
+  loadMetrics()
 }
 
 async function loadMetrics() {
