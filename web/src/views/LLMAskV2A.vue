@@ -65,6 +65,7 @@
 
             <!-- 快捷提问卡片 -->
             <div class="suggestions-section">
+              <div class="suggestions-title">快捷提问：</div>
               <div class="suggestions-grid">
                 <div
                   v-for="suggestion in suggestions"
@@ -830,10 +831,10 @@ function scrollToBottom() {
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  padding: 180px 52px 32px;
+  padding: 140px 52px 32px;
   min-height: 100%;
   width: 100%;
-  max-width: 1755px;
+  max-width: 2100px;
   margin: 0 auto;
 }
 
@@ -857,7 +858,7 @@ function scrollToBottom() {
   margin-bottom: 42px;
   gap: 21px;
   width: 100%;
-  max-width: 1183px;
+  max-width: 1400px;
 }
 
 .avatar-wrapper {
@@ -900,7 +901,7 @@ function scrollToBottom() {
   justify-content: flex-start;
   margin-bottom: 32px;
   width: 100%;
-  max-width: 1183px;
+  max-width: 1400px;
 }
 
 .mode-tab {
@@ -939,7 +940,7 @@ function scrollToBottom() {
 /* 主输入框区域 - 初始化界面 */
 .init-input-section {
   width: 100%;
-  max-width: 1183px;
+  max-width: 1400px;
   margin-bottom: 32px;
 }
 
@@ -1618,10 +1619,19 @@ function scrollToBottom() {
   to { transform: rotate(360deg); }
 }
 
+/* 快捷提问标题 */
+.suggestions-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #2d3748;
+  margin-bottom: 16px;
+  text-align: left;
+}
+
 /* 快捷提问卡片 */
 .suggestions-section {
   width: 100%;
-  max-width: 1183px;
+  max-width: 1400px;
 }
 
 .suggestions-grid {
