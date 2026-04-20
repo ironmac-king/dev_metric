@@ -1,7 +1,7 @@
 <template>
   <div class="llm-ask-v2" :class="{ 'drawer-open': logicDrawerVisible }">
     <!-- 居中大容器 -->
-    <div class="main-container">
+    <div class="main-container" :class="{ 'fullscreen-result': hasResult }">
       <!-- 左侧对话区 -->
       <div class="chat-wrapper">
         <!-- 统一内容区 -->
@@ -128,13 +128,30 @@
                     <template v-else>
                       <div class="message-text" v-html="formatMessage(msg.content)"></div>
                       <div class="message-time">{{ msg.time }}</div>
-                      <div class="message-actions">
+                      <div v-if="msg.role === 'assistant'" class="message-actions">
                         <button class="action-btn" @click="copyMessage(msg)" title="复制">
                           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                             <rect x="4" y="4" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.2"/>
                             <path d="M2 8V2H8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
                           </svg>
                           复制
+                        </button>
+                        <button v-if="msg.interpretation" class="action-btn" @click="toggleInterpretation(idx)" :class="{ active: expandedInterpretation[idx] }" title="数据解读">
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                            <circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.2"/>
+                            <path d="M6 4V6M6 7.5V8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                          </svg>
+                          解读
+                        </button>
+                        <button class="action-btn" @click="rateMessage(msg, 'up')" :class="{ active: msg.rating === 'up' }" title="好评">
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                            <path d="M6 2L7.5 5H10L6 8L2 5H4.5L6 2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          </svg>
+                        </button>
+                        <button class="action-btn" @click="rateMessage(msg, 'down')" :class="{ active: msg.rating === 'down' }" title="差评">
+                          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                            <path d="M6 10L4.5 7H2L6 4L10 7H7.5L6 10Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                          </svg>
                         </button>
                       </div>
                     </template>
@@ -151,6 +168,22 @@
                       </div>
                     </div>
 
+                    <!-- 意图澄清卡片 (action_type=clarify) -->
+                    <ClarificationCard
+                      v-if="msg.action_type === 'clarify' && msg.clarify_options"
+                      :options="msg.clarify_options"
+                      @select="handleClarificationSelect"
+                      @confirm="handleClarificationConfirm"
+                    />
+
+                    <!-- 方案确认卡片 (action_type=confirm) -->
+                    <PlanConfirmCard
+                      v-if="msg.action_type === 'confirm' && msg.confirm_plan"
+                      :plan="msg.confirm_plan"
+                      @confirm="handlePlanConfirm"
+                      @modify="handlePlanModify"
+                    />
+
                     <!-- 泛指追问选项 -->
                     <div v-if="msg.needsClarification && msg.clarificationOptions" class="clarification-tags">
                       <span class="clarification-msg">{{ msg.clarificationMessage }}</span>
@@ -164,11 +197,19 @@
                       </button>
                     </div>
 
+                    <!-- 数据解读 -->
+                    <div v-if="msg.interpretation && expandedInterpretation[idx]" class="message-interpretation">
+                      {{ msg.interpretation }}
+                    </div>
+
                     <!-- 图表展示 -->
                     <ChartCard
                       v-if="msg.resultData && msg.resultData.length > 0"
                       :data="msg.resultData"
                       :height="260"
+                      :interpretation="msg.interpretation"
+                      :truncation-length="12"
+                      :metric-name="msg.metricName || ''"
                       class="message-chart"
                     />
 
@@ -274,6 +315,7 @@
         v-model="logicDrawerVisible"
         :steps="currentThinkingSteps"
         :sql="currentSql"
+        :steps-version="stepsVersion"
       />
     </div>
 
@@ -302,10 +344,12 @@
 </template>
 
 <script setup>
-import { ref, h, nextTick, computed, onMounted, onUnmounted } from 'vue'
+import { ref, h, nextTick, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { llmAskApi } from '../api/llmAsk'
 import LogicChainDrawer from '../components/ask/LogicChainDrawer.vue'
+import ClarificationCard from '../components/ask/ClarificationCard.vue'
+import PlanConfirmCard from '../components/ask/PlanConfirmCard.vue'
 import ChartCard from '../components/ask/ChartCard.vue'
 import AttributionPanel from '../components/ask/AttributionPanel.vue'
 import ReportPreview from '../components/ask/ReportPreview.vue'
@@ -316,7 +360,36 @@ const question = ref('')
 const activeMode = ref('query')
 const messages = ref([])
 const loading = ref(false)
+
+// Session ID for multi-turn conversation
+const sessionId = ref('')
+
+// 消息持久化到 localStorage
+const STORAGE_KEY = 'llm_ask_messages'
+const loadMessages = () => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (saved) {
+      messages.value = JSON.parse(saved)
+    }
+  } catch (e) {
+    console.error('Failed to load messages:', e)
+  }
+}
+const saveMessages = () => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.value))
+  } catch (e) {
+    console.error('Failed to save messages:', e)
+  }
+}
+// 监听消息变化自动保存
+watch(messages, saveMessages, { deep: true })
+
+// 是否有消息，用于全屏自适应
+const hasResult = computed(() => messages.value.length > 0)
 const expandedThinking = ref({})
+const expandedInterpretation = ref({})
 const messagesContainer = ref(null)
 const avatarContainer = ref(null)
 let avatarAnimation = null
@@ -328,6 +401,7 @@ const reportVisible = ref(false)
 
 // Current thinking steps during processing
 const currentThinkingSteps = ref([])
+const stepsVersion = ref(0)  // 强制触发 Vue 重渲染
 const currentSql = ref('')
 
 // Attribution data
@@ -380,6 +454,9 @@ const intelligentWomanData = {
 
 // 3D AI头像动画
 onMounted(() => {
+  // 每次进入都显示初始化页面，不加载历史记录
+  // loadMessages()
+
   if (!avatarContainer.value) return
 
   try {
@@ -458,7 +535,10 @@ async function handleSend() {
   let finalAnswer = ''
   let finalSql = ''
   let finalResultData = []
+  let finalMetricName = ''
   let finalSuggest = []
+  let finalClarificationOptions = []
+  let finalClarificationMessage = ''
   let thinkingStepsMap = new Map()
 
   try {
@@ -473,6 +553,7 @@ async function handleSend() {
       body: JSON.stringify({
         question: userQuestion,
         user_id: 'default',
+        session_id: sessionId.value || undefined,
       }),
     })
 
@@ -513,7 +594,9 @@ async function handleSend() {
                 content: '',
                 duration: ''
               })
-              updateThinkingSteps()
+              // 同步更新 + 触发 Vue 重渲染
+              currentThinkingSteps.value = Array.from(thinkingStepsMap.values())
+              stepsVersion.value++
             } else if (currentEvent === 'step_complete') {
               const stepName = data.step
               const existing = thinkingStepsMap.get(stepName) || { step: stepName }
@@ -522,7 +605,8 @@ async function handleSend() {
                 status: 'completed',
                 duration: data.duration_ms ? `${data.duration_ms}ms` : ''
               })
-              updateThinkingSteps()
+              currentThinkingSteps.value = Array.from(thinkingStepsMap.values())
+              stepsVersion.value++
             } else if (currentEvent === 'thinking') {
               const stepName = data.step
               const existing = thinkingStepsMap.get(stepName) || { step: stepName }
@@ -530,15 +614,24 @@ async function handleSend() {
                 ...existing,
                 content: data.content
               })
-              updateThinkingSteps()
+              currentThinkingSteps.value = Array.from(thinkingStepsMap.values())
+              stepsVersion.value++
             } else if (currentEvent === 'sql_ready') {
               finalSql = data.sql
               currentSql.value = data.sql
             } else if (currentEvent === 'result_ready') {
               finalResultData = data.result_data || []
+              finalMetricName = data.metric_name || ''
             } else if (currentEvent === 'answer_ready') {
               finalAnswer = data.answer
               finalSuggest = data.suggestions || []
+              finalClarificationOptions = data.clarification_options || []
+              finalClarificationMessage = data.clarification_message || ''
+            } else if (currentEvent === 'connected') {
+              // 保存 session_id 用于多轮对话
+              if (data.session_id) {
+                sessionId.value = data.session_id
+              }
             } else if (currentEvent === 'done') {
               // 完成
             } else if (currentEvent === 'error') {
@@ -559,19 +652,43 @@ async function handleSend() {
       duration: s.duration
     }))
 
+    // 当有结果数据但没有文字回答时，生成默认回答
+    let displayAnswer = finalAnswer
+    if (!displayAnswer && finalResultData && finalResultData.length > 0) {
+      const firstRow = finalResultData[0]
+      const keys = Object.keys(firstRow)
+      if (keys.length === 1) {
+        const val = firstRow[keys[0]]
+        if (!isNaN(parseFloat(val))) {
+          const num = parseFloat(val)
+          let formatted = num.toLocaleString()
+          if (num >= 100000000) formatted = (num / 100000000).toFixed(2) + '亿'
+          else if (num >= 10000) formatted = (num / 10000).toFixed(2) + '万'
+          displayAnswer = `查询结果：${formatted}`
+        }
+      }
+    }
+    // 如果有图表数据，不显示文字回答（只通过图表卡片展示）
+    const finalContent = (finalResultData && finalResultData.length > 0) ? '' : (displayAnswer || '抱歉，我没有找到相关数据。')
+
     messages.value.push({
       role: 'assistant',
-      content: finalAnswer || '抱歉，我没有找到相关数据。',
+      content: finalContent,
       sql: finalSql,
       thinkingSteps: finalSteps,
       resultData: finalResultData,
+      metricName: finalMetricName,
       suggest: finalSuggest,
+      needsClarification: finalClarificationOptions.length > 0,
+      clarificationOptions: finalClarificationOptions,
+      clarificationMessage: finalClarificationMessage,
       time: getCurrentTime()
     })
 
     expandedThinking.value[messages.value.length - 1] = false
 
     currentThinkingSteps.value = finalSteps
+    stepsVersion.value++
     currentSql.value = finalSql
 
   } catch (e) {
@@ -587,7 +704,7 @@ async function handleSend() {
   }
 }
 
-function updateThinkingSteps() {
+async function updateThinkingSteps() {
   const newSteps = Array.from(thinkingStepsMap.values()).map(s => ({
     step: s.step,
     status: s.status,
@@ -595,6 +712,7 @@ function updateThinkingSteps() {
     duration: s.duration
   }))
   currentThinkingSteps.value = newSteps
+  await nextTick()
 }
 
 function prepareAttributionData(data) {
@@ -673,9 +791,58 @@ function toggleThinking(idx) {
   expandedThinking.value[idx] = !expandedThinking.value[idx]
 }
 
+function toggleInterpretation(idx) {
+  expandedInterpretation.value[idx] = !expandedInterpretation.value[idx]
+}
+
+function rateMessage(msg, rating) {
+  if (msg.rating === rating) {
+    msg.rating = null
+  } else {
+    msg.rating = rating
+  }
+}
+
 function selectClarification(option) {
   question.value = option.value
   handleSend()
+}
+
+// ClarificationCard 选项处理
+function handleClarificationSelect(option) {
+  // 选中高亮，前端状态管理
+  console.log('Clarification selected:', option)
+}
+
+// ClarificationCard 确认处理
+function handleClarificationConfirm(option) {
+  // 用户确认后，发送选中的选项
+  question.value = option.label
+  handleSend()
+}
+
+// PlanConfirmCard 确认处理
+function handlePlanConfirm(plan) {
+  // 用户确认方案，开始分析
+  loading.value = true
+  // 发送确认请求
+  llmAskApi.confirmPlan(plan).then(res => {
+    // 处理返回结果
+    console.log('Plan confirmed:', res)
+  }).finally(() => {
+    loading.value = false
+  })
+}
+
+// PlanConfirmCard 修改处理
+function handlePlanModify(modifiedPlan) {
+  // 用户修改了方案，用新方案重新查询
+  loading.value = true
+  llmAskApi.modifyPlan(modifiedPlan).then(res => {
+    console.log('Plan modified:', res)
+  }).finally(() => {
+    loading.value = false
+  })
 }
 
 function selectSuggestion(s) {
@@ -755,18 +922,26 @@ function scrollToBottom() {
   transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* 居中大容器 */
+/* 居中大容器 - max-width: 1200px */
 .main-container {
   display: flex;
-  align-items: flex-start;
+  flex-direction: row;
+  align-items: stretch;
   justify-content: center;
-  gap: 32px;
+  gap: 24px;
   width: 100%;
-  max-width: 5000px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 52px 32px;
-  height: 100vh;
+  padding: 24px;
+  height: calc(100vh - 40px);
   box-sizing: border-box;
+  transition: max-width 0.3s ease;
+}
+
+/* 结果全屏模式 - 自适应全屏 */
+.main-container.fullscreen-result {
+  max-width: 100%;
+  padding: 16px 24px;
 }
 
 /* 统一内容区 */
@@ -775,53 +950,33 @@ function scrollToBottom() {
   display: flex;
   flex-direction: column;
   width: 100%;
-}
-
-.chat-wrapper {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  background: transparent;
-  border-radius: 16px;
-  box-shadow: none;
-  border: none;
+  min-height: 0;
   overflow: hidden;
-  height: calc(100vh - 80px);
 }
 
-/* 紫色装饰光晕 */
 .llm-ask-v2::after {
   content: '';
   position: fixed;
   width: 600px;
   height: 600px;
-  background: radial-gradient(circle, rgba(141, 123, 255, 0.15) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.08) 0%, transparent 70%);
   bottom: -100px;
   left: -100px;
   pointer-events: none;
   z-index: 0;
 }
 
-/* 统一内容区 */
-.content-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
 .chat-wrapper {
   flex: 1;
   display: flex;
   flex-direction: column;
-  width: 100%;
+  min-width: 0;
+  min-height: 0;
   background: transparent;
   border-radius: 16px;
   box-shadow: none;
   border: none;
   overflow: hidden;
-  height: calc(100vh - 80px);
 }
 
 /* 初始化界面 */
@@ -1042,6 +1197,7 @@ function scrollToBottom() {
 /* 消息区域 */
 .messages-container {
   flex: 1;
+  min-height: 0;
   width: 100%;
   overflow-y: auto;
   padding: 26px 21px;
@@ -1118,7 +1274,7 @@ function scrollToBottom() {
   min-width: 234px;
   background: #fff;
   border-radius: 40px;
-  padding: 40px 52px;
+  padding: 20px 28px;
   box-shadow: 0 2px 12px rgba(99, 102, 241, 0.06), 0 1px 4px rgba(99, 102, 241, 0.03);
   border: 1px solid rgba(99, 102, 241, 0.06);
   position: relative;
@@ -1128,6 +1284,13 @@ function scrollToBottom() {
 .message-content:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 16px rgba(99, 102, 241, 0.08), 0 2px 4px rgba(99, 102, 241, 0.04);
+}
+
+/* AI消息气泡宽度撑满 */
+.message-item.assistant .message-content {
+  max-width: 100%;
+  width: 100%;
+  flex: 1;
 }
 
 /* AI消息气泡小三角 */
@@ -1165,8 +1328,8 @@ function scrollToBottom() {
 }
 
 .message-text {
-  font-size: 26px;
-  line-height: 1.8;
+  font-size: 14px;
+  line-height: 1.7;
   color: #2d3748;
 }
 
@@ -1282,6 +1445,11 @@ function scrollToBottom() {
   color: #fff;
 }
 
+.action-btn.active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #6366F1;
+}
+
 /* 异常标注 */
 .anomaly-list {
   margin-top: 10px;
@@ -1330,6 +1498,18 @@ function scrollToBottom() {
   background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
   color: #fff;
   border-color: transparent;
+}
+
+/* 消息数据解读 */
+.message-interpretation {
+  margin-top: 10px;
+  padding: 10px 14px;
+  background: #F8FAFF;
+  border: 1px solid #E0E7FF;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #374151;
+  line-height: 1.6;
 }
 
 /* SQL块 */
@@ -1451,10 +1631,10 @@ function scrollToBottom() {
 }
 
 .suggest-btn {
-  padding: 6px 12px;
-  background: rgba(99, 102, 241, 0.06);
-  border: 1px solid rgba(99, 102, 241, 0.1);
-  border-radius: 8px;
+  padding: 6px 14px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: 20px;
   font-size: 12px;
   color: #6366F1;
   cursor: pointer;
@@ -1462,13 +1642,16 @@ function scrollToBottom() {
 }
 
 .suggest-btn:hover {
-  background: rgba(99, 102, 241, 0.12);
-  border-color: rgba(99, 102, 241, 0.2);
+  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+  color: #fff;
+  border-color: transparent;
 }
 
 /* 图表卡片 */
 .message-chart {
   margin-top: 12px;
+  width: 100%;
+  flex: 1;
 }
 
 /* 一键归因按钮 */
