@@ -20,8 +20,33 @@ from datetime import datetime
 from ai.config.logging_config import get_logger
 from .schema import V2State, MQLSchema, push_history
 from .observability import get_tracer, create_trace_context
+from ai.client.metric_client import MetricClient
 
 logger = get_logger("ai.llm_v2.graph")
+
+
+async def _preload_metric_info(state: V2State) -> None:
+    """
+    预加载指标信息到 context_cache（优化：提前调用 MetricClient）
+
+    在 context_enhancer 阶段提前获取 starrocks_sql 等关键字段，
+    存入 state.context_cache["metric_info_cache"]，
+    供后续 mql_generator / sql_generator / mql_semantic_validator 复用，
+    避免重复的 HTTP 调用。
+    """
+    try:
+        metric = state.inherited_mql.metric if state.inherited_mql else None
+        if not metric or not metric.name:
+            return
+
+        client = MetricClient()
+        # 通过名称查找，获取完整的 starrocks_sql 等信息
+        metric_info = client.get_metric_by_name(metric.name)
+        if metric_info:
+            state.context_cache["metric_info_cache"] = metric_info
+            logger.info(f"[_preload_metric_info] 预加载指标: name={metric.name}, code={metric_info.get('metric_code')}")
+    except Exception as e:
+        logger.warning(f"[_preload_metric_info] 预加载失败: {e}")
 
 async def intent_router(state: V2State):
     """
@@ -145,6 +170,9 @@ async def context_enhancer(state: V2State) -> V2State:
             state.context_cache["similar_cases"] = rag_result["similar_cases"]
         if rag_result.get("suggested_mql"):
             state.context_cache["suggested_mql"] = rag_result["suggested_mql"]
+
+        # 预加载 metric_info（优化：提前调用 MetricClient，后续节点可复用缓存）
+        await _preload_metric_info(state)
 
         state.add_thinking_step(
             "context_enhancer",

@@ -78,11 +78,9 @@ class MQLSemanticValidator:
         """
         验证 MQL 语义
 
-        Args:
-            mql: MQLSchema 实例
-
-        Returns:
-            (is_valid, error_message)
+        快速路径：如果指标和占比分子/分母都已填充 starrocks_sql，
+        则跳过 MetricClient HTTP 调用，直接做规则验证。
+        仅在 starrocks_sql 为空时才调用 API 获取。
         """
         if not mql:
             return False, "MQL 为空"
@@ -91,25 +89,40 @@ class MQLSemanticValidator:
         if mql.intent in [MQLIntent.GREETING, MQLIntent.THANKS, MQLIntent.BYE]:
             return True, ""
 
-        # 验证指标
-        if mql.metric:
+        # 快速路径：检查是否需要 API 调用
+        # 如果 starrocks_sql 已经填充（来自缓存或继承上下文），跳过 HTTP 调用
+        needs_metric_api = True
+        if mql.metric and mql.metric.starrocks_sql:
+            # starrocks_sql 已填充，跳过 metric API 调用
+            logger.info(f"[MQLSemanticValidator] 快速路径: metric.starrocks_sql 已填充，跳过 API")
+            needs_metric_api = False
+            # 仍做基本规则检查
+            if not mql.metric.starrocks_sql.strip().upper().startswith("SELECT"):
+                return False, "starrocks_sql 必须以 SELECT 开头"
+
+        # 快速路径：检查占比指标
+        needs_molecule_api = True
+        needs_denominator_api = True
+        if mql.molecule_metric and mql.molecule_metric.starrocks_sql:
+            needs_molecule_api = False
+        if mql.denominator_metric and mql.denominator_metric.starrocks_sql:
+            needs_denominator_api = False
+
+        # 需要时再调用 API
+        if mql.metric and needs_metric_api:
             is_valid, error = await self._validate_metric(mql.metric)
             if not is_valid:
                 return False, f"指标验证失败: {error}"
 
-        # 验证占比分子指标
-        if mql.molecule_metric:
+        if mql.molecule_metric and needs_molecule_api:
             is_valid, error = await self._validate_metric(mql.molecule_metric)
             if not is_valid:
                 logger.warning(f"molecule_metric 验证失败，尝试用 name 查找: {error}")
-                # 继续，不阻断流程
 
-        # 验证占比分母指标
-        if mql.denominator_metric:
+        if mql.denominator_metric and needs_denominator_api:
             is_valid, error = await self._validate_metric(mql.denominator_metric)
             if not is_valid:
                 logger.warning(f"denominator_metric 验证失败，尝试用 name 查找: {error}")
-                # 继续，不阻断流程
 
         # 验证维度
         for dim in mql.dimensions:

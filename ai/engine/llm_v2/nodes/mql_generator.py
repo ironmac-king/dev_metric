@@ -13,6 +13,7 @@ from ai.config.logging_config import get_logger
 from ai.engine.prompt_manager import get_prompt_manager
 from ai.engine.llm import get_llm_engine
 from ..schema import MQLSchema, MQLIntent, MQLMetric, MQLDimension, TimeRange, TimeType
+from ..cache import get_history_reuse_cache
 
 logger = get_logger("ai.llm_v2.mql_generator")
 
@@ -48,6 +49,23 @@ class MQLGenerator:
         logger.info(f"[MQLGenerator] 生成 MQL: {question[:50]}...")
 
         try:
+            # 0. 查历史缓存（优化：相似问题直接复用，跳过 LLM 调用）
+            history_cache = get_history_reuse_cache()
+            cached = history_cache.find_similar(question, threshold=0.75)
+            if cached:
+                cached_mql_dict = cached.get("mql")
+                if cached_mql_dict:
+                    try:
+                        cached_mql = MQLSchema.from_dict(cached_mql_dict)
+                        logger.info(f"[MQLGenerator] 历史缓存命中，跳过 LLM 调用: {question[:30]}...")
+                        # 继承上下文
+                        if inherited_mql:
+                            cached_mql.session_id = inherited_mql.session_id
+                            cached_mql.parent_state_id = inherited_mql.session_id
+                        return cached_mql
+                    except Exception as e:
+                        logger.warning(f"[MQLGenerator] 缓存 MQL 解析失败: {e}，继续 LLM 生成")
+
             # 1. 构建 prompt
             prompt = self._build_prompt(question, rag_context, inherited_mql)
 
@@ -72,6 +90,13 @@ class MQLGenerator:
             self._fill_defaults(mql, inherited_mql)
 
             logger.info(f"[MQLGenerator] MQL 生成成功: intent={mql.intent.value}")
+
+            # 6. 写入历史缓存
+            try:
+                history_cache.add(question, mql.to_dict())
+            except Exception as e:
+                logger.warning(f"[MQLGenerator] 历史缓存写入失败: {e}")
+
             return mql
 
         except json.JSONDecodeError as e:
