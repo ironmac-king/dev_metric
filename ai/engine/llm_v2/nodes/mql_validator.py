@@ -123,6 +123,9 @@ class MQLSemanticValidator:
             if not is_valid:
                 return False, f"时间验证失败: {error}"
 
+        # 验证并清理无效 filters（字段必须是维度配置表中的列）
+        self._validate_filters(mql)
+
         return True, ""
 
     async def _validate_metric(self, metric: MQLMetric) -> Tuple[bool, str]:
@@ -313,3 +316,89 @@ class MQLSemanticValidator:
         except Exception as e:
             logger.warning(f"获取指标信息失败: {e}")
             return None
+
+    def _validate_filters(self, mql: MQLSchema):
+        """
+        验证并清理无效 filters
+
+        规则：
+        1. filter 字段必须是维度配置表中的有效列名
+        2. filter 值必须在原始问题中明确提到（且前面有维度关键词：渠道/店铺/品牌/平台/国家等）
+        3. 如果 filter 的值只是指标名的一部分，不认为是过滤值
+        """
+        if not mql.filters:
+            return
+
+        # 获取原始问题文本
+        original_question = mql.original_question or ""
+
+        # 有效字段列表（从维度配置表获取）
+        valid_columns = self._get_valid_filter_columns()
+        valid_columns_upper = {c.upper() for c in valid_columns}
+
+        # 维度关键词（filter 值必须紧跟这些词后面，才认为用户明确指定了过滤）
+        dimension_keywords = ["渠道", "店铺", "品牌", "平台", "国家", "地区", "区域", "站点", "品类", "类目", "产品", "商品"]
+
+        original_count = len(mql.filters)
+        valid_filters = []
+        for f in mql.filters:
+            if not f.field:
+                continue
+
+            # 规则1：检查字段是否有效（忽略大小写）
+            if f.field.upper() not in valid_columns_upper:
+                logger.warning(f"[_validate_filters] 过滤字段不在维度配置表中，已丢弃: field={f.field}, value={f.value}")
+                continue
+
+            # 规则2：检查 filter 值是否在原始问题中明确提到（且紧跟维度关键词）
+            if f.value:
+                value_str = str(f.value).strip()
+                if value_str:
+                    # 检查是否紧跟维度关键词（说明用户明确指定了过滤）
+                    # 例如："自然渠道" → 值"自然"前面有"渠道" → 有效
+                    # 例如："自然订单量" → 值"自然"前面没有维度关键词 → 无效（是指标名的一部分）
+                    is_valid_filter = False
+                    for kw in dimension_keywords:
+                        # 检查 value_str 是否紧跟在 kw 后面（中间无其他字符）
+                        pattern = kw + value_str
+                        if pattern in original_question:
+                            is_valid_filter = True
+                            break
+
+                    if not is_valid_filter:
+                        logger.warning(f"[_validate_filters] filter值不是紧跟维度关键词，可能是指标名的一部分，已丢弃: field={f.field}, value={f.value}, question={original_question}")
+                        continue
+
+            valid_filters.append(f)
+
+        mql.filters = valid_filters
+        if len(mql.filters) < original_count:
+            logger.info(f"[_validate_filters] 过滤条件清理完成: {original_count} -> {len(mql.filters)}")
+
+    def _get_valid_filter_columns(self) -> set:
+        """
+        获取有效的过滤字段列表
+
+        从 SQLGeneratorNode 的维度映射和维度配置表获取有效列名
+        """
+        # 从 SQLGeneratorNode 获取基础列名
+        from ..nodes.sql_generator import SQLGeneratorNode
+        gen = SQLGeneratorNode()
+        valid_columns = set(gen.DIMENSION_COLUMN_MAP.values())
+
+        # 补充时间相关列
+        valid_columns.update({"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS"})
+
+        # 尝试从维度配置表获取更多有效列
+        try:
+            from ai.client.metric_client import MetricClient
+            client = MetricClient()
+            configs = client.get_dimension_configs()
+            for cfg in configs:
+                col = cfg.get("column_name")
+                if col:
+                    valid_columns.add(col)
+        except Exception as e:
+            logger.warning(f"[_get_valid_filter_columns] 获取维度配置失败: {e}")
+
+        return valid_columns

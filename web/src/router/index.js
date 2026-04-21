@@ -30,9 +30,9 @@ const routes = [
         component: () => import('../views/Alerts.vue')
       },
       {
-        path: 'ask',
-        name: 'Ask',
-        component: () => import('../views/Ask.vue')
+        path: 'llm-ask',
+        name: 'LLMAsk',
+        component: () => import('../views/LLMAsk.vue')
       },
       {
         path: 'ask-analysis',
@@ -48,6 +48,11 @@ const routes = [
         path: 'ai-assistant',
         name: 'AIAssistant',
         component: () => import('../views/components/AskDashboard.vue')
+      },
+      {
+        path: 'llm-ask-v2',
+        name: 'LLMAskV2',
+        component: () => import('../views/LLMAskV2A.vue')
       },
       {
         path: 'llm-config',

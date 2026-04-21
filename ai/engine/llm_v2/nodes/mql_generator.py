@@ -7,6 +7,7 @@
 - 应用 RAG 上下文
 """
 import json
+from string import Template
 from typing import Dict, Any, List, Optional
 from ai.config.logging_config import get_logger
 from ai.engine.prompt_manager import get_prompt_manager
@@ -81,6 +82,61 @@ class MQLGenerator:
             logger.error(f"[MQLGenerator] 错误: {e}\n{traceback.format_exc()}")
             return None
 
+    def _get_dimension_keywords_list(self) -> list:
+        """从 dimension-type-mappings API 获取维度关键词列表（含同义词扩展）"""
+        try:
+            from ai.client.metric_client import MetricClient
+            client = MetricClient()
+            mappings = client.get_dimension_type_mappings()
+            keywords = set()
+            for m in mappings:
+                dim_type = m.get("dimension_type", "")
+                if dim_type and len(dim_type) < 20:
+                    keywords.add(dim_type)
+            # 添加同义词扩展（从 business_terms）
+            synonym_map, _ = self._load_business_terms()
+            for syn, canonical in synonym_map.items():
+                if syn and canonical and len(syn) < 10:
+                    keywords.add(syn)
+            return list(keywords) if keywords else ["渠道", "店铺", "品牌", "平台", "国家", "地区", "品类", "商品"]
+        except Exception as e:
+            logger.warning(f"[_get_dimension_keywords_list] 获取维度关键词失败: {e}")
+            return ["渠道", "店铺", "品牌", "平台", "国家", "地区", "品类", "商品"]
+
+    def _get_dimension_keywords_str(self) -> str:
+        """获取维度关键词字符串（供 prompt 使用）"""
+        return "、".join(self._get_dimension_keywords_list())
+
+    def _load_business_terms(self) -> tuple:
+        """
+        从 business_terms 表加载同义词映射和有效值集合
+        返回: (synonym_map, valid_values_set)
+        synonym_map: Dict[str, str] = {用户词: 标准值}
+        valid_values: set = 所有有效的维度值集合
+        """
+        try:
+            from ai.client.metric_client import MetricClient
+            client = MetricClient()
+            terms = client.get_business_terms()
+            synonym_map = {}   # 用户词 -> 标准值
+            valid_values = set()  # 所有有效的维度值
+            for t in terms:
+                canonical = t.get("dimension_value", "")
+                synonyms = t.get("synonyms") or []
+                # 处理 PostgreSQL 数组格式字符串
+                if isinstance(synonyms, str):
+                    synonyms = [s.strip().strip('"') for s in synonyms.strip("{}").split(",") if s.strip()]
+                if canonical:
+                    valid_values.add(canonical)
+                    synonym_map[canonical] = canonical
+                for syn in synonyms:
+                    valid_values.add(syn)
+                    synonym_map[syn] = canonical
+            return synonym_map, valid_values
+        except Exception as e:
+            logger.warning(f"[_load_business_terms] 加载业务术语失败: {e}")
+            return {}, set()
+
     def _build_prompt(
         self,
         question: str,
@@ -124,11 +180,35 @@ class MQLGenerator:
 
         context_str = "\n".join(context_parts) if context_parts else "（无历史上下文）"
 
-        # 填充 prompt
-        return prompt_template.format(
+        # 动态获取中文维度关键词
+        dim_keywords_str = self._get_dimension_keywords_str()
+
+        # 填充 prompt - 使用自定义安全格式化，只替换指定的占位符
+        # 注意：不能用 str.format() 因为 prompt 中有 JSON 示例如 {"field": ...}
+        # Python 会把 {field} 当作占位符导致 KeyError
+        return self._safe_format(
+            prompt_template,
             question=question,
             context=context_str,
+            dimension_keywords=dim_keywords_str,
         )
+
+    def _safe_format(self, template: str, **kwargs) -> str:
+        """安全的字符串格式化，只替换指定的占位符
+
+        Args:
+            template: 包含 {question}, {context}, {dimension_keywords} 的模板
+            **kwargs: 要替换的值
+
+        Returns:
+            格式化后的字符串
+        """
+        # 只替换我们知道的占位符，不处理其他 {xxx}
+        for key, value in kwargs.items():
+            placeholder = "{" + key + "}"
+            if placeholder in template:
+                template = template.replace(placeholder, str(value))
+        return template
 
     def _get_dimension_values_context(self) -> str:
         """从 dim_value_mapping 获取维度值上下文"""
@@ -305,15 +385,55 @@ class MQLGenerator:
                 value=dim_data.get("value"),
             ))
 
-        # 筛选
+        # 筛选 - 只有用户明确指定时才添加
+        # 验证规则：filter 值必须紧跟维度关键词（动态从 API 获取）
+        # 允许两种顺序：关键词+值（如"渠道自然"）或 值+关键词（如"自然渠道"）
+        dimension_keywords = self._get_dimension_keywords_list()
+        synonym_map, valid_values = self._load_business_terms()
+        metric_name = mql.metric.name if mql.metric else ""
+
         for filter_data in result.get("filters", []):
             from ..schema import MQLFilter, OperatorType
             try:
-                mql.filters.append(MQLFilter(
-                    field=filter_data.get("field", ""),
-                    operator=OperatorType(filter_data.get("operator", "eq")),
-                    value=filter_data.get("value"),
-                ))
+                filter_value = filter_data.get("value")
+                field = filter_data.get("field", "")
+
+                # 验证 filter 值是否在原始问题中紧跟维度关键词出现
+                is_valid_filter = False
+                if filter_value:
+                    value_str = str(filter_value).strip()
+                    # 1. 标准化：同义词映射到标准值
+                    normalized_value = synonym_map.get(value_str, value_str)
+
+                    for kw in dimension_keywords:
+                        # 检查两种顺序：kw+value 或 value+kw（使用原值和标准化值）
+                        patterns = [
+                            kw + value_str, value_str + kw,
+                            kw + normalized_value, normalized_value + kw
+                        ]
+                        if any(p in question for p in patterns):
+                            is_valid_filter = True
+                            logger.info(f"[_parse_mql] 验证通过: filter field={field}, value={filter_value} 紧跟维度关键词'{kw}'")
+                            break
+
+                    # 2. 值验证：确保是有效的业务术语
+                    if is_valid_filter and value_str:
+                        if value_str not in valid_values and normalized_value not in valid_values:
+                            logger.warning(f"[_parse_mql] filter值无效（不在business_terms中）: field={field}, value={value_str}")
+                            is_valid_filter = False
+                        # 3. 排除指标名一部分的情况
+                        elif value_str in metric_name or normalized_value in metric_name:
+                            logger.warning(f"[_parse_mql] filter值是指标名一部分: field={field}, value={value_str}, metric_name={metric_name}")
+                            is_valid_filter = False
+
+                if is_valid_filter:
+                    mql.filters.append(MQLFilter(
+                        field=field,
+                        operator=OperatorType(filter_data.get("operator", "eq")),
+                        value=filter_value,
+                    ))
+                else:
+                    logger.warning(f"[_parse_mql] 丢弃无效 filter: field={field}, value={filter_value}, question={question[:50]}...")
             except ValueError:
                 pass
 
@@ -492,6 +612,20 @@ class MQLGenerator:
 2. 只输出 JSON，不要有其他内容
 3. confidence 低于 0.4 时，intent 使用 "unknown"
 4. 指标 code/name 从指标库选择，不要瞎编
+
+【Filter 生成规则】（重要！）
+1. 只在用户**明确指定**维度过滤时才生成 filter
+2. "明确指定"定义：用户问题中出现了"维度关键词+具体值"模式
+   - ✓ 正确："自然渠道的转化率" → 生成 filter {"field": "FCHANNEL", "value": "自然"}
+   - ✗ 错误："自然订单量是多少" → 不生成 filter（"自然"是指标名一部分，不是渠道值）
+   - ✗ 错误："广告花费多少" → 不生成 filter（"广告"是指标名，不是过滤值）
+3. filter 值不能是指标名的一部分
+4. 维度关键词：{dimension_keywords}
+
+【反面示例】
+- 问题："自然订单量是多少" → filters: []（不生成！自然是指标名"自然订单量"的一部分）
+- 问题："广告花费多少" → filters: []（不生成！广告是指标名，不是过滤值）
+- 问题："自然渠道的转化率" → filters: [{"field": "FCHANNEL", "value": "自然"}]
 
 【上下文】
 {context}

@@ -54,13 +54,104 @@ class MetricIndex:
             self._metric_client = get_metric_client()
         return self._metric_client
 
+    def _remove_time_expressions(self, text: str) -> str:
+        """
+        移除时间相关表达，保留指标相关词
+
+        例如：
+        - "上个月未税收入是多少" → "未税收入是多少"
+        - "2026年3月份销售额" → "销售额"
+        """
+        # 时间词列表（按长度降序排列，避免部分匹配问题）
+        time_patterns = [
+            # 年月表达
+            "2026年", "2025年", "2024年",
+            # 月份表达
+            "本月", "上月", "下月",
+            # 带"个"的月份表达（需按长度降序，"上个月"要在"上月"前面）
+            "上个月", "本月",
+            # 近N天
+            "近7天", "近30天", "近15天", "近10天", "近60天",
+            # 周相关
+            "上周", "本周", "下周",
+            # 日相关
+            "昨天", "今天", "明天",
+            # 其他时间词
+            "月份", "年度", "季度",
+            # 日期前缀
+            "2026-", "2025-", "2024-",
+        ]
+
+        result = text
+        for pattern in time_patterns:
+            result = result.replace(pattern, "")
+
+        # 清理多余空格
+        result = " ".join(result.split())
+        return result
+
+    def _apply_synonym_replacement(self, text: str) -> str:
+        """
+        应用同义词替换，将用户表达转换为标准指标名
+
+        策略：
+        1. 优先匹配更长的同义词，避免部分匹配问题
+        2. 检查标准词是否已在文本中，避免对已替换的词再次替换
+
+        例如：
+        - "不含税收入" → "未税收入"
+        - "净收入" → "未税收入"
+        """
+        from ..config_loader import get_config_loader
+        config_loader = get_config_loader()
+        business_terms = config_loader.get_config().business_terms
+
+        # 调试日志：打印 business_terms 前 20 个 key 及其长度
+        logger.info(f"[MetricIndex] business_terms 共 {len(business_terms)} 条")
+        if business_terms:
+            sample_keys = list(business_terms.keys())[:10]
+            logger.info(f"[MetricIndex] business_terms 样本 keys: {sample_keys}")
+
+        # 按长度降序排列同义词，优先匹配更长的词
+        sorted_terms = sorted(business_terms.items(), key=lambda x: len(x[0]), reverse=True)
+
+        # 调试日志：打印排序后的前 10 个
+        logger.info(f"[MetricIndex] 排序后同义词（前10个）:")
+        for i, (synonym, standard) in enumerate(sorted_terms[:10]):
+            found = "✓" if synonym in text else "✗"
+            logger.info(f"  [{i}] len={len(synonym)} '{synonym}' -> '{standard}' [in text: {found}]")
+
+        result = text
+        replaced = False
+        for synonym, standard in sorted_terms:
+            if synonym in result:
+                # 重要：如果标准词已经在文本中存在，跳过此次替换（避免链式反应）
+                # 例如：退款数量 → 退款金额数量，但"退款金额"已存在则不再替换
+                if standard in result:
+                    logger.info(f"[MetricIndex] 跳过同义词替换: '{synonym}' -> '{standard}'，因为标准词已在文本中")
+                    continue
+                result = result.replace(synonym, standard)
+                logger.info(f"[MetricIndex] 同义词替换: '{synonym}' -> '{standard}'")
+                replaced = True
+                break  # 只替换第一个匹配的同义词（最长匹配）
+
+        if not replaced:
+            logger.info(f"[MetricIndex] 无同义词可替换")
+
+        return result
+
     async def search_metric(
         self,
         query: str,
         top_k: int = 5,
     ) -> List[SearchResult]:
         """
-        搜索最相关的指标
+        搜索最相关的指标（分阶段检索策略）
+
+        Stage 1: 完整问句搜索
+        Stage 2: 移除时间词后搜索
+        Stage 3: 同义词替换后再搜索
+        Stage 4: get_metric_by_name 模糊匹配兜底
 
         Args:
             query: 用户查询（自然语言）
@@ -73,24 +164,68 @@ class MetricIndex:
 
         metric_client = self._get_metric_client()
 
-        # Step 1: 关键词精确匹配
+        # 初始化已存在的结果集合（用于去重）
+        existing_codes: set = set()
+
+        # ===== Stage 1: 完整问句搜索 =====
         search_results = metric_client.search_metrics(query)
+        logger.info(f"[MetricIndex] Stage1 完整问句搜索: {len(search_results)} 个结果")
+        existing_codes = {m.get("metric_code") for m in search_results}
 
-        # Step 2: TODO: 语义向量搜索
-        # 如果关键词匹配结果不够，进行语义搜索
-        # embedding = await self._get_embedding(query)
-        # vector_results = await self._search_by_vector(embedding, top_k)
+        # ===== Stage 2: 移除时间词后搜索 =====
+        if len(search_results) < top_k:
+            query_no_time = self._remove_time_expressions(query)
+            if query_no_time and query_no_time != query:
+                logger.info(f"[MetricIndex] Stage2 移除时间词: '{query}' -> '{query_no_time}'")
+                results2 = metric_client.search_metrics(query_no_time)
+                logger.info(f"[MetricIndex] Stage2 移除时间词搜索: {len(results2)} 个结果")
 
-        # Step 3: 合并结果
+                # 合并结果（去重）
+                for m in results2:
+                    if m.get("metric_code") not in existing_codes:
+                        search_results.append(m)
+                        existing_codes.add(m.get("metric_code"))
+
+        # ===== Stage 3: 同义词替换后再搜索 =====
+        if len(search_results) < top_k:
+            # 先对移除时间词后的结果进行同义词替换
+            query_no_time = self._remove_time_expressions(query)
+            query_synonym = self._apply_synonym_replacement(query_no_time if query_no_time else query)
+            if query_synonym and query_synonym != query_no_time:
+                logger.info(f"[MetricIndex] Stage3 同义词替换: '{query_no_time}' -> '{query_synonym}'")
+                results3 = metric_client.search_metrics(query_synonym)
+                logger.info(f"[MetricIndex] Stage3 同义词替换搜索: {len(results3)} 个结果")
+
+                # 合并结果（去重）
+                for m in results3:
+                    if m.get("metric_code") not in existing_codes:
+                        search_results.append(m)
+                        existing_codes.add(m.get("metric_code"))
+
+        # ===== Stage 4: get_metric_by_name 模糊匹配兜底 =====
+        if len(search_results) < top_k:
+            logger.info(f"[MetricIndex] Stage4 开始模糊匹配兜底, 当前已有 {len(search_results)} 个结果")
+            fuzzy_result = metric_client.get_metric_by_name(query)
+            if fuzzy_result and fuzzy_result.get("metric_code") not in existing_codes:
+                logger.info(f"[MetricIndex] Stage4 模糊匹配兜底: {fuzzy_result.get('metric_code')}")
+                search_results.append(fuzzy_result)
+
+        # 限制返回数量
+        search_results = search_results[:top_k]
+
+        # 转换为 SearchResult
         results = []
-        for m in search_results[:top_k]:
+        for m in search_results:
             metric_info = self._convert_to_metric_info(m)
             results.append(SearchResult(
                 metric_info=metric_info,
                 similarity=1.0,  # 精确匹配为 1.0
             ))
 
-        logger.info(f"[MetricIndex] 搜索结果: {len(results)} 个指标")
+        logger.info(f"[MetricIndex] 最终搜索结果: {len(results)} 个指标")
+        for r in results:
+            logger.info(f"  - {r.metric_info.name} ({r.metric_info.metric_code})")
+
         return results
 
     def _convert_to_metric_info(self, metric_dict: Dict[str, Any]) -> MetricInfo:

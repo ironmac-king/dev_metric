@@ -102,6 +102,29 @@ class ThinkingStepResponse(BaseModel):
     llm_used: bool = False
 
 
+class ClarifyOption(BaseModel):
+    """意图澄清选项"""
+    id: str
+    label: str
+    description: Optional[str] = None
+    metrics: Optional[List[str]] = None
+    dimensions: Optional[List[str]] = None
+
+
+class ConfirmPlan(BaseModel):
+    """查询方案确认"""
+    time_range: str
+    metrics: List[str]
+    dimensions: Optional[List[str]] = None
+
+
+class ChartConfig(BaseModel):
+    """图表配置"""
+    type: str = "auto"  # auto, line, bar, pie, table
+    x_axis_key: Optional[str] = None
+    y_axis_keys: Optional[List[str]] = None
+
+
 class AskResponse(BaseModel):
     session_id: str
     answer: str
@@ -128,6 +151,12 @@ class AskResponse(BaseModel):
     pending_slot_options: Optional[List[str]] = None  # 槽位选项列表
     pending_slot_name: Optional[str] = None  # 等待填充的槽位名
     slot_display_name: Optional[str] = None  # 槽位显示名称
+    # 新增：统一动作类型和结构化数据
+    action_type: Optional[str] = None  # clarify | confirm | chart | table | text
+    clarify_options: Optional[List[ClarifyOption]] = None  # clarify 类型的选项
+    confirm_plan: Optional[ConfirmPlan] = None  # confirm 类型的方案
+    chart_config: Optional[ChartConfig] = None  # chart 类型的配置
+    interpretation: Optional[str] = None  # 数据解读文本
 
 
 def _extract_result_data(sql_result) -> Optional[List[Dict[str, Any]]]:
@@ -439,6 +468,12 @@ async def ask_question(req: AskRequest):
             pending_slot_options=result.get("pending_slot_options"),
             pending_slot_name=result.get("pending_slot_name"),
             slot_display_name=result.get("slot_display_name"),
+            # 新增：统一动作类型和结构化数据
+            action_type=result.get("action_type"),
+            clarify_options=[ClarifyOption(**opt) for opt in result.get("clarify_options", [])] if result.get("clarify_options") else None,
+            confirm_plan=ConfirmPlan(**result["confirm_plan"]) if result.get("confirm_plan") else None,
+            chart_config=ChartConfig(**result["chart_config"]) if result.get("chart_config") else None,
+            interpretation=result.get("interpretation"),
         )
 
     except Exception as e:
@@ -1171,6 +1206,14 @@ app.include_router(analysis_router)
 # 注册 LLM.V1 路由
 from ai.engine.llm_v1.router import router as llm_v1_router
 app.include_router(llm_v1_router)
+
+# 注册 LLM.V2 路由
+try:
+    from ai.engine.llm_v2.router import router as llm_v2_router
+    app.include_router(llm_v2_router)
+    logger.info("LLM.V2 路由注册成功")
+except ImportError as e:
+    logger.warning(f"LLM.V2 路由注册失败: {e}，请安装 langgraph: pip install langgraph")
 
 if __name__ == "__main__":
     import uvicorn

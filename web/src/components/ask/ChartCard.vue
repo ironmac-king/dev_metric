@@ -132,6 +132,8 @@ let fullscreenChartInstance = null
 const chartType = computed(() => {
   if (props.type !== 'auto') return props.type
 
+  console.log('[DEBUG chartType] data length:', props.data?.length, 'keys:', Object.keys(props.data?.[0] || {}), 'metricName:', props.metricName)
+
   if (!props.data || props.data.length === 0) return 'table'
 
   // 单条汇总数据，显示为数字卡片
@@ -155,12 +157,30 @@ const chartType = computed(() => {
   })
 
   const numericKeys = keys.filter(k => {
-    const val = props.data[0][k]
-    // 支持字符串数字（如 "16461844.005006"）和原生数字
-    return typeof val === 'number' || (!isNaN(parseFloat(val)) && String(val).trim() !== '')
+    // 检查所有行，只要任意一行有有效数值就认为是数值列
+    return props.data.some(row => {
+      const val = row[k]
+      return val !== null && val !== '' && (typeof val === 'number' || !isNaN(parseFloat(val)))
+    })
   })
 
+  console.log('[DEBUG chartType] keys:', keys, 'numericKeys:', numericKeys)
+
   if (numericKeys.length === 1) {
+    // 檢測是否是佔比/比率數據，優先顯示餅圖
+    const metricName = props.metricName || ''
+    const ratioKeywords = ['占比', '比例', '比率', '率']
+    const isRatioMetric = ratioKeywords.some(k => metricName.includes(k))
+    const isPercentageRange = props.data.some(row => {
+      // 只要有一行及以上数据在 0-100 范围内就认为是占比数据
+      const val = parseFloat(row[numericKeys[0]])
+      return !isNaN(val) && val >= 0 && val <= 100
+    })
+    console.log('[DEBUG chartType] isRatioMetric:', isRatioMetric, 'isPercentageRange:', isPercentageRange)
+    if (isRatioMetric || isPercentageRange) {
+      console.log('[DEBUG chartType] returning pie')
+      return 'pie'
+    }
     return isTimeSeries ? 'line' : 'bar'
   } else if (numericKeys.length > 1) {
     return 'bar'
@@ -180,9 +200,13 @@ const chartOptions = computed(() => {
   const xKey = props.xAxisKey || keys[0]
   // 支持字符串数字
   const isNumeric = (val) => typeof val === 'number' || (!isNaN(parseFloat(val)) && typeof val !== 'boolean')
+  // 计算数值列：检查所有行，只要任意一行有有效数值就认为是数值列
   const numericKeys = props.seriesConfig.length > 0
     ? props.seriesConfig.map(s => s.key)
-    : keys.filter(k => isNumeric(data[0][k]))
+    : keys.filter(k => data.some(row => {
+        const val = row[k]
+        return val !== null && val !== '' && (typeof val === 'number' || !isNaN(parseFloat(val)))
+      }))
 
   // 单值卡片模式优先检查
   if (chartType.value === 'card' && numericKeys.length > 0) {
@@ -381,6 +405,72 @@ const chartOptions = computed(() => {
         }
       ]
       options.grid.bottom = 40
+    }
+
+    return options
+  }
+
+  if (chartType.value === 'pie') {
+    const labelKey = xKey
+    const valueKey = numericKeys[0]
+    const metricLabel = props.metricName || valueKey
+    console.log('[DEBUG pie] labelKey:', labelKey, 'valueKey:', valueKey, 'metricLabel:', metricLabel)
+
+    // 过滤掉 null/空值，只保留有数据的行
+    const validData = data.filter(row => {
+      const val = row[valueKey]
+      return val !== null && val !== '' && !isNaN(parseFloat(val))
+    })
+    console.log('[DEBUG pie] validData length:', validData.length, JSON.stringify(validData))
+
+    const options = {
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'item',
+        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+        borderColor: '#e5e7eb',
+        borderWidth: 1,
+        textStyle: { color: '#374151', fontSize: 12 },
+        formatter: (params) => {
+          return `<div style="font-weight:500;margin-bottom:4px">${params.name}</div>
+                  <div style="display:flex;justify-content:space-between;gap:16px">
+                    <span style="color:#6b7280">${params.marker}${metricLabel}</span>
+                    <span style="font-weight:500;color:#374151">${params.percent.toFixed(1)}%</span>
+                  </div>`
+        }
+      },
+      series: [{
+        name: metricLabel,
+        type: 'pie',
+        radius: ['35%', '65%'],
+        center: ['50%', '50%'],
+        data: validData.map(row => ({
+          name: row[labelKey],
+          value: Math.abs(parseFloat(row[valueKey]) || 0)
+        })),
+        label: {
+          show: true,
+          formatter: '{b}: {d}%',
+          color: '#6b7280',
+          fontSize: 11
+        },
+        labelLine: {
+          show: true,
+          lineStyle: { color: '#e5e7eb' }
+        },
+        itemStyle: {
+          borderRadius: 4,
+          borderColor: '#fff',
+          borderWidth: 2
+        },
+        emphasis: {
+          itemStyle: {
+            shadowBlur: 10,
+            shadowOffsetX: 0,
+            shadowColor: 'rgba(0, 0, 0, 0.3)'
+          }
+        }
+      }]
     }
 
     return options

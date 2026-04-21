@@ -1,185 +1,108 @@
 <template>
   <div class="app-layout">
-    <!-- Mobile Header -->
-    <header class="mobile-header">
-      <button class="hamburger" @click="toggleSidebar">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path d="M3 6H21M3 12H21M3 18H21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    <!-- Left Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+          <rect x="2" y="14" width="6" height="12" rx="1.5" fill="url(#logoGrad7)"/>
+          <rect x="11" y="8" width="6" height="18" rx="1.5" fill="url(#logoGrad7)" opacity="0.7"/>
+          <rect x="20" y="2" width="6" height="24" rx="1.5" fill="url(#logoGrad7)" opacity="0.4"/>
+          <defs>
+            <linearGradient id="logoGrad7" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#6366F1"/>
+              <stop offset="100%" stop-color="#8B5CF6"/>
+            </linearGradient>
+          </defs>
         </svg>
-      </button>
-      <div class="mobile-logo">
-        <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
-          <rect x="2" y="14" width="6" height="12" rx="1.5" fill="#6366F1"/>
-          <rect x="11" y="8" width="6" height="18" rx="1.5" fill="#6366F1" opacity="0.7"/>
-          <rect x="20" y="2" width="6" height="24" rx="1.5" fill="#6366F1" opacity="0.4"/>
-        </svg>
-        <span>Metrics</span>
       </div>
-    </header>
-
-    <!-- Mobile Overlay -->
-    <div class="sidebar-overlay" v-if="sidebarVisible" @click="hideSidebar"></div>
-
-    <!-- Dark Sidebar -->
-    <aside class="sidebar" :class="{ 'sidebar-open': sidebarVisible }">
-      <div class="sidebar-header">
-        <div class="logo">
-          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-            <rect x="2" y="14" width="6" height="12" rx="1.5" fill="#6366F1"/>
-            <rect x="11" y="8" width="6" height="18" rx="1.5" fill="#6366F1" opacity="0.7"/>
-            <rect x="20" y="2" width="6" height="24" rx="1.5" fill="#6366F1" opacity="0.4"/>
-          </svg>
-          <span class="logo-text">Metrics</span>
-        </div>
-        <button class="close-sidebar" @click="hideSidebar">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M15 5L5 15M5 5L15 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-        </button>
-      </div>
-
       <nav class="sidebar-nav">
-        <div class="nav-section">
-          <span class="nav-section-label">工作台</span>
-          <router-link to="/dashboard" class="nav-item" :class="{ active: $route.path === '/dashboard' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <rect x="2" y="2" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.9"/>
-              <rect x="10" y="2" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.6"/>
-              <rect x="2" y="10" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.6"/>
-              <rect x="10" y="10" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.3"/>
-            </svg>
-            <span>Dashboard</span>
-          </router-link>
-          <router-link v-if="hasMenu('/metrics')" to="/metrics" class="nav-item" :class="{ active: $route.path === '/metrics' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M3 12L6.5 7.5L10 9.5L15 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <circle cx="15" cy="4" r="1.5" fill="currentColor"/>
-            </svg>
-            <span>指标管理</span>
-          </router-link>
-          <router-link v-if="hasMenu('/alerts')" to="/alerts" class="nav-item" :class="{ active: $route.path === '/alerts' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M9 2C6.8 2 5 3.5 5 6V10L3.5 12.5V13.5H14.5V12.5L13 10V6C13 3.5 11.2 2 9 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M7.5 13.5V14.5C7.5 15.3 8.2 16 9 16C9.8 16 10.5 15.3 10.5 14.5V13.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-            <span>告警配置</span>
-          </router-link>
+        <!-- 核心页面 -->
+        <div class="sidebar-icon" :class="{ active: $route.path === '/dashboard' }" title="工作台" @click="router.push('/dashboard')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <rect x="2" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="11" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="2" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="11" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
         </div>
-
-        <div class="nav-section">
-          <span class="nav-section-label">智能分析</span>
-          <router-link v-if="hasMenu('/ai-assistant')" to="/ai-assistant" class="nav-item" :class="{ active: $route.path === '/ai-assistant' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.5"/>
-              <circle cx="9" cy="6" r="1.5" fill="currentColor"/>
-              <path d="M6.5 10.5C6.5 10.5 7.5 13 9 13C10.5 13 11.5 10.5 11.5 10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-            <span>AI 问数</span>
-          </router-link>
-          <router-link to="/ask" class="nav-item" :class="{ active: $route.path === '/ask' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M3 6C3 4.3 4.3 3 6 3H12C13.7 3 15 4.3 15 6V10C15 11.7 13.7 13 12 13H9L6 16V13H6C4.3 13 3 11.7 3 10V6Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <circle cx="6" cy="7.5" r="0.75" fill="currentColor"/>
-              <circle cx="8" cy="7.5" r="0.75" fill="currentColor"/>
-              <circle cx="10" cy="7.5" r="0.75" fill="currentColor"/>
-            </svg>
-            <span>智能问数</span>
-          </router-link>
-          <router-link v-if="hasMenu('/ask-analysis')" to="/ask-analysis" class="nav-item" :class="{ active: $route.path === '/ask-analysis' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M9 2L2 7V11L9 16L16 11V7L9 2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M9 8V6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              <circle cx="9" cy="10" r="0.75" fill="currentColor"/>
-            </svg>
-            <span>问数分析</span>
-          </router-link>
-          <router-link to="/analysis" class="nav-item" :class="{ active: $route.path === '/analysis' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <rect x="2" y="3" width="14" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M5 7H13M5 10H10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              <circle cx="13" cy="10" r="2" fill="currentColor"/>
-            </svg>
-            <span>决策分析</span>
-          </router-link>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/metrics' }" title="指标库" @click="router.push('/metrics')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M3 5V17M7 3V17M11 7V17M15 2V17M19 9V17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
         </div>
-
-        <div v-if="userRole === 'admin'" class="nav-section">
-          <span class="nav-section-label">系统配置</span>
-          <router-link to="/llm-config" class="nav-item" :class="{ active: $route.path === '/llm-config' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <circle cx="4" cy="9" r="1.5" fill="currentColor"/>
-              <circle cx="9" cy="4" r="1.5" fill="currentColor" opacity="0.7"/>
-              <circle cx="9" cy="14" r="1.5" fill="currentColor" opacity="0.7"/>
-              <circle cx="14" cy="9" r="1.5" fill="currentColor" opacity="0.5"/>
-            </svg>
-            <span>LLM 配置</span>
-          </router-link>
-          <router-link to="/nlp-config" class="nav-item" :class="{ active: $route.path === '/nlp-config' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M3 5L9 3L15 5V13L9 15L3 13V5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-              <path d="M6.5 9L8 10.5L11.5 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span>意图配置</span>
-          </router-link>
-          <router-link to="/starrocks-config" class="nav-item" :class="{ active: $route.path === '/starrocks-config' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <ellipse cx="9" cy="9" rx="7" ry="4" stroke="currentColor" stroke-width="1.5"/>
-              <ellipse cx="9" cy="5" rx="7" ry="4" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
-              <ellipse cx="9" cy="13" rx="7" ry="4" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
-            </svg>
-            <span>数据源配置</span>
-          </router-link>
-          <router-link to="/dimension-config" class="nav-item" :class="{ active: $route.path === '/dimension-config' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <rect x="2" y="2" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-              <rect x="10" y="2" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-              <rect x="2" y="10" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-              <rect x="10" y="10" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-            </svg>
-            <span>维度配置</span>
-          </router-link>
-          <router-link to="/user-management" class="nav-item" :class="{ active: $route.path === '/user-management' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <circle cx="9" cy="6" r="3" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M3 16c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-            <span>用户管理</span>
-          </router-link>
-          <router-link to="/role-permission" class="nav-item" :class="{ active: $route.path === '/role-permission' }">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path d="M9 2L3 6V12L9 16L15 12V6L9 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-              <path d="M9 8V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              <circle cx="9" cy="6" r="1" fill="currentColor"/>
-            </svg>
-            <span>角色权限</span>
-          </router-link>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/ai-assistant' }" title="AI 问数" @click="router.push('/ai-assistant')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M7 10H13M10 7V13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-ask-v2' }" title="LLM.V2" @click="router.push('/llm-ask-v2')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <rect x="2" y="12" width="4" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="8" y="8" width="4" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="14" y="4" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/analysis' }" title="决策分析" @click="router.push('/analysis')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M3 14L7 9L10 12L17 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </div>
       </nav>
 
-      <div class="sidebar-footer">
-        <el-dropdown trigger="click" @command="handleUserCommand">
-          <div class="user-info">
-            <div class="avatar" :style="avatarStyle">
-              <img v-if="selectedAvatar && presetAvatars.find(p => p.bg === selectedAvatar)?.type === 'cartoon'" :src="selectedAvatar" alt="avatar" style="width:100%;height:100%;border-radius:50%;" />
-              <span v-else>{{ username ? username.charAt(0).toUpperCase() : 'U' }}</span>
-            </div>
-            <div class="user-details">
-              <span class="user-name">{{ username }}</span>
-              <span class="user-role">{{ roleDisplayName }}</span>
-            </div>
-            <el-icon class="dropdown-arrow"><ArrowDown /></el-icon>
-          </div>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="settings">
-                <el-icon><Setting /></el-icon> 账号设置
-              </el-dropdown-item>
-              <el-dropdown-item command="logout" divided>
-                <el-icon><SwitchButton /></el-icon> 退出登录
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+      <!-- 底部区域：次要入口 + 用户 -->
+      <div class="sidebar-bottom">
+        <div class="sidebar-divider"></div>
+        <!-- 次要入口 -->
+        <div class="sidebar-icon" :class="{ active: $route.path === '/feedback' }" title="反馈看板" @click="router.push('/feedback')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M4 4H16V12H4V4Z" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M7 16H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M7 8L10 11L13 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/alerts' }" title="告警配置" @click="router.push('/alerts')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M10 2C7.24 2 5 4.24 5 7V10L3 13V14H17V13L15 10V7C15 4.24 12.76 2 10 2Z" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M8 14V15C8 16.1 8.9 17 10 17C11.1 17 12 16.1 12 15V14H8Z" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-config' }" title="LLM配置" @click="router.push('/llm-config')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M10 2V4.5M10 15.5V18M18 10H15.5M4.5 10H2M15.5 4.5L14 6M6 14L4.5 15.5M15.5 15.5L14 14M6 6L4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/nlp-config' }" title="意图配置" @click="router.push('/nlp-config')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M4 6L10 4L16 6V14L10 16L4 14V6Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M8 8L12 10L8 12V8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/starrocks-config' }" title="数据源配置" @click="router.push('/starrocks-config')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <ellipse cx="10" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M3 6V12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12V6" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M3 12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/dimension-config' }" title="维度配置" @click="router.push('/dimension-config')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <rect x="3" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="11" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="3" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="11" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/user-management' }" title="用户管理" @click="router.push('/user-management')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="6" r="3" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M3 17C3 13.5 6 11 10 11C14 11 17 13.5 17 17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="user-avatar" @click="handleUserClick">
+          {{ username ? username.charAt(0).toUpperCase() : 'U' }}
+        </div>
       </div>
     </aside>
 
@@ -240,44 +163,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, provide } from 'vue'
-import { useRouter } from 'vue-router'
-import { authAPI, menuAPI } from '../api'
+import { ref, computed, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowDown, Setting, SwitchButton } from '@element-plus/icons-vue'
 
 const router = useRouter()
+const $route = useRoute()
 const showSettings = ref(false)
 
-// 用户菜单权限
-const userMenus = ref([])
-
-// 获取用户菜单权限
-async function fetchUserMenus() {
-  try {
-    const res = await menuAPI.getMyMenus()
-    userMenus.value = res.data || []
-  } catch (e) {
-    console.error('获取菜单权限失败:', e)
-    // 使用默认权限
-    userMenus.value = []
-  }
-}
-
-// 用户角色
-const userRole = computed(() => {
-  const userInfo = localStorage.getItem('user_info')
-  if (userInfo) {
-    try {
-      return JSON.parse(userInfo).role || 'user'
-    } catch {
-      return 'user'
-    }
-  }
-  return 'user'
-})
-
-// 用户名
 const username = computed(() => {
   const userInfo = localStorage.getItem('user_info')
   if (userInfo) {
@@ -290,62 +183,10 @@ const username = computed(() => {
   return ''
 })
 
-// 角色显示名称
-const roleDisplayName = computed(() => {
-  const roleNames = {
-    'admin': '管理员',
-    'analyst': '分析师',
-    'user': '普通用户'
-  }
-  return roleNames[userRole.value] || '普通用户'
-})
-
-// 检查用户是否有某个菜单的权限
-function hasMenu(path) {
-  // admin 角色拥有所有权限
-  if (userRole.value === 'admin') return true
-  // 如果还没有加载菜单权限，使用默认逻辑
-  if (userMenus.value.length === 0) {
-    // 根据角色返回默认菜单
-    if (userRole.value === 'analyst') {
-      return ['/dashboard', '/metrics', '/alerts', '/ai-assistant', '/ask', '/ask-analysis', '/analysis'].includes(path)
-    }
-    if (userRole.value === 'user') {
-      return ['/dashboard', '/ask', '/analysis'].includes(path)
-    }
-    return false
-  }
-  return userMenus.value.includes(path)
+function handleUserClick() {
+  showSettings.value = true
 }
 
-// 用户菜单处理
-const handleUserCommand = async (command) => {
-  if (command === 'logout') {
-    try {
-      await authAPI.logout()
-    } catch (e) {
-      // 忽略登出API错误
-    }
-    localStorage.removeItem('access_token')
-    localStorage.removeItem('refresh_token')
-    ElMessage.success('已退出登录')
-    router.push('/login')
-  } else if (command === 'settings') {
-    showSettings.value = true
-  }
-}
-
-// 侧边栏可见性控制
-const sidebarVisible = ref(true)
-const hideSidebar = () => { sidebarVisible.value = false }
-const showSidebar = () => { sidebarVisible.value = true }
-
-// 提供给子组件使用
-provide('layoutSidebar', {
-  visible: sidebarVisible,
-  hideSidebar,
-  showSidebar
-})
 const selectedAvatar = ref('')
 const customAvatar = ref('')
 
@@ -441,7 +282,6 @@ window.getAvatarStyle = () => {
 
 onMounted(() => {
   loadAvatarConfig()
-  fetchUserMenus()
 })
 </script>
 
@@ -455,328 +295,192 @@ onMounted(() => {
 }
 
 :root {
-  /* ========================================
-     DingTalk Style Design System
-     钉钉风格 - 专业企业蓝 + 高效信息密度
-     ======================================== */
-
-  /* Primary Colors - DingTalk Blue 钉钉蓝 */
+  /* Primary Colors */
   --primary: #1677FF;
   --primary-light: #4096FF;
   --primary-dark: #0958D9;
   --primary-glow: rgba(22, 119, 255, 0.12);
 
-  /* CTA - Enterprise Green */
+  /* CTA */
   --cta: #00A870;
   --cta-hover: #007B50;
 
-  /* Backgrounds - Clean White */
+  /* Backgrounds */
   --bg-primary: #F2F3F5;
   --bg-card: #FFFFFF;
   --bg-sidebar: #FFFFFF;
   --bg-sidebar-hover: rgba(22, 119, 255, 0.06);
   --bg-sidebar-active: rgba(22, 119, 255, 0.12);
 
-  /* Text - Professional */
+  /* Text */
   --text-primary: #1F1F1F;
   --text-secondary: #666666;
   --text-muted: #999999;
-  --text-sidebar: #1F1F1F;
-  --text-sidebar-muted: #666666;
 
   /* Borders */
   --border: #E8E8E8;
   --border-light: #F5F5F5;
 
-  /* ========================================
-     DingTalk Shadows - 轻淡专业
-     ======================================== */
+  /* Shadows */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
   --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08);
 
-  /* 卡片阴影 - 轻淡 */
-  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04),
-                 0 4px 12px rgba(0, 0, 0, 0.03);
-  --shadow-card-hover: 0 2px 8px rgba(0, 0, 0, 0.06),
-                    0 8px 24px rgba(0, 0, 0, 0.05);
-
-  /* 按钮阴影 */
-  --shadow-btn: 0 2px 8px rgba(22, 119, 255, 0.25);
-
-  /* ========================================
-     Border Radius - 简洁中等圆角
-     ======================================== */
+  /* Border Radius */
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
   --radius-xl: 10px;
   --radius-2xl: 12px;
 
-  /* ========================================
-     DingTalk 动画系统 - 快速轻巧
-     ======================================== */
+  /* Transitions */
   --transition-fast: 0.15s ease;
   --transition-normal: 0.2s ease;
   --transition-bounce: 0.25s ease;
 
-  /* ========================================
-     Legacy Aliases
-     ======================================== */
-  --sidebar-bg: var(--bg-sidebar);
-  --sidebar-hover: var(--bg-sidebar-hover);
-  --sidebar-active: var(--bg-sidebar-active);
-  --accent: var(--primary);
-  --accent-light: var(--primary-light);
+  /* Layout */
+  --header-height: 60px;
 }
 
 .app-layout {
   min-height: 100vh;
   display: flex;
+  flex-direction: column;
   background: var(--bg-primary);
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* Mobile Header */
-.mobile-header {
-  display: none;
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 56px;
-  background: var(--bg-sidebar);
-  border-bottom: 1px solid var(--border);
-  padding: 0 16px;
+/* Left Sidebar */
+.sidebar {
+  width: 64px;
+  background: #fff;
+  border-right: 1px solid rgba(99, 102, 241, 0.08);
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 12px;
-  z-index: 101;
+  padding: 20px 0;
+  box-shadow: 4px 0 20px rgba(99, 102, 241, 0.04);
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 100;
+  transition: width 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
 }
 
-.hamburger {
+.sidebar:hover {
+  width: 160px;
+}
+
+.sidebar-logo {
+  margin-bottom: 28px;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 0;
+  width: 100%;
+}
+
+.sidebar-icon {
   width: 40px;
   height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-md);
+  border-radius: 10px;
+  color: #9ca3af;
   cursor: pointer;
-  color: var(--text-primary);
-  transition: background 0.15s ease;
-}
-
-.hamburger:hover {
-  background: var(--bg-sidebar-hover);
-}
-
-.mobile-logo {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.close-sidebar {
-  display: none;
-  width: 36px;
-  height: 36px;
-  margin-left: auto;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  color: var(--text-secondary);
-  transition: background 0.15s ease;
-}
-
-.close-sidebar:hover {
-  background: var(--bg-sidebar-hover);
-}
-
-/* Sidebar Overlay */
-.sidebar-overlay {
-  display: none;
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 99;
-}
-
-/* Sidebar - DingTalk Style */
-.sidebar {
-  width: 240px;
-  background: var(--bg-sidebar);
-  height: 100vh;
-  position: fixed;
-  left: 0;
-  top: 0;
-  display: flex;
-  flex-direction: column;
-  z-index: 100;
-  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.06);
-  border-right: 1px solid var(--border);
-}
-
-.sidebar-header {
-  padding: 20px 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.logo-text {
-  font-size: 18px;
-  font-weight: 700;
-  color: #ffffff;
-  letter-spacing: -0.5px;
-}
-
-.sidebar-nav {
-  flex: 1;
-  padding: 16px 12px;
-  overflow-y: auto;
-}
-
-.nav-section {
-  margin-bottom: 28px;
-}
-
-.nav-section-label {
-  display: block;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--text-sidebar-muted);
-  padding: 0 12px;
-  margin-bottom: 10px;
-  opacity: 0.7;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
-  border-radius: var(--radius-sm);
-  color: var(--text-sidebar-muted);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  text-decoration: none;
-  margin-bottom: 2px;
-  position: relative;
-}
-
-.nav-item:hover {
-  background: var(--bg-sidebar-hover);
-  color: var(--text-sidebar);
-}
-
-.nav-item.active {
-  background: var(--bg-sidebar-active);
-  color: var(--primary-light);
-}
-
-.nav-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 4px;
-  height: 24px;
-  background: var(--primary);
-  border-radius: 0 4px 4px 0;
-  box-shadow: 0 0 12px var(--primary);
-}
-
-.nav-item.active svg {
-  color: var(--primary-light);
-}
-
-.nav-item svg {
-  flex-shrink: 0;
-  width: 20px;
-  height: 20px;
-  transition: all var(--transition-normal);
-}
-
-.sidebar-footer {
-  padding: 16px 20px;
-  border-top: 1px solid var(--border);
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 12px;
-  border-radius: var(--radius-md);
   transition: all 0.2s ease;
-  cursor: pointer;
+  position: relative;
+  margin: 0 auto;
+  flex-shrink: 0;
 }
 
-.user-info:hover {
-  background: var(--bg-sidebar-hover);
+.sidebar-icon::before {
+  content: attr(title);
+  position: absolute;
+  left: 56px;
+  background: #1f1f1f;
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 1000;
 }
 
-.avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-md);
-  background: var(--primary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  font-weight: 600;
-  color: #ffffff;
+.sidebar-icon:hover::before {
+  opacity: 1;
 }
 
-.user-details {
+.sidebar-icon:hover {
+  background: rgba(99, 102, 241, 0.08);
+  color: #6366F1;
+}
+
+.sidebar-icon.active {
+  background: rgba(99, 102, 241, 0.08);
+  color: #6366F1;
+  border-left: 3px solid #6366F1;
+}
+
+.sidebar-bottom {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  flex: 1;
+  gap: 6px;
+  margin-top: auto;
+  flex-shrink: 0;
 }
 
-.dropdown-arrow {
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 12px;
-  margin-left: auto;
+.sidebar-divider {
+  width: 32px;
+  height: 1px;
+  background: rgba(99, 102, 241, 0.15);
+  margin: 8px auto;
 }
 
-.user-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-sidebar);
-}
-
-.user-role {
-  font-size: 12px;
-  color: var(--text-sidebar-muted);
-}
-
-/* Main Content */
+/* Main Content - With Left Sidebar only */
 .main-wrapper {
   flex: 1;
-  margin-left: 260px;
+  margin-left: 64px;
   min-height: 100vh;
+  transition: margin-left 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* User Avatar */
+.user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.user-avatar:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
 }
 
 /* Avatar Settings Dialog */
@@ -918,69 +622,64 @@ onMounted(() => {
 }
 
 /* ========================================
-   Responsive Design - Tablet & Mobile
+   Responsive Design
    ======================================== */
 
-/* Tablet (768px - 1024px) */
 @media (max-width: 1024px) {
   .sidebar {
-    width: 220px;
+    width: 56px;
   }
-
-  .main-wrapper {
-    margin-left: 240px;
+  .sidebar:hover {
+    width: 56px;
   }
-}
-
-/* Mobile (< 768px) */
-@media (max-width: 768px) {
-  .mobile-header {
-    display: flex;
-  }
-
-  .sidebar-overlay {
-    display: block;
-  }
-
-  .sidebar {
-    position: fixed;
-    left: 0;
-    top: 0;
-    width: 280px;
-    height: 100vh;
-    transform: translateX(-100%);
-    transition: transform 0.25s ease;
-    z-index: 100;
-    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.15);
-  }
-
-  .sidebar.sidebar-open {
-    transform: translateX(0);
-  }
-
-  .close-sidebar {
-    display: flex;
-  }
-
-  .main-wrapper {
-    margin-left: 0;
-    margin-top: 56px;
-    min-height: calc(100vh - 56px);
-  }
-
-  .logo-text {
-    color: var(--text-sidebar);
-  }
-}
-
-/* Small Mobile (< 480px) */
-@media (max-width: 480px) {
-  .sidebar {
-    width: 100%;
-  }
-
-  .mobile-logo span {
+  .sidebar-icon::before {
     display: none;
+  }
+  .sidebar-logo svg {
+    width: 24px;
+    height: 24px;
+  }
+  .sidebar-icon {
+    width: 36px;
+    height: 36px;
+  }
+  .sidebar-icon svg {
+    width: 18px;
+    height: 18px;
+  }
+  .main-wrapper {
+    margin-left: 56px;
+  }
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    width: 48px;
+  }
+  .sidebar:hover {
+    width: 48px;
+  }
+  .sidebar-logo {
+    display: none;
+  }
+  .sidebar-icon {
+    width: 32px;
+    height: 32px;
+  }
+  .sidebar-icon svg {
+    width: 16px;
+    height: 16px;
+  }
+  .sidebar-divider {
+    width: 28px;
+  }
+  .user-avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 11px;
+  }
+  .main-wrapper {
+    margin-left: 48px;
   }
 }
 </style>

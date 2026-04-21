@@ -12,25 +12,33 @@ import (
 
 // SearchDimensionValues 搜索维度值
 // GET /api/v1/dimension-values/search?query=有线&dimension_field=GROUP_3&limit=5
+// GET /api/v1/dimension-values/search?dimension_field=GROUP_3&limit=50 (query为空时返回该field下所有值)
 func SearchDimensionValues(c *gin.Context) {
 	query := c.Query("query")
-	if query == "" {
-		response.Error(c, response.CodeBadRequest, "query 参数不能为空")
-		return
-	}
-
 	dimensionField := c.Query("dimension_field")
 	limitStr := c.DefaultQuery("limit", "5")
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil || limit <= 0 {
 		limit = 5
 	}
-	if limit > 20 {
-		limit = 20
+	if limit > 100 {
+		limit = 100 // 提高限制以便获取更多值
 	}
 
 	// 构建 SQL 查询
-	sql := buildDimValueSearchSQL(query, dimensionField, limit)
+	var sql string
+	if query == "" {
+		// query为空时，返回指定dimension_field下所有值（按频次排序）
+		sql = fmt.Sprintf(
+			`SELECT dimension_field, dimension_value, dimension_value_pinyin, frequency, 'exact' as match_type
+			FROM ids.dim_value_mapping
+			WHERE dimension_field = '%s'
+			ORDER BY frequency DESC
+			LIMIT %d`,
+			dimensionField, limit)
+	} else {
+		sql = buildDimValueSearchSQL(query, dimensionField, limit)
+	}
 
 	// 执行查询
 	results, err := starrocks.QueryRaw(sql)

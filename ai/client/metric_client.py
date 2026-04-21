@@ -70,6 +70,156 @@ class MetricClient:
             logger.error(f"获取指标失败: {e}")
             return None
 
+    def get_metric_by_name(self, metric_name: str) -> Optional[Dict[str, Any]]:
+        """根据 metric_name 获取指标详情（模糊匹配 + 同义词支持）
+
+        修复：短查询词(<3字符)不使用模糊子串匹配，避免"pv"匹配到"costfeess_rate"等问题
+        """
+        # 同义词映射表（标准名称 -> 同义词列表）
+        SYNONYMS = {
+            # 广告相关
+            "广告点击率": ["广告转化率", "ctr", "click_rate", "点击率", "广告点击"],
+            "广告花费": ["广告成本", "广告支出", "ad_cost", "spend", "广告费用"],
+            "广告点击": ["点击量", "clicks", "点击次数"],
+            "广告转化率": ["ctr", "cvr", "conversion_rate", "转化率"],
+            # 利润相关
+            "毛利润": ["税前利润", "利润", "profit"],
+            "毛利率": ["税前利润率", "利润率", "profit_margin", "margin", "利润占比"],
+            "税前利润": ["毛利润", "利润", "profit"],
+            "税前利润率": ["毛利率", "利润率", "profit_margin", "margin"],
+            # 销售额相关
+            "销售额": ["销售", "sales", "收入", "总销售额", "营收"],
+            "订单量": ["订单数", "订单", "orders", "total_orders"],
+            "客单价": ["平均订单价值", "aov", "average_order_value"],
+            # 访客相关
+            "访客数": ["访客", "visitors", "流量", "sessions"],
+            "转化率": ["cvr", "conversion_rate"],
+            # 页面访问相关
+            "页面访问量": ["pv", "PV", "page views", "PageViews", "访问量", "页面pv"],
+        }
+
+        # 构建反向映射（从同义词到标准名称）
+        SYNONYMS_REVERSE = {}
+        for canonical, syns in SYNONYMS.items():
+            for syn in syns:
+                SYNONYMS_REVERSE[syn.lower()] = canonical
+
+        try:
+            all_metrics = self.get_all_metrics()
+            metric_name_lower = metric_name.lower()
+
+            # 1. 精确匹配（用户输入 vs 指标名）
+            for m in all_metrics:
+                name = m.get("name", "")
+                name_en = m.get("name_en", "")
+                if name.lower() == metric_name_lower or name_en.lower() == metric_name_lower:
+                    return self._get_metric_with_details(m)
+
+            # 2. 同义词精确匹配（用户输入 -> 同义词 -> 标准名称 -> 指标）
+            # 使用反向映射：pv -> "页面访问量" -> 查找指标名="页面访问量"的指标
+            if metric_name_lower in SYNONYMS_REVERSE:
+                canonical_name = SYNONYMS_REVERSE[metric_name_lower]
+                logger.info(f"[get_metric_by_name] 同义词匹配: '{metric_name}' -> '{canonical_name}'")
+                for m in all_metrics:
+                    name = m.get("name", "")
+                    name_en = m.get("name_en", "")
+                    if name == canonical_name or name_en.lower() == canonical_name.lower():
+                        return self._get_metric_with_details(m)
+                # 如果没找到精确匹配，也尝试模糊匹配标准名称
+                for m in all_metrics:
+                    name = m.get("name", "").lower()
+                    name_en = m.get("name_en", "").lower()
+                    if canonical_name.lower() in name or canonical_name.lower() in name_en:
+                        return self._get_metric_with_details(m)
+
+            # 3. 短查询词保护：< 3 字符不使用模糊子串匹配
+            if len(metric_name_lower) < 3:
+                logger.warning(f"[get_metric_by_name] 查询词过短 '{metric_name}'，跳过模糊子串匹配")
+                # 仍尝试同义词模糊匹配
+                for syn_key, syn_list in SYNONYMS.items():
+                    if metric_name_lower in syn_key.lower():
+                        for syn in syn_list:
+                            syn_lower = syn.lower()
+                            for m in all_metrics:
+                                name = m.get("name", "").lower()
+                                name_en = m.get("name_en", "").lower()
+                                if name == syn_lower or name_en == syn_lower:
+                                    return self._get_metric_with_details(m)
+                return None
+
+            # 4. 模糊匹配（带边界检查，确保是完整词匹配）
+            best_match = None
+            best_score = 0
+            for m in all_metrics:
+                name = m.get("name", "").lower()
+                name_en = m.get("name_en", "").lower()
+
+                score = 0
+                # 完整词匹配（不是子串）
+                if metric_name_lower == name_en or metric_name_lower == name:
+                    score = 100
+                # 同义词完整词匹配
+                elif metric_name_lower in synonyms:
+                    for syn in synonyms:
+                        if syn.lower() == name or syn.lower() == name_en:
+                            score = 90
+                            break
+                # name_en 以查询词结尾（更具体的指标）
+                elif name_en.endswith(metric_name_lower):
+                    score = 60
+                # name 以查询词结尾
+                elif name.endswith(metric_name_lower):
+                    score = 50
+
+                if score > best_score:
+                    best_score = score
+                    best_match = m
+
+            if best_score >= 50:
+                return self._get_metric_with_details(best_match)
+
+            # 5. 同义词模糊匹配（用户输入 -> 同义词 -> 指标名 in 同义词）
+            for syn in synonyms:
+                syn_lower = syn.lower()
+                for m in all_metrics:
+                    name = m.get("name", "")
+                    name_en = m.get("name_en", "")
+                    if (syn_lower in name.lower()) or (syn_lower in name_en.lower()):
+                        return self._get_metric_with_details(m)
+
+            # 6. 反向同义词匹配（指标名在同义词列表中）
+            for m in all_metrics:
+                name = m.get("name", "")
+                name_en = m.get("name_en", "")
+                for key, syns in SYNONYMS.items():
+                    if (name.lower() == key.lower() or name_en.lower() == key.lower()):
+                        # 检查用户输入是否匹配任意同义词
+                        if metric_name_lower in [s.lower() for s in syns]:
+                            return self._get_metric_with_details(m)
+
+            return None
+        except Exception as e:
+            logger.error(f"根据名称获取指标失败: {e}")
+            return None
+
+    def _get_metric_with_details(self, metric: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """获取指标的完整详情"""
+        try:
+            metric_id = metric.get("id")
+            if metric_id:
+                client = get_http_client()
+                response = client.get(
+                    f"{self.base_url}/api/v1/metadata/metrics/{metric_id}",
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    data = response.json().get("data", {})
+                    metric["dimensions"] = data.get("dimensions", [])
+            return metric
+        except Exception as e:
+            logger.warning(f"获取指标详情失败: {e}")
+            return metric
+
     def get_all_dimensions(self) -> List[Dict[str, Any]]:
         """获取所有维度（带缓存）"""
         if self._dimensions_cache is None:
@@ -80,11 +230,15 @@ class MetricClient:
         return self._dimensions_cache
 
     def get_all_terms(self) -> List[Dict[str, Any]]:
-        """获取所有业务术语"""
+        """获取所有业务术语（兼容旧方法）"""
         client = get_http_client()
         response = client.get(f"{self.base_url}/api/v1/metadata/terms")
         response.raise_for_status()
         return response.json()["data"]
+
+    def get_business_terms(self) -> List[Dict[str, Any]]:
+        """获取所有业务术语"""
+        return self.get_all_terms()
 
     def get_metric_data(self, metric_id: int) -> Dict[str, Any]:
         """获取指标数据"""
@@ -102,6 +256,16 @@ class MetricClient:
         response = client.get(
             f"{self.base_url}/api/v1/dimension-configs",
             params=params,
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json().get("data", [])
+
+    def get_dimension_type_mappings(self) -> List[Dict[str, Any]]:
+        """获取全局维度类型→列名映射"""
+        client = get_http_client()
+        response = client.get(
+            f"{self.base_url}/api/v1/dimension-type-mappings",
             timeout=10
         )
         response.raise_for_status()

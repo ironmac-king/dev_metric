@@ -30,6 +30,9 @@ class SFOutput:
     aggregations: list = None
     operations: list = None
     raw_slots: Dict[str, Any] = None  # 原始 slots 用于追溯
+    resolved_question: str = ""  # 同义词替换后的问题文本
+    original_question: str = ""  # 原始问题文本（未做同义词替换）
+    is_rate_metric: bool = False  # 是否率指标（SQL含除法）
 
     def __post_init__(self):
         if self.dimensions is None:
@@ -123,7 +126,8 @@ class SFNode:
             context = self._session_store.get_context(session_id)
             if context:
                 dimensions, time_range = self._apply_context_inheritance(
-                    dimensions, time_range, context
+                    dimensions, time_range, context,
+                    resolved_question=slots.get("resolved_question", "")
                 )
 
         # Step 5: 槽位补全（从指标库推断缺省值）
@@ -131,7 +135,15 @@ class SFNode:
             dimensions, time_range, metric_info
         )
 
-        # Step 6: 构建输出
+        # Step 6: 检测率指标（SQL 包含除法）
+        is_rate_metric = False
+        if metric_info:
+            metric_sql = metric_info.get("starrocks_sql", "")
+            if metric_sql and "/" in metric_sql:
+                is_rate_metric = True
+                logger.info(f"[SFNode] 检测到率指标: {metric_info.get('metric_code')}, SQL含除法")
+
+        # Step 7: 构建输出
         starrocks_sql = metric_info.get("starrocks_sql", "") if metric_info else ""
         # 从 starrocks_sql 提取表名
         table = "ids.IDS_AMZ_COMPREHENSIVE_DI"
@@ -154,6 +166,9 @@ class SFNode:
             aggregations=slots.get("aggregations", ["SUM"]),
             operations=slots.get("operations", []),
             raw_slots=slots,
+            resolved_question=slots.get("resolved_question", ""),
+            original_question=slots.get("original_question", ""),
+            is_rate_metric=is_rate_metric,
         )
 
         logger.info(
@@ -309,6 +324,7 @@ class SFNode:
         dimensions: Dict[str, str],
         time_range: Dict[str, str],
         context,
+        resolved_question: str = "",
     ) -> tuple:
         """
         应用上下文继承
@@ -316,6 +332,11 @@ class SFNode:
         """
         # 维度继承
         if not dimensions and context.current_dimensions:
+            # 防御性检查：如果是"分布"类问题，不继承日期维度
+            if "分布" in resolved_question and context.current_dimensions == ["日期"]:
+                logger.info(f"[SFNode] 检测到'分布'追问但不继承日期维度，清除维度让后续重新映射")
+                context.current_dimensions = []
+
             dimension_map = self._config_loader.get_dimension_map()
             inherited = {}
             for dim_name in context.current_dimensions:

@@ -121,6 +121,9 @@
                   </div>
                 </div>
 
+                <!-- AI 消息：直接显示内容（当没有 summary 且没有 thinkingSteps 时） -->
+                <div v-else-if="msg.role === 'assistant' && msg.content" class="message-bubble" v-html="formatMessage(msg.content)"></div>
+
                 <div class="message-footer">
                   <div class="message-time">{{ formatTime(msg.created_at) }}</div>
                   <button
@@ -243,8 +246,8 @@
           </div>
           <div v-else class="result-text" v-html="analysisResult"></div>
 
-          <!-- 图表区域 -->
-          <div v-if="analysisCharts.length > 0" class="charts-section">
+          <!-- 图表区域（仅当图表未嵌入markdown时显示） -->
+          <div v-if="analysisCharts.length > 0 && !rawMarkdown.includes('[[CHART:')" class="charts-section">
             <div v-for="(chart, index) in analysisCharts" :key="index" class="chart-wrapper">
               <div class="chart-title">{{ chart.title }}</div>
               <div :ref="el => chartRefs[index] = el" class="chart-container"></div>
@@ -289,7 +292,7 @@ marked.setOptions({
 const messages = ref([])
 const inputText = ref('')
 const loading = ref(false)
-const analysisResult = shallowRef('')  // 用 shallowRef 减少更新开销
+const analysisResult = ref('')  // 用 ref 确保 v-html 响应式更新
 const analysisLoading = ref(false)
 const analysisCharts = ref([])
 const chartRefs = ref([])
@@ -298,13 +301,14 @@ const sessionId = ref(localStorage.getItem('analysis_session_id') || '')
 const selectedIndex = ref(-1)
 const historyLoading = ref(false)
 const reportCache = new Map()
-const rawMarkdown = shallowRef('')  // 用 shallowRef 减少更新开销
+const rawMarkdown = ref('')  // 用 ref 确保 v-html 响应式更新
 const outputMode = ref('stream')  // 'stream' | 'non-stream' 默认流式输出
+let initChartsTimer = null  // 防抖定时器
 
 const quickPrompts = [
   '分析近30天广告投放效果',
-  '对比本月与上月数据',
-  '用户增长趋势分析'
+  '亚马逊流量分析',
+  '亚马逊财务分析'
 ]
 
 async function handleSend() {
@@ -345,6 +349,7 @@ async function handleSend() {
     }
     nextTick(() => initCharts())
   } catch (error) {
+    console.error('[handleSend] 捕获到异常:', error)
     messages.value[aiMsgIndex].content = '分析失败: ' + error.message
     analysisResult.value = '<p>分析失败: ' + error.message + '</p>'
   } finally {
@@ -373,23 +378,26 @@ async function handleNonStreamMode(text, aiMsgIndex) {
 
   const { answer, charts } = data.data
 
-  // 清理 markdown
+  // 处理图表
+  if (charts && charts.length > 0) {
+    analysisCharts.value = charts
+  }
+
+  // 1. 先清理 markdown 格式问题（但不删除 [[CHART:N]] 标记，它们会在 embedChartsInHtml 中被替换）
   let cleanedMarkdown = answer
-  cleanedMarkdown = cleanedMarkdown.replace(/\[\[[\s\S]*?CHART[\s\S]*?\]\]/gi, '')
   cleanedMarkdown = cleanedMarkdown.replace(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+(?:\.\d+)?)/g, '$1$2$3')
   cleanedMarkdown = cleanedMarkdown.replace(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g, '$1$2$3')
   cleanedMarkdown = cleanedMarkdown.replace(/([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])/g, '$1$2')
   cleanedMarkdown = cleanedMarkdown.replace(/\*\*\s+(.+?)\s+\*\*/g, '**$1**')
   cleanedMarkdown = cleanedMarkdown.replace(/M\s*K\s*I-\d+\s*-\s*\d+/g, (m) => m.replace(/\s/g, ''))
 
-  // 渲染 HTML
-  analysisResult.value = DOMPurify.sanitize(marked.parse(cleanedMarkdown))
-  rawMarkdown.value = answer
+  // 2. 转换为 HTML（此时 [[CHART:N]] 标记还在）
+  const htmlBeforeCharts = marked.parse(cleanedMarkdown)
 
-  // 处理图表
-  if (charts && charts.length > 0) {
-    analysisCharts.value = charts
-  }
+  // 3. 嵌入图表（替换 [[CHART:N]] 为实际的图表 HTML）
+  const htmlWithCharts = embedChartsInHtml(htmlBeforeCharts)
+  analysisResult.value = DOMPurify.sanitize(htmlWithCharts)
+  rawMarkdown.value = answer
 
   // 更新消息
   if (aiMsgIndex < messages.value.length) {
@@ -479,8 +487,10 @@ function patchMarkdown(text) {
 }
 
 async function handleStreamMode(text, aiMsgIndex) {
+  const t0 = performance.now()
   // 使用 fetch + ReadableStream 解析 SSE
   const token = localStorage.getItem('access_token') || ''
+  const t1 = performance.now()
   const response = await fetch('/api/v1/analysis/stream', {
     method: 'POST',
     headers: {
@@ -489,6 +499,7 @@ async function handleStreamMode(text, aiMsgIndex) {
     },
     body: JSON.stringify({ query: text, session_id: sessionId.value })
   })
+  console.log('[耗时] fetch请求:', Math.round(performance.now() - t1), 'ms')
 
   if (!response.ok) {
     throw new Error('请求失败')
@@ -498,6 +509,8 @@ async function handleStreamMode(text, aiMsgIndex) {
   const decoder = new TextDecoder()
   let buffer = ''
   let fullContent = ''
+  let chunkCount = 0
+  let chartCount = 0
 
   // 解析 SSE 事件 - 支持多行 data: 内容，处理空行
   // SSE 格式: "data: 内容" 表示一行内容，空 "data:" 或 "data: " 表示换行
@@ -535,7 +548,9 @@ async function handleStreamMode(text, aiMsgIndex) {
   // 清理 markdown 的函数
   const cleanMarkdown = (md) => {
     let cleaned = md
-    cleaned = cleaned.replace(/\[\[[\s\S]*?CHART[\s\S]*?\]\]/gi, '')
+    // 删除报告中的 logo 图片，避免重复请求外部 CDN
+    cleaned = cleaned.replace(/<img[^>]*ugnas\.com[^>]*>/gi, '')
+    cleaned = cleaned.replace(/\[\[[\s\S]*?CHART_BLOCK[\s\S]*?\]\]/gi, '')
     cleaned = cleaned.replace(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+(?:\.\d+)?)/g, '$1$2$3')
     cleaned = cleaned.replace(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g, '$1$2$3')
     cleaned = cleaned.replace(/([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])/g, '$1$2')
@@ -545,8 +560,9 @@ async function handleStreamMode(text, aiMsgIndex) {
   }
 
   let lastEventType = ''
+  let streamDone = false  // 标记流式是否已完成
 
-  while (true) {
+  while (!streamDone) {
     const { done, value } = await reader.read()
     if (done) break
 
@@ -563,34 +579,57 @@ async function handleStreamMode(text, aiMsgIndex) {
       }
 
       const eventData = parseSSE(line)
-      if (!eventData) continue
+      // done 和 close 事件即使 eventData 为空也要处理
+      if (!eventData && lastEventType !== 'done' && lastEventType !== 'close') continue
 
       if (lastEventType === 'chunk') {
+        chunkCount++
         // 收到文本 chunk，追加
         fullContent += eventData
-        const html = '<pre style="white-space:pre-wrap;word-break:break-all;font-family:inherit;margin:0;padding:0;background:transparent;border:none;color:var(--text-primary)">' + DOMPurify.sanitize(fullContent) + '</pre>'
+        // 删除 logo 图片避免重复请求 CDN
+        const cleaned = fullContent.replace(/<img[^>]*ugnas\.com[^>]*>/gi, '')
+        const html = '<pre style="white-space:pre-wrap;word-break:break-all;font-family:inherit;margin:0;padding:0;background:transparent;border:none;color:var(--text-primary)">' + DOMPurify.sanitize(cleaned) + '</pre>'
         analysisResult.value = html
         rawMarkdown.value = fullContent
-        triggerRef(analysisResult)
-        triggerRef(rawMarkdown)
+        // 同时更新 messages 中的 content（让左边消息列表也能显示实时内容）
+        if (aiMsgIndex < messages.value.length) {
+          messages.value[aiMsgIndex].content = fullContent
+        }
+        // Vue ref 自动追踪依赖，无需手动 triggerRef
       } else if (lastEventType === 'chart') {
-        // 收到图表数据，同时清理 markdown 中的 [[CHART_BLOCK]] 占位符
+        const tChart = performance.now()
+        // 收到图表数据，处理 markdown 中的图表标记
         try {
-          const chartData = JSON.parse(eventData)
-          if (chartData.charts && chartData.charts.length > 0) {
-            analysisCharts.value = chartData.charts
-            triggerRef(analysisCharts)
-            // 等 DOM 更新后初始化图表
-            nextTick(() => initCharts())
+          chartCount++
+          const chartPayload = JSON.parse(eventData)
+          // 如果有 markdown 字段（处理后的完整 markdown），用它替换 fullContent
+          if (chartPayload.markdown) {
+            fullContent = chartPayload.markdown
           }
-          // 清理 markdown 中的 [[CHART_BLOCK]] 占位符
-          fullContent = fullContent.replace(/\[\[CHART_BLOCK\]\]/g, '')
+          // 更新图表数据
+          if (chartPayload.charts && chartPayload.charts.length > 0) {
+            analysisCharts.value = chartPayload.charts
+          }
+          // 渲染 markdown（嵌入图表）
+          const finalMarkdown = cleanMarkdown(fullContent)
+          const parsedHtml = marked.parse(finalMarkdown)
+          console.log('[DEBUG] chart事件 parsedHtml 前50字符:', parsedHtml?.substring(0, 50))
+          console.log('[DEBUG] chart事件 [[CHART 数量:', (parsedHtml?.match(/\[\[CHART:/g) || []).length)
+          const htmlWithCharts = embedChartsInHtml(parsedHtml)
+          console.log('[DEBUG] chart事件 htmlWithCharts chart-embed数量:', (htmlWithCharts?.match(/chart-embed/g) || []).length)
+          analysisResult.value = DOMPurify.sanitize(htmlWithCharts)
           rawMarkdown.value = fullContent
-          analysisResult.value = DOMPurify.sanitize(marked.parse(fullContent))
-          triggerRef(analysisResult)
-          triggerRef(rawMarkdown)
+          // 防抖：清除之前的 initCharts 定时器，只设置一个新的
+          if (initChartsTimer) {
+            clearTimeout(initChartsTimer)
+          }
+          initChartsTimer = setTimeout(() => {
+            initCharts()
+            initChartsTimer = null
+          }, 100)
+          console.log('[耗时] chart事件处理:', Math.round(performance.now() - tChart), 'ms, chartCount:', chartCount)
         } catch (e) {
-          console.error('解析图表数据失败:', e, 'raw data:', eventData.substring(0, 200))
+          console.error('解析图表数据失败:', e, 'raw data:', eventData?.substring(0, 200))
         }
       } else if (lastEventType === 'thinking') {
         // 收到思考步骤，更新 thinkingSteps
@@ -602,13 +641,20 @@ async function handleStreamMode(text, aiMsgIndex) {
         if (totalTime) {
           messages.value[aiMsgIndex].totalTime = totalTime
         }
-      } else if (lastEventType === 'done') {
-        // 完成，清理可能残留的 [[CHART_BLOCK]] 占位符
-        console.log('流式完成')
-        fullContent = fullContent.replace(/\[\[CHART_BLOCK\]\]/g, '')
+      } else if (lastEventType === 'done' || lastEventType === 'close') {
+        // 完成：清除防抖定时器，立即初始化图表
+        if (initChartsTimer) {
+          clearTimeout(initChartsTimer)
+          initChartsTimer = null
+        }
         rawMarkdown.value = fullContent
         // 清空思考步骤，显示完成状态
-        messages.value[aiMsgIndex].thinkingSteps = []
+        if (aiMsgIndex < messages.value.length) {
+          messages.value[aiMsgIndex].thinkingSteps = []
+        }
+        // 标记流式完成，退出 while 循环
+        streamDone = true
+        break
       }
     }
   }
@@ -618,17 +664,32 @@ async function handleStreamMode(text, aiMsgIndex) {
     const eventData = parseSSE(buffer)
     if (eventData && lastEventType === 'chunk') {
       fullContent += eventData
+      // 如果之前没有 chart 事件，需要更新文本显示
+      if (!analysisCharts.value.length) {
+        const cleaned = fullContent.replace(/<img[^>]*ugnas\.com[^>]*>/gi, '')
+        analysisResult.value = DOMPurify.sanitize('<pre>' + DOMPurify.sanitize(cleaned) + '</pre>')
+      }
     }
   }
 
-  // 最终更新 - 完成后解析 markdown
-  const finalCleaned = cleanMarkdown(fullContent)
-  try {
-    analysisResult.value = DOMPurify.sanitize(marked.parse(finalCleaned))
+  const tAfterLoop = performance.now()
+  console.log('[耗时] while循环结束, chunkCount:', chunkCount, 'chartCount:', chartCount, '耗时:', Math.round(tAfterLoop - t0), 'ms')
+
+  // 如果有图表，直接初始化；否则解析 markdown
+  if (analysisCharts.value.length > 0) {
+    // 图表已在 chart 事件中渲染并设置了 setTimeout，这里直接初始化
     await nextTick()
-  } catch (e) {
-    console.error('[流式] marked.parse 失败:', e)
-    analysisResult.value = DOMPurify.sanitize('<pre>' + finalCleaned + '</pre>')
+    initCharts()
+    console.log('[耗时] initCharts完成, 图表数:', analysisCharts.value.length, '耗时:', Math.round(performance.now() - tAfterLoop), 'ms')
+  } else {
+    // 无图表时解析 markdown
+    const finalCleaned = cleanMarkdown(fullContent)
+    try {
+      analysisResult.value = DOMPurify.sanitize(marked.parse(finalCleaned))
+    } catch (e) {
+      console.error('[流式] marked.parse 失败:', e)
+      analysisResult.value = DOMPurify.sanitize('<pre>' + finalCleaned + '</pre>')
+    }
   }
 
   if (aiMsgIndex < messages.value.length) {
@@ -638,9 +699,14 @@ async function handleStreamMode(text, aiMsgIndex) {
     messages.value[aiMsgIndex].charts = analysisCharts.value
   }
 
+  console.log('[耗时] handleStreamMode总耗时:', Math.round(performance.now() - t0), 'ms')
+
   // 保存到后端
   try {
     const token = localStorage.getItem('access_token') || ''
+    const sid = sessionId.value
+
+    const tSave = performance.now()
     const saveRes = await fetch('/api/v1/ask-analysis/logs', {
       method: 'POST',
       headers: {
@@ -648,7 +714,7 @@ async function handleStreamMode(text, aiMsgIndex) {
         'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({
-        session_id: sessionId.value,
+        session_id: sid,
         question: text,
         answer: fullContent,
         thinking_steps: '',
@@ -656,12 +722,21 @@ async function handleStreamMode(text, aiMsgIndex) {
         success: true
       })
     })
+    console.log('[耗时] 保存到后端:', Math.round(performance.now() - tSave), 'ms')
+
+    if (!saveRes.ok) {
+      console.error('[保存] 请求失败, 状态:', saveRes.status)
+      return
+    }
+
     const saveData = await saveRes.json()
+
     if (saveData.code === 0 && saveData.data?.id) {
       messages.value[aiMsgIndex].id = saveData.data.id
       // 保存渲染后的 HTML 到缓存，避免 selectReport 拿到原始 markdown
       reportCache.set(saveData.data.id, analysisResult.value)
     }
+    console.log('[耗时] 全流程总耗时:', Math.round(performance.now() - t0), 'ms')
   } catch (e) {
     console.error('保存报告失败:', e)
   }
@@ -831,7 +906,6 @@ async function selectReport(idx) {
 
 // 加载历史记录
 async function loadHistory() {
-  console.log('[loadHistory] 开始加载, sessionId:', sessionId.value)
   if (!sessionId.value) {
     sessionId.value = generateSessionId()
     localStorage.setItem('analysis_session_id', sessionId.value)
@@ -844,18 +918,27 @@ async function loadHistory() {
       headers: { 'Authorization': `Bearer ${token}` }
     })
     const data = await res.json()
-    console.log('[loadHistory] API返回, data.data.list.length:', data.data?.list?.length)
     if (data.code === 0 && data.data?.list) {
       // 预渲染所有报告的 HTML
-      const renderMarkdown = (text) => {
+      const renderMarkdown = (text, charts = []) => {
         if (!text) return ''
         let cleaned = text
-        cleaned = cleaned.replace(/\[\[[\s\S]*?CHART[\s\S]*?\]\]/gi, '')
+        // 移除旧的 [[CHART_BLOCK]] 格式，但保留 [[CHART:N]] 格式
+        cleaned = cleaned.replace(/\[\[[\s\S]*?CHART_BLOCK[\s\S]*?\]\]/gi, '')
         cleaned = cleaned.replace(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+(?:\.\d+)?)/g, '$1$2$3')
         cleaned = cleaned.replace(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g, '$1$2$3')
         cleaned = cleaned.replace(/([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])/g, '$1$2')
         cleaned = cleaned.replace(/\*\*\s+(.+?)\s+\*\*/g, '**$1**')
         cleaned = cleaned.replace(/M\s*K\s*I-\d+\s*-\s*\d+/g, (m) => m.replace(/\s/g, ''))
+        // 嵌入图表
+        if (charts.length > 0) {
+          // 临时设置 analysisCharts 以便 embedChartsInHtml 使用
+          const origCharts = analysisCharts.value
+          analysisCharts.value = charts
+          const html = embedChartsInHtml(marked.parse(cleaned))
+          analysisCharts.value = origCharts
+          return DOMPurify.sanitize(html)
+        }
         return DOMPurify.sanitize(marked.parse(cleaned))
       }
 
@@ -869,7 +952,7 @@ async function loadHistory() {
           question: log.question,
           content: '',
           summary: extractSummary(log.answer),
-          fullReport: renderMarkdown(log.answer),  // 存渲染后的 HTML
+          fullReport: renderMarkdown(log.answer, charts),  // 存渲染后的 HTML
           rawMarkdown: log.answer,  // 保存原始 markdown（包含图表数据）
           charts: charts,  // 保存预解析的图表数据
           thinkingSteps: [],
@@ -877,7 +960,6 @@ async function loadHistory() {
           created_at: log.created_at
         }
       })
-      console.log('[loadHistory] 加载完成, messages.length:', messages.value.length)
       // 缓存所有报告（渲染后的 HTML）
       data.data.list.forEach(log => {
         reportCache.set(log.id, renderMarkdown(log.answer))
@@ -900,15 +982,12 @@ function formatResult(text) {
   // 清理前后空白字符，确保 ^ 锚点能正确匹配 heading
   text = text.trim()
 
-  // DEBUG: 打印原始文本前200字符
-  console.log('[formatResult] 原始文本:', text.substring(0, 200))
-
   // 0. 移除图表数据标记 {CHART_DATA:...} 和 [[CHART_BLOCK]] 占位符
   // 支持多种格式：{CHART_DATA:{...}}, {CHART_DATA:[...]}, {CHART_DATA :...} 等
   // 以及带空格的变化如 {CHART_ BLOCK} 或 [[ CHART_BLOCK ]]
   text = text.replace(/\{ ?CHART[_\s]?DATA[\s\S]*?\}/gi, '')
-  // 使用更简单的模式匹配 [[ CHART_B LOCK ]] 等各种变体
-  text = text.replace(/\[\[[\s\S]*?CHART[\s\S]*?\]\]/gi, '')
+  // 移除 [[CHART_BLOCK]] 和类似变体，但保留 [[CHART:N]] 格式
+  text = text.replace(/\[\[[\s\S]*?CHART_BLOCK[\s\S]*?\]\]/gi, '')
   // 处理单括号的 {CHART_BLOCK} 格式
   text = text.replace(/\{ ?CHART[\s\S]*?\}/gi, '')
 
@@ -951,16 +1030,6 @@ function formatResult(text) {
   // 2. 规范化行结束符
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
 
-  // DEBUG: 打印第一行的内容
-  const firstLine = text.split('\n')[0]
-  console.log('[formatResult] 第一行:', firstLine)
-  // DEBUG: 打印包含表格关键字的行
-  const tableRelatedLines = text.split('\n').filter(l => l.includes('|') || l.includes('---'))
-  console.log('[formatResult] 表格相关行数:', tableRelatedLines.length)
-  if (tableRelatedLines.length > 0) {
-    console.log('[formatResult] 表格相关行:', tableRelatedLines.slice(0, 5))
-  }
-
   // 3. 分割内容为行
   const lines = text.split('\n')
   const result = []
@@ -993,15 +1062,11 @@ function formatResult(text) {
     const hasDashSequence = /[\-:\s]{3,}/.test(trimmed) || trimmed.includes('---')
     const isTableSeparator = separatorPattern.test(trimmed) && hasDashSequence
     if (isTableSeparator) {
-      // DEBUG
-      console.log(`[formatResult] 跳过表头分隔行: "${trimmed}"`)
       continue
     }
 
     // 表格行检测（| 开头和结尾）
     if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
-      // DEBUG
-      console.log(`[formatResult] 发现表格行 ${i}: "${trimmed.substring(0, 50)}..."`)
       if (inList) {
         result.push(`</${listType}>`)
         inList = false
@@ -1011,12 +1076,10 @@ function formatResult(text) {
         result.push('<table class="result-table"><tbody>')
         inTable = true
         tableHeaderIndex = i
-        console.log(`[formatResult] 开始新表格，表头行索引: ${i}`)
       }
       // 解析表格单元格：先移除首尾的 |
       const cellContent = trimmed.slice(1, -1)
       const cells = cellContent.split('|').map(c => c.trim()).filter(c => c && c !== '---')
-      console.log(`[formatResult] 解析单元格，数量: ${cells.length}, 内容: ${JSON.stringify(cells)}`)
       if (cells.length > 0) {
         // 判断是否是表头行
         const isHeader = tableHeaderIndex === i
@@ -1270,7 +1333,46 @@ function buildEChartsOption(chartData) {
   return option
 }
 
+// 把 [[CHART:N]] 标记替换成图表 HTML
+function embedChartsInHtml(html) {
+  if (!html || !analysisCharts.value.length) return html
+
+  const result = html.replace(/\[\[CHART:(\d+)\]\]/g, (match, index) => {
+    const chartIndex = parseInt(index, 10)
+    const chartData = analysisCharts.value[chartIndex]
+    if (!chartData) return ''
+    const title = chartData.title || `图表 ${chartIndex + 1}`
+    return `<div class="chart-embed" data-chart-index="${chartIndex}">
+      <div class="chart-embed-title">${title}</div>
+      <div class="chart-embed-container"></div>
+    </div>`
+  })
+  return result
+}
+
 function initCharts() {
+  const t0 = performance.now()
+  // 先查找所有嵌入式图表容器
+  const containers = document.querySelectorAll('.chart-embed-container[data-chart-index]')
+  console.log('[耗时] initCharts查找容器:', Math.round(performance.now() - t0), 'ms, 数量:', containers.length)
+  containers.forEach(container => {
+    const index = parseInt(container.getAttribute('data-chart-index'), 10)
+    const chartData = analysisCharts.value[index]
+    if (!chartData) return
+
+    let chart = echarts.getInstanceByDom(container)
+    if (!chart) {
+      chart = echarts.init(container)
+    }
+
+    const option = buildEChartsOption(chartData)
+    if (option) {
+      chart.setOption(option)
+    }
+  })
+  console.log('[耗时] initCharts完成, 总耗时:', Math.round(performance.now() - t0), 'ms')
+
+  // 旧的 chartRefs 方式仍然保留，作为备用
   analysisCharts.value.forEach((chartData, index) => {
     const container = chartRefs.value[index]
     if (!container) return
@@ -1860,6 +1962,18 @@ function exportResult() {
   color: var(--text-primary);
 }
 
+/* 限制报告中的图片大小 */
+.result-text img {
+  max-width: 120px;
+  height: auto;
+  float: right;
+}
+
+/* 报告 logo 图片，禁用重复加载 */
+.report-logo-img {
+  pointer-events: none;
+}
+
 /* 打字机效果文字 */
 .typewriter-text {
   font-family: 'Courier New', monospace;
@@ -1925,6 +2039,27 @@ function exportResult() {
   border-radius: 4px;
   font-family: 'Fira Code', monospace;
   font-size: 13px;
+}
+
+/* 嵌入式图表样式 */
+.chart-embed {
+  margin: 24px 0;
+  padding: 16px;
+  background: var(--bg-primary);
+  border-radius: 12px;
+}
+
+.chart-embed-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  text-align: left;
+}
+
+.chart-embed-container {
+  width: 100%;
+  height: 320px;
 }
 
 /* 图表区域 */

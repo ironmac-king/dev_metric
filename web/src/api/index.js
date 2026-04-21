@@ -80,6 +80,15 @@ export const dimensionConfigAPI = {
   deleteTable: (tableName) => api.delete(`/dimension-configs/tables/${tableName}`)
 }
 
+// 维度类型映射 API (全局维度类型→列名映射)
+export const dimensionTypeMappingAPI = {
+  list: (params) => api.get('/dimension-type-mappings', { params }),
+  search: (params) => api.get('/dimension-type-mappings/search', { params }),
+  create: (data) => api.post('/dimension-type-mappings', data),
+  update: (id, data) => api.put(`/dimension-type-mappings/${id}`, data),
+  delete: (id) => api.delete(`/dimension-type-mappings/${id}`)
+}
+
 // 告警 API
 export const alertAPI = {
   list: (params) => api.get('/alerts', { params }),
@@ -193,6 +202,23 @@ export const promptConfigAPI = {
   rollback: (id, data) => api.post(`/prompt-configs/${id}/rollback`, data),
   deleteVersion: (id, version) => api.delete(`/prompt-configs/${id}/version`, { params: { version } }),
   generate: (data) => api.post('/prompt-configs/generate', data)
+}
+
+// 槽位配置 API
+export const slotConfigAPI = {
+  list: () => api.get('/nlp/slots'),
+  get: (id) => api.get(`/nlp/slots/${id}`),
+  create: (data) => api.post('/nlp/slots', data),
+  update: (id, data) => api.put(`/nlp/slots/${id}`, data),
+  delete: (id) => api.delete(`/nlp/slots/${id}`),
+  // 槽位依赖
+  listDependencies: () => api.get('/nlp/slot-dependencies'),
+  createDependency: (data) => api.post('/nlp/slot-dependencies', data),
+  deleteDependency: (id) => api.delete(`/nlp/slot-dependencies/${id}`),
+  // 槽位关联
+  listRelations: () => api.get('/nlp/slot-relations'),
+  createRelation: (data) => api.post('/nlp/slot-relations', data),
+  deleteRelation: (id) => api.delete(`/nlp/slot-relations/${id}`)
 }
 
 export default api

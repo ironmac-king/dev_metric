@@ -193,7 +193,12 @@ async def mql_generator(state: V2State) -> V2State:
 
         # 保存到历史栈
         if mql:
-            state.mql =mql
+            # 保留 intent_router 设置的 order_by（mql_generator 可能没有设置）
+            inherited_order_by = state.mql.order_by if state.mql else None
+            state.mql = mql
+            if inherited_order_by and not mql.order_by:
+                mql.order_by = inherited_order_by
+                logger.info(f"[mql_generator] 保留 intent_router 设置的 order_by: {inherited_order_by.direction}")
             push_history(state, json.dumps(mql.to_dict(), ensure_ascii=False))
 
         state.add_thinking_step(

@@ -150,7 +150,9 @@ class PromptManager:
         """
         config = self.get_prompt_config(name)
         if config:
-            return config.get("prompt_text", default)
+            prompt_text = config.get("prompt_text", "")
+            if prompt_text:
+                return prompt_text
         return default
 
     def get_nl2structure_prompt(self) -> str:
@@ -427,9 +429,10 @@ class PromptManager:
 }
 
 【intent 取值范围 - 必须严格匹配】
-- query_value: 查询指标数值
-- query_trend: 查询趋势变化
-- query_comparison: 对比分析
+- query_value: 查询指标数值（当用户问具体数值时使用，如"销售额是多少"、"访客数多少"）
+- query_trend: 查询趋势变化（当用户问"趋势"、"走势"、"变化"时使用）
+- query_comparison: 对比分析（当用户问"对比"、"比较"、"比"时使用，如"和上周比"、"对比上月"）
+- query_ranking: 排名分析（当用户问"哪个比较好"、"排名前十"、"排名"、"第几名"、"前N名"、"最好"、"最差"时使用，如"上月哪个品类卖得好"、"销量排名前十"）
 - query_ratio: 占比分析（当用户提到"占比"、"比例"、"A在B中的占比"时使用）
 - query_metadata: 查询元数据
 - query_yesterday: 查询昨天数据

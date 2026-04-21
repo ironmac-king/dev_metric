@@ -47,23 +47,15 @@ class ConversationEngine(ABC):
         pass
 
 
-def get_engine(engine_type: str = "langgraph") -> ConversationEngine:
-    """
-    工厂函数：根据 engine_type 获取引擎
-
-    Args:
-        engine_type: "langgraph" | "llm"
-
-    Returns:
-        ConversationEngine 实例
-    """
-    if engine_type == "langgraph":
-        from ai.engine.langgraph_engine import LangGraphEngine
-        return LangGraphEngine()
-    elif engine_type == "llm":
-        from ai.engine.llm_query_engine import LLMQueryEngine
-        return LLMQueryEngine()
-    else:
-        # 默认使用 langgraph
-        from ai.engine.langgraph_engine import LangGraphEngine
-        return LangGraphEngine()
+# === 旧版引擎工厂已删除，请使用 LLM.V1 /api/v1/llm-ask ===
+# def get_engine(engine_type: str = "langgraph") -> ConversationEngine:
+#     """工厂函数：根据 engine_type 获取引擎（已弃用）"""
+#     if engine_type == "langgraph":
+#         from ai.engine.langgraph_engine import LangGraphEngine
+#         return LangGraphEngine()
+#     elif engine_type == "llm":
+#         from ai.engine.llm_query_engine import LLMQueryEngine
+#         return LLMQueryEngine()
+#     else:
+#         from ai.engine.langgraph_engine import LangGraphEngine
+#         return LangGraphEngine()

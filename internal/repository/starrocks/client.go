@@ -37,7 +37,7 @@ func Init(cfg *config.StarRocksConfig) error {
 
 // newConnection 创建新连接
 func newConnection(cfg *config.StarRocksConfig) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&timeout=10s&readTimeout=30s",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&timeout=10s&readTimeout=30s",
 		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
 
 	newDB, err := sql.Open("mysql", dsn)
@@ -53,6 +53,11 @@ func newConnection(cfg *config.StarRocksConfig) (*sql.DB, error) {
 	if err := newDB.Ping(); err != nil {
 		newDB.Close()
 		return nil, fmt.Errorf("StarRocks Ping 失败: %w", err)
+	}
+
+	// 显式设置字符集（确保 utf8mb4）
+	if _, err := newDB.Exec("SET NAMES utf8mb4"); err != nil {
+		fmt.Printf("[StarRocks] SET NAMES utf8mb4 失败: %v (忽略继续)\n", err)
 	}
 
 	return newDB, nil

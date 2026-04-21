@@ -115,6 +115,7 @@ class RSNode:
             msg = ConversationMessage(
                 role="assistant",
                 content=answer,
+                slots=slots,  # 保存 slots 以便后续多轮对话继承
                 sql=ex_output.sql,
                 answer=answer,
                 chart_config=chart_config,
@@ -149,10 +150,11 @@ class RSNode:
     ) -> List[Dict[str, str]]:
         """构建分析步骤（用于可折叠展示）"""
         steps = []
-        metric = slots.get("metric", "指标")
-        time_range = slots.get("time_range", {}).get("original", "")
-        time_start = slots.get("time_range", {}).get("start", "")
-        time_end = slots.get("time_range", {}).get("end", "")
+        metric = slots.get("metric", "指标") if slots else "指标"
+        time_range_dict = (slots.get("time_range") or {}) if slots else {}
+        time_range = time_range_dict.get("original", "")
+        time_start = time_range_dict.get("start", "")
+        time_end = time_range_dict.get("end", "")
         dimensions = slots.get("dimensions", [])
 
         # 步骤1：查询条件
@@ -239,10 +241,11 @@ class RSNode:
 
     def _generate_empty_answer(self, slots: Dict[str, Any]) -> str:
         """生成空数据回答"""
-        metric = slots.get("metric", "该指标")
-        time_range = slots.get("time_range", {}).get("original", "")
-        time_start = slots.get("time_range", {}).get("start", "")
-        time_end = slots.get("time_range", {}).get("end", "")
+        metric = slots.get("metric", "该指标") if slots else "该指标"
+        time_range_dict = (slots.get("time_range") or {}) if slots else {}
+        time_range = time_range_dict.get("original", "")
+        time_start = time_range_dict.get("start", "")
+        time_end = time_range_dict.get("end", "")
 
         analysis_parts = []
         analysis_parts.append("【分析过程】")
@@ -280,8 +283,8 @@ class RSNode:
         slots: Dict[str, Any],
     ) -> str:
         """模板生成简单回答（只返回最终结果，不包含分析过程）"""
-        metric = slots.get("metric", "指标")
-        time_range = slots.get("time_range", {}).get("original", "")
+        metric = slots.get("metric", "指标") if slots else "指标"
+        time_range = ((slots.get("time_range") or {}) if slots else {}).get("original", "")
         data = ex_output.data
 
         if len(data) == 1:
@@ -341,8 +344,8 @@ class RSNode:
         slots: Dict[str, Any],
     ) -> str:
         """构建 LLM 回答 Prompt"""
-        metric = slots.get("metric", "指标")
-        time_range = slots.get("time_range", {}).get("original", "")
+        metric = slots.get("metric", "指标") if slots else "指标"
+        time_range = ((slots.get("time_range") or {}) if slots else {}).get("original", "")
 
         # 构建数据预览
         data_preview = []

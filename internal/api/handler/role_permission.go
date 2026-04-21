@@ -210,7 +210,7 @@ func GetAllMenus(c *gin.Context) {
 		{"path": "/alerts", "name": "告警配置", "group": "工作台"},
 		// 智能分析
 		{"path": "/ai-assistant", "name": "AI 问数", "group": "智能分析"},
-		{"path": "/ask", "name": "智能问数", "group": "智能分析"},
+		{"path": "/llm-ask", "name": "LLM.V1", "group": "智能分析"},
 		{"path": "/ask-analysis", "name": "问数分析", "group": "智能分析"},
 		{"path": "/analysis", "name": "决策分析", "group": "智能分析"},
 		// 系统配置
@@ -260,17 +260,17 @@ func getDefaultMenusByRole(roleName string) []string {
 	case "admin":
 		return []string{
 			"/dashboard", "/metrics", "/alerts",
-			"/ai-assistant", "/ask", "/ask-analysis", "/analysis",
+			"/ai-assistant", "/llm-ask", "/ask-analysis", "/analysis",
 			"/llm-config", "/nlp-config", "/starrocks-config", "/dimension-config", "/prompt-config", "/user-management",
 		}
 	case "analyst":
 		return []string{
 			"/dashboard", "/metrics", "/alerts",
-			"/ai-assistant", "/ask", "/ask-analysis", "/analysis",
+			"/ai-assistant", "/llm-ask", "/ask-analysis", "/analysis",
 		}
 	case "user":
 		return []string{
-			"/dashboard", "/ask", "/analysis",
+			"/dashboard", "/llm-ask", "/analysis",
 		}
 	default:
 		return []string{"/dashboard"}

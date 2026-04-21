@@ -258,6 +258,31 @@ class MetricClient:
         logger.info(f"[MetricClient] 构建业务术语映射表: {len(terms_map)} 个映射")
         return terms_map
 
+    def get_metric_field_mapping(self) -> Dict[str, str]:
+        """
+        构建指标名→数据库字段的映射
+
+        从所有指标的 starrocks_sql 中提取 SUM(field) 的字段名
+
+        Returns:
+            映射字典 {指标名: 字段名}
+            例如: {"销售额": "ORDERED_PRODUCTSALES", "收入": "INCOME_BCSS"}
+        """
+        import re
+        mapping = {}
+        for metric in self.get_all_metrics():
+            name = metric.get("name", "")
+            starrocks_sql = metric.get("starrocks_sql", "")
+            if name and starrocks_sql:
+                # 提取 SUM(field) 中的字段名
+                matches = re.findall(r'SUM\s*\(\s*(\w+)\s*\)', starrocks_sql, re.IGNORECASE)
+                if matches:
+                    # 第一个 SUM 字段作为主字段
+                    mapping[name] = matches[0].upper()
+
+        logger.info(f"[MetricClient] 构建指标字段映射: {len(mapping)} 个映射")
+        return mapping
+
     def search_metrics(self, keyword: str) -> List[Dict[str, Any]]:
         """
         搜索指标（按名称或代码）

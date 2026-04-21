@@ -69,6 +69,7 @@ class AskResponseV2(BaseModel):
     error: Optional[str] = None
     result_data: Optional[List[Dict[str, Any]]] = None
     total: int = 0
+    metric_name: Optional[str] = None  # 指标名称（用于图表 tooltip）
 
 
 @router.post("/v2", response_model=AskResponseV2)
@@ -152,6 +153,7 @@ async def ask_question_v2(req: AskRequestV2):
             error=result_state.error if not result_state.answer else None,
             result_data=result_state.sql_result.data if result_state.sql_result else None,
             total=result_state.sql_result.total if result_state.sql_result else 0,
+            metric_name=_get_metric_name(result_state.mql) if result_state.mql else None,
         )
 
         duration_ms = int((time.time() - start_time) * 1000)
@@ -359,6 +361,10 @@ async def _stream_graph(graph, state: V2State):
                 clarification_message = state_update.context_cache.get("clarification_message", "") if hasattr(state_update, 'context_cache') else ""
                 clarification_options = state_update.context_cache.get("clarification_options", []) if hasattr(state_update, 'context_cache') else []
 
+                # 获取 metric_name
+                metric_name = _get_metric_name(state_update.mql) if hasattr(state_update, 'mql') and state_update.mql else ''
+                logger.info(f"[_stream_graph] result_ready metric_name={metric_name}")
+
                 yield step_name, {
                     "thinking": last_thinking.content if last_thinking and hasattr(last_thinking, 'content') else '',
                     "sql": getattr(state_update, 'sql', '') or '',
@@ -371,8 +377,8 @@ async def _stream_graph(graph, state: V2State):
                     "needs_clarification": is_generic,
                     "clarification_message": clarification_message,
                     "clarification_options": clarification_options if is_generic else [],
-                    # 传递指标名供前端 tooltip 使用
-                    "metric_name": getattr(state_update.mql, 'metric', None) and getattr(state_update.mql.metric, 'name', '') or '',
+                    # 传递指标名供前端 tooltip 使用（占比查询时从 molecule_metric 获取）
+                    "metric_name": metric_name,
                 }
         logger.info(f"[_stream_graph] 流式执行完成")
     except Exception as e:
@@ -380,6 +386,33 @@ async def _stream_graph(graph, state: V2State):
         import traceback
         traceback.print_exc()
         raise
+
+def _get_metric_name(mql) -> str:
+    """获取指标名称（支持占比查询的 molecule_metric）"""
+    if not mql:
+        return ''
+
+    # 优先从 mql.metric 获取
+    metric = getattr(mql, 'metric', None)
+    if metric:
+        name = getattr(metric, 'name', '') or ''
+        if name:
+            return name
+
+    # 占比查询时，从 molecule_metric 获取
+    molecule_metric = getattr(mql, 'molecule_metric', None)
+    if molecule_metric:
+        mol_name = getattr(molecule_metric, 'name', '') or ''
+        if mol_name:
+            # 尝试构造占比名称：分子 + "占比" 或 "占" + 分母
+            denom_metric = getattr(mql, 'denominator_metric', None)
+            if denom_metric:
+                den_name = getattr(denom_metric, 'name', '') or ''
+                if den_name:
+                    return f"{mol_name}占{den_name}比重"
+            return f"{mol_name}占比"
+
+    return ''
 
 
 def _get_step_thinking(state: V2State) -> str:

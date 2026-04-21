@@ -158,6 +158,29 @@ ORDER BY MONTHS""",
         metric_code="MKI-02-0001",
         intent_type="compare",
     ),
+
+    # 场景10：比例/占比计算（两个指标相除）
+    SQLExample(
+        question="各店铺退款率是多少？",
+        sql="SELECT FSITE, ROUND(SUM(fqty_tk) / SUM(ORDER_QTY) * 100, 2) AS `退款率(%)` FROM ids.IDS_AMZ_COMPREHENSIVE_DI WHERE FDATE >= '2026-04-01' AND FDATE <= '2026-04-30' GROUP BY FSITE",
+        metric_code=None,
+        dimension="FSITE",
+        intent_type="query_value",
+    ),
+    SQLExample(
+        question="各平台退款数量占销量的比例？",
+        sql="SELECT PLATFORM, ROUND(SUM(fqty_tk) / SUM(ORDER_QTY) * 100, 2) AS `退款占比(%)` FROM ids.IDS_AMZ_COMPREHENSIVE_DI WHERE FDATE >= '2026-04-01' AND FDATE <= '2026-04-30' GROUP BY PLATFORM",
+        metric_code=None,
+        dimension="PLATFORM",
+        intent_type="query_value",
+    ),
+    SQLExample(
+        question="各品类退款金额占销售额的比例？",
+        sql="SELECT GROUP_1, ROUND(SUM(fqty_tk) / SUM(ORDERED_PRODUCTSALES) * 100, 2) AS `退款金额占比(%)` FROM ids.IDS_AMZ_COMPREHENSIVE_DI WHERE FDATE >= '2026-04-01' AND FDATE <= '2026-04-30' GROUP BY GROUP_1",
+        metric_code=None,
+        dimension="GROUP_1",
+        intent_type="query_value",
+    ),
 ]
 
 

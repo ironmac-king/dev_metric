@@ -25,14 +25,14 @@ var nlpAuditService = service.NewSQLAuditService()
 
 func ListIntentTemplates(c *gin.Context) {
 	var templates []model.IntentTemplate
-	postgres.Get().Find(&templates)
+	postgres.Get().Select("*").Find(&templates)
 	response.Success(c, templates)
 }
 
 func GetIntentTemplate(c *gin.Context) {
 	id := c.Param("id")
 	var tpl model.IntentTemplate
-	if err := postgres.Get().First(&tpl, id).Error; err != nil {
+	if err := postgres.Get().Select("*").First(&tpl, id).Error; err != nil {
 		response.Error(c, response.CodeNotFound, "模板不存在")
 		return
 	}
@@ -167,7 +167,7 @@ func GetAllNLPTemplates(c *gin.Context) {
 	var intentTemplates []model.IntentTemplate
 	var sqlTemplates []model.SQLTemplate
 
-	postgres.Get().Where("status = ?", 1).Find(&intentTemplates)
+	postgres.Get().Select("*").Where("status = ?", 1).Find(&intentTemplates)
 
 	// 按 template_type 过滤 SQL 模板
 	templateType := c.Query("type")
@@ -482,4 +482,139 @@ func GenerateEmbeddings(c *gin.Context) {
 	}
 
 	response.Success(c, result)
+}
+
+// ========== SlotDefinition CRUD ==========
+
+// ListSlotDefinitions 获取所有槽位定义
+func ListSlotDefinitions(c *gin.Context) {
+	var slots []model.SlotDefinition
+	query := postgres.Get().Select("*")
+
+	// 按 priority 降序排序
+	query.Order("priority DESC").Find(&slots)
+	response.Success(c, slots)
+}
+
+// GetSlotDefinition 获取单个槽位定义
+func GetSlotDefinition(c *gin.Context) {
+	id := c.Param("id")
+	var slot model.SlotDefinition
+	if err := postgres.Get().Select("*").First(&slot, id).Error; err != nil {
+		response.Error(c, response.CodeNotFound, "槽位不存在")
+		return
+	}
+	response.Success(c, slot)
+}
+
+// CreateSlotDefinition 创建槽位定义
+func CreateSlotDefinition(c *gin.Context) {
+	var slot model.SlotDefinition
+	if err := c.ShouldBindJSON(&slot); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+	if err := postgres.Get().Create(&slot).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "创建失败")
+		return
+	}
+	response.Success(c, slot)
+}
+
+// UpdateSlotDefinition 更新槽位定义
+func UpdateSlotDefinition(c *gin.Context) {
+	id := c.Param("id")
+	var slot model.SlotDefinition
+	if err := postgres.Get().First(&slot, id).Error; err != nil {
+		response.Error(c, response.CodeNotFound, "槽位不存在")
+		return
+	}
+
+	var updates map[string]interface{}
+	if err := c.ShouldBindJSON(&updates); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+
+	if err := postgres.Get().Model(&slot).Updates(updates).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "更新失败")
+		return
+	}
+	response.Success(c, slot)
+}
+
+// DeleteSlotDefinition 删除槽位定义
+func DeleteSlotDefinition(c *gin.Context) {
+	id := c.Param("id")
+	postgres.Get().Delete(&model.SlotDefinition{}, id)
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+// GetAllSlotConfigs 获取所有槽位配置（供 Python AI 服务调用）
+func GetAllSlotConfigs(c *gin.Context) {
+	var slots []model.SlotDefinition
+	postgres.Get().Select("*").Where("status = ?", 1).Order("priority DESC").Find(&slots)
+	response.Success(c, gin.H{
+		"slot_definitions":  slots,
+	})
+}
+
+// ========== SlotDependency CRUD ==========
+
+// ListSlotDependencies 获取所有槽位依赖
+func ListSlotDependencies(c *gin.Context) {
+	var deps []model.SlotDependency
+	postgres.Get().Select("*").Find(&deps)
+	response.Success(c, deps)
+}
+
+// CreateSlotDependency 创建槽位依赖
+func CreateSlotDependency(c *gin.Context) {
+	var dep model.SlotDependency
+	if err := c.ShouldBindJSON(&dep); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+	if err := postgres.Get().Create(&dep).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "创建失败")
+		return
+	}
+	response.Success(c, dep)
+}
+
+// DeleteSlotDependency 删除槽位依赖
+func DeleteSlotDependency(c *gin.Context) {
+	id := c.Param("id")
+	postgres.Get().Delete(&model.SlotDependency{}, id)
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+// ========== SlotRelation CRUD ==========
+
+// ListSlotRelations 获取所有指标-槽位关联
+func ListSlotRelations(c *gin.Context) {
+	var relations []model.SlotRelation
+	postgres.Get().Select("*").Find(&relations)
+	response.Success(c, relations)
+}
+
+// CreateSlotRelation 创建指标-槽位关联
+func CreateSlotRelation(c *gin.Context) {
+	var relation model.SlotRelation
+	if err := c.ShouldBindJSON(&relation); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+	if err := postgres.Get().Create(&relation).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "创建失败")
+		return
+	}
+	response.Success(c, relation)
+}
+
+// DeleteSlotRelation 删除指标-槽位关联
+func DeleteSlotRelation(c *gin.Context) {
+	id := c.Param("id")
+	postgres.Get().Delete(&model.SlotRelation{}, id)
+	response.SuccessWithMessage(c, "删除成功", nil)
 }

@@ -27,7 +27,7 @@ type DatabaseConfig struct {
 }
 
 func (d *DatabaseConfig) DSN() string {
-	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable options=-cclient_encoding=utf8",
 		d.Host, d.Port, d.User, d.Password, d.Name)
 }
 

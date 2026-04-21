@@ -196,17 +196,19 @@ func (SQLAuditLog) TableName() string {
 
 // IntentTemplate 意图模板表
 type IntentTemplate struct {
-	ID                uint      `json:"id" gorm:"primaryKey"`
-	Name              string    `json:"name" gorm:"size:64"`                     // 模板名称
-	Intent            string    `json:"intent" gorm:"size:32"`                  // 意图类型
-	IntentDescription string    `json:"intent_description" gorm:"type:text"`    // 意图描述
-	Patterns          string    `json:"patterns" gorm:"type:text"`              // 匹配模式（正则或关键词，逗号分隔）
-	FewShotExamples   string    `json:"few_shot_examples" gorm:"type:jsonb"`  // Few-shot 示例
-	Priority          int       `json:"priority" gorm:"default:0"`              // 优先级
-	Response          string    `json:"response" gorm:"type:text"`               // 默认回复模板
-	Status            int16     `json:"status" gorm:"default:1"`                // 0=禁用 1=启用
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                  uint      `json:"id" gorm:"primaryKey"`
+	Name                string    `json:"name" gorm:"size:64"`                     // 模板名称
+	Intent              string    `json:"intent" gorm:"size:32"`                  // 意图类型
+	IntentDescription   string    `json:"intent_description" gorm:"type:text"`    // 意图描述
+	Patterns            string    `json:"patterns" gorm:"type:text"`              // 匹配模式（正则或关键词，逗号分隔）
+	FewShotExamples     string    `json:"few_shot_examples" gorm:"type:jsonb"`  // Few-shot 示例
+	Priority            int       `json:"priority" gorm:"default:0"`              // 优先级
+	Response            string    `json:"response" gorm:"type:text"`               // 默认回复模板
+	DimensionRequired   int16     `json:"dimension_required" gorm:"default:0"`   // 是否需要维度词配合：0=不需要 1=需要
+	InvalidKeywords     string    `json:"invalid_keywords" gorm:"type:text"`     // 泛指关键词，需要追问具体级别（如"品类,类目"）
+	Status              int16     `json:"status" gorm:"default:1"`                // 0=禁用 1=启用
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 func (IntentTemplate) TableName() string {
@@ -408,4 +410,59 @@ type AskAnalysisLog struct {
 
 func (AskAnalysisLog) TableName() string {
 	return "ask_analysis_logs"
+}
+
+// SlotDefinition 槽位定义表
+type SlotDefinition struct {
+	ID              uint      `json:"id" gorm:"primaryKey"`
+	SlotName       string    `json:"slot_name" gorm:"uniqueIndex;size:64"` // metric/time_range/platform/site/entity/ad_type/logistics/caliber
+	SlotType       string    `json:"slot_type" gorm:"size:32"`              // required/optional
+	DisplayName    string    `json:"display_name" gorm:"size:128"`          // 显示名称
+	Priority       int       `json:"priority" gorm:"default:0"`              // 追问优先级
+	MaxClarifyTurns int     `json:"max_clarify_turns" gorm:"default:3"`  // 最大追问轮次
+	DefaultValue   string    `json:"default_value" gorm:"size:256"`         // 默认值
+	ValueType      string    `json:"value_type" gorm:"size:32"`            // enum/range/free_text/dynamic
+	AllowedValues  string    `json:"allowed_values" gorm:"type:text"`      // 静态JSON数组
+	ValueMapping   string    `json:"value_mapping" gorm:"type:text"`        // JSON对象
+	QuestionTemplates string  `json:"question_templates" gorm:"type:text"`  // JSON数组
+	// 动态数据源配置
+	DynamicSource  string    `json:"dynamic_source" gorm:"size:64"`       // dimension_config/metric_category
+	DimensionName  string    `json:"dimension_name" gorm:"size:64"`        // 关联dimension_configs.dimension_name
+	ColumnName     string    `json:"column_name" gorm:"size:64"`           // 关联dimension_configs.column_name
+	Status         int16     `json:"status" gorm:"default:1"`             // 1=启用 0=停用
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+func (SlotDefinition) TableName() string {
+	return "slot_definitions"
+}
+
+// SlotDependency 槽位依赖表
+type SlotDependency struct {
+	ID             uint      `json:"id" gorm:"primaryKey"`
+	ParentSlot     string    `json:"parent_slot" gorm:"size:64;index"`    // 父槽位
+	ChildSlot      string    `json:"child_slot" gorm:"size:64"`           // 子槽位
+	ConditionExpr  string    `json:"condition_expr" gorm:"type:text"`     // 条件表达式
+	Status         int16     `json:"status" gorm:"default:1"`            // 1=启用 0=停用
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func (SlotDependency) TableName() string {
+	return "slot_dependencies"
+}
+
+// SlotRelation 指标-槽位关联表
+type SlotRelation struct {
+	ID             uint      `json:"id" gorm:"primaryKey"`
+	MetricCategory string    `json:"metric_category" gorm:"size:64;index"` // 指标分类
+	SlotName       string    `json:"slot_name" gorm:"size:64;index"`       // 槽位名称
+	SlotRequired   int16     `json:"slot_required" gorm:"default:0"`       // 0=可选 1=必选
+	DefaultValue   string    `json:"default_value" gorm:"size:256"`        // 默认值
+	Status         int16     `json:"status" gorm:"default:1"`              // 1=启用 0=停用
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func (SlotRelation) TableName() string {
+	return "slot_relations"
 }

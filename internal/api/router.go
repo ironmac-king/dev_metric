@@ -202,6 +202,20 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 			// Embedding 生成 API（供 Python AI 服务调用）
 			nlp.POST("/generate-embeddings", handler.GenerateEmbeddings)
+
+			// 槽位配置 API（供 Python AI 服务调用）
+			nlp.GET("/slot-configs", handler.GetAllSlotConfigs)
+			nlp.GET("/slots", handler.ListSlotDefinitions)
+			nlp.GET("/slots/:id", handler.GetSlotDefinition)
+			nlp.POST("/slots", handler.CreateSlotDefinition)
+			nlp.PUT("/slots/:id", handler.UpdateSlotDefinition)
+			nlp.DELETE("/slots/:id", handler.DeleteSlotDefinition)
+			nlp.GET("/slot-dependencies", handler.ListSlotDependencies)
+			nlp.POST("/slot-dependencies", handler.CreateSlotDependency)
+			nlp.DELETE("/slot-dependencies/:id", handler.DeleteSlotDependency)
+			nlp.GET("/slot-relations", handler.ListSlotRelations)
+			nlp.POST("/slot-relations", handler.CreateSlotRelation)
+			nlp.DELETE("/slot-relations/:id", handler.DeleteSlotRelation)
 		}
 
 		// 意图反馈
@@ -235,6 +249,16 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			dimension.PUT("/:id", handler.UpdateDimensionConfig)
 			dimension.DELETE("/:id", handler.DeleteDimensionConfig)
 			dimension.DELETE("/tables/:table_name", handler.DeleteDimensionTable)
+		}
+
+		// 维度类型映射（全局）
+		dimensionType := v1.Group("/dimension-type-mappings")
+		{
+			dimensionType.GET("", handler.ListDimensionTypeMappings)
+			dimensionType.GET("/search", handler.GetDimensionTypeMappingsByType)
+			dimensionType.POST("", handler.CreateDimensionTypeMapping)
+			dimensionType.PUT("/:id", handler.UpdateDimensionTypeMapping)
+			dimensionType.DELETE("/:id", handler.DeleteDimensionTypeMapping)
 		}
 
 		// Prompt配置

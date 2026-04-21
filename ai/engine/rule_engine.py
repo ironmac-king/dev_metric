@@ -241,19 +241,38 @@ class RuleEngine:
                     if intent_templates:
                         # DB 有配置，清空 builtin，使用 DB 配置
                         self.intent_patterns = []
+                        self.intent_configs = {}  # 存储每个 intent 的完整配置
                         for tpl in intent_templates:
                             patterns = tpl.get("patterns", "")
+                            intent = tpl.get("intent")
+                            priority = tpl.get("priority", 0)
+                            dimension_required = tpl.get("dimension_required", 0)
+                            invalid_keywords = tpl.get("invalid_keywords", "")
+
+                            # 解析泛指关键词列表
+                            invalid_kw_list = [kw.strip() for kw in invalid_keywords.split(",") if kw.strip()]
+
+                            # 存储完整配置（按 intent 类型分组，取最高优先级）
+                            if intent not in self.intent_configs or priority > self.intent_configs[intent]["priority"]:
+                                self.intent_configs[intent] = {
+                                    "priority": priority,
+                                    "dimension_required": dimension_required,
+                                    "invalid_keywords": invalid_kw_list,
+                                }
+
                             for p in patterns.split(","):
                                 p = p.strip()
                                 if p:
                                     self.intent_patterns.append({
                                         "pattern": p,
-                                        "intent": tpl.get("intent"),
-                                        "priority": tpl.get("priority", 0),
+                                        "intent": intent,
+                                        "priority": priority,
+                                        "dimension_required": dimension_required,
+                                        "invalid_keywords": invalid_kw_list,
                                     })
                         # 按优先级排序
                         self.intent_patterns.sort(key=lambda x: x["priority"], reverse=True)
-                        logger.info(f"[RuleEngine] 已从 DB 加载 {len(self.intent_patterns)} 个意图模式")
+                        logger.info(f"[RuleEngine] 已从 DB 加载 {len(self.intent_patterns)} 个意图模式，{len(self.intent_configs)} 个意图配置")
                     else:
                         # DB 没有配置，使用 builtin
                         logger.info("[RuleEngine] DB 无意图模板，使用 builtin 模式")
@@ -329,7 +348,30 @@ class RuleEngine:
             {"pattern": "指标定义", "intent": "query_metadata", "priority": 12},
             {"pattern": "怎么算", "intent": "query_metadata", "priority": 10},
             {"pattern": "如何计算", "intent": "query_metadata", "priority": 10},
+            # 排名分析 - 直接排名（不需要维度词配合）
+            {"pattern": "最高", "intent": "query_ranking", "priority": 15, "dimension_required": 0, "invalid_keywords": []},
+            {"pattern": "最低", "intent": "query_ranking", "priority": 15, "dimension_required": 0, "invalid_keywords": []},
+            {"pattern": "最好", "intent": "query_ranking", "priority": 15, "dimension_required": 0, "invalid_keywords": []},
+            {"pattern": "最差", "intent": "query_ranking", "priority": 15, "dimension_required": 0, "invalid_keywords": []},
+            {"pattern": "第一名", "intent": "query_ranking", "priority": 15, "dimension_required": 0, "invalid_keywords": []},
+            # 排名分析 - 需要维度词配合
+            {"pattern": "比较好", "intent": "query_ranking", "priority": 14, "dimension_required": 1, "invalid_keywords": ["品类", "类目", "商品类", "产品类"]},
+            {"pattern": "比较差", "intent": "query_ranking", "priority": 14, "dimension_required": 1, "invalid_keywords": ["品类", "类目", "商品类", "产品类"]},
         ]
+
+        # 内置意图配置（按 intent 类型存储）
+        self.intent_configs = {
+            "query_ranking": {
+                "priority": 15,
+                "dimension_required": 0,
+                "invalid_keywords": ["品类", "类目", "商品类", "产品类"],
+            },
+            "query_comparison": {
+                "priority": 8,
+                "dimension_required": 0,
+                "invalid_keywords": [],
+            },
+        }
 
     def _init_builtin_sql_templates(self):
         """内置 SQL 模板"""
@@ -389,6 +431,102 @@ class RuleEngine:
             confidence=0.5,
             entities={}
         )
+
+    def detect_intent_override(self, text: str, current_intent: str) -> Optional[Dict]:
+        """
+        检测意图覆盖模式（配置化实现）
+
+        当用户的查询匹配特定模式时（如"比较好/差+维度词"），需要强制覆盖当前意图。
+        这个方法处理那些需要组合条件判断的复杂模式：
+        1. 基础关键词匹配（如"比较"）
+        2. invalid_keywords 检查（如"品类"等泛指词存在则跳过）
+        3. dimension_required 检查（需要同时存在维度词）
+
+        返回: 如果匹配返回覆盖信息 {"intent": "...", "confidence": 0.95, "entities": {...}}，否则返回 None
+        """
+        text_lower = text.lower()
+
+        # 通用维度词列表（用于检测是否存在维度词）
+        dimension_words = ['品', '类', '店', '铺', '牌', '道', '路', '区', '域', '台', '站', '国', '家', '客', '户', '商', 'ASIN', 'SKU']
+
+        for pattern_info in self.intent_patterns:
+            pattern = pattern_info.get("pattern", "").lower()
+            if not pattern or pattern not in text_lower:
+                continue
+
+            intent = pattern_info.get("intent")
+            if not intent:
+                continue
+
+            # 【Bug Fix 4 修复】检查 dimension_required=1 的模式
+            # 注意：这个检查必须在 current_intent == intent 判断之前！
+            # 因为 dimension_required=1 的目的是在意图识别正确时也要追问（用户用了泛指词如"品类"）
+            if pattern_info.get("dimension_required") == 1:
+                has_dimension_word = any(dim in text_lower for dim in dimension_words)
+                if has_dimension_word:
+                    # 检查 invalid_keywords
+                    invalid_keywords = pattern_info.get("invalid_keywords", [])
+                    # 【Bug Fix】只检查独立的泛指词，排除"三级品类"等具体级别
+                    # "品类"出现在"三级品类"里不算invalid，只有单独的"品类"才算
+                    category_level_prefixes = ["一级", "二级", "三级", "四级", "五级"]
+                    has_invalid_kw = False
+                    for inv_kw in invalid_keywords:
+                        if inv_kw in text_lower:
+                            # 检查是否是"X级品类"或"X品类"格式（具体级别，不是泛指）
+                            is_specific_level = False
+                            for prefix in category_level_prefixes:
+                                if f"{prefix}{inv_kw}" in text_lower:
+                                    is_specific_level = True
+                                    break
+                            if not is_specific_level:
+                                has_invalid_kw = True
+                                break
+                    logger.info(f"[detect_intent_override] dimension_required=1: text='{text}', has_dimension_word={has_dimension_word}, has_invalid_kw={has_invalid_kw}, invalid_kws={invalid_keywords}")
+                    for inv_kw in invalid_keywords:
+                        logger.info(f"[detect_intent_override] checking inv_kw='{inv_kw}', in text={inv_kw in text_lower}")
+                    if has_invalid_kw:
+                        # 【废弃旧追问逻辑】不再在此触发 category_level 追问
+                        # 槽位追问统一由 SlotClarificationEngine._check_required_slots() 处理
+                        # 这里只返回 intent 识别结果，不触发追问
+                        logger.info(f"[detect_intent_override] 检测到泛指词但已废弃旧追问逻辑，跳过追问，交给 SlotClarificationEngine 统一处理")
+                        pass  # 不再触发追问
+
+            # 如果当前意图已经是这个 intent，不需要覆盖
+            if current_intent == intent:
+                continue
+
+            # 【Bug Fix 4 修复】检查 dimension_required=1 的模式 END
+
+            # 检查 invalid_keywords（如果配置了）
+            invalid_keywords = pattern_info.get("invalid_keywords", [])
+            if invalid_keywords:
+                # 检查是否有 invalid_keyword 命中
+                has_invalid_kw = False
+                for inv_kw in invalid_keywords:
+                    if inv_kw in text_lower:
+                        has_invalid_kw = True
+                        logger.debug(f"[detect_intent_override] invalid_keyword '{inv_kw}' 命中")
+                        break
+                if has_invalid_kw:
+                    # 返回追问标记
+                    return {
+                        "intent": intent,
+                        "confidence": 0.95,
+                        "entities": {
+                            "override_reason": f"pattern: {pattern}, invalid_kw_triggered"
+                        }
+                    }
+
+            # 不需要维度词配合或没有触发追问条件，直接匹配
+            return {
+                "intent": intent,
+                "confidence": 0.95,
+                "entities": {
+                    "override_reason": f"pattern: {pattern}"
+                }
+            }
+
+        return None
 
     def link_business_terms(self, text: str) -> Dict[str, Any]:
         """链接业务术语到指标"""

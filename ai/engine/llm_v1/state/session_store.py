@@ -56,10 +56,12 @@ class SessionStore:
     Redis 会话状态管理器
     - 30分钟 TTL 自动过期
     - 存储对话历史和上下文
+    - 当 Redis 不可用时，使用内存存储作为 fallback
     """
 
     _instance: Optional['SessionStore'] = None
     _redis: Optional[redis.Redis] = None
+    _memory_store: Dict[str, SessionState] = {}  # 内存 fallback 存储
 
     # Redis Key 前缀
     KEY_PREFIX = "llm_v1:session:"
@@ -106,30 +108,35 @@ class SessionStore:
         获取会话状态
         返回 None 表示会话不存在或已过期
         """
-        if self._redis is None:
-            return None
+        # 先尝试从 Redis 获取
+        if self._redis is not None:
+            try:
+                key = self._get_key(session_id)
+                data = self._redis.get(key)
+                if data is None:
+                    return None
 
-        try:
-            key = self._get_key(session_id)
-            data = self._redis.get(key)
-            if data is None:
-                return None
+                state_dict = json.loads(data)
+                # 反序列化
+                history = [ConversationMessage(**m) for m in state_dict.get("history", [])]
+                context = ConversationContext(**state_dict.get("context", {}))
 
-            state_dict = json.loads(data)
-            # 反序列化
-            history = [ConversationMessage(**m) for m in state_dict.get("history", [])]
-            context = ConversationContext(**state_dict.get("context", {}))
+                return SessionState(
+                    session_id=session_id,
+                    history=history,
+                    context=context,
+                    last_node=state_dict.get("last_node"),
+                    last_result=state_dict.get("last_result"),
+                )
+            except Exception as e:
+                logger.warning(f"[SessionStore] Redis 获取会话失败: {e}，尝试内存存储")
 
-            return SessionState(
-                session_id=session_id,
-                history=history,
-                context=context,
-                last_node=state_dict.get("last_node"),
-                last_result=state_dict.get("last_result"),
-            )
-        except Exception as e:
-            logger.error(f"[SessionStore] 获取会话失败: {e}")
-            return None
+        # Redis 不可用时，使用内存存储
+        if session_id in self._memory_store:
+            logger.info(f"[SessionStore] 从内存存储获取 session: {session_id}")
+            return self._memory_store[session_id]
+
+        return None
 
     def save_session(self, session_id: str, state: SessionState, ttl: int = None) -> bool:
         """
@@ -139,10 +146,14 @@ class SessionStore:
         if ttl is None:
             ttl = self.DEFAULT_TTL
 
+        # 同时保存到内存存储（作为 fallback）
+        self._memory_store[session_id] = state
+        logger.info(f"[SessionStore] 保存到内存存储: session_id={session_id}")
+
+        # 尝试保存到 Redis
         if self._redis is None:
-            # Redis 不可用时只记录日志
-            logger.warning(f"[SessionStore] Redis 不可用，跳过保存 session_id={session_id}")
-            return False
+            logger.warning(f"[SessionStore] Redis 不可用，仅保存到内存存储")
+            return True
 
         try:
             key = self._get_key(session_id)
@@ -159,7 +170,7 @@ class SessionStore:
             return True
         except Exception as e:
             logger.error(f"[SessionStore] 保存会话失败: {e}")
-            return False
+            return True  # 内存存储已保存，返回成功
 
     def append_history(
         self,

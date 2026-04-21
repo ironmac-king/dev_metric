@@ -142,6 +142,31 @@ func UpdateTerm(c *gin.Context) {
 		}
 	}
 
+	// 处理 pq.Int64Array 类型的更新（GORM 需要特殊处理）
+	if metricIDs, ok := updates["metric_ids"]; ok {
+		switch v := metricIDs.(type) {
+		case []interface{}:
+			// JSON array -> pq.Int64Array
+			intArr := make(pq.Int64Array, 0, len(v))
+			for _, item := range v {
+				if f, ok := item.(float64); ok { // JSON number is float64
+					intArr = append(intArr, int64(f))
+				} else if i, ok := item.(int); ok {
+					intArr = append(intArr, int64(i))
+				}
+			}
+			updates["metric_ids"] = intArr
+		case []int:
+			intArr := make(pq.Int64Array, len(v))
+			for i, item := range v {
+				intArr[i] = int64(item)
+			}
+			updates["metric_ids"] = intArr
+		case []int64:
+			updates["metric_ids"] = pq.Int64Array(v)
+		}
+	}
+
 	if err := postgres.Get().Model(&term).Updates(updates).Error; err != nil {
 		response.Error(c, response.CodeInternalError, "更新失败")
 		return

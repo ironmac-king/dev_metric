@@ -118,6 +118,7 @@ func AnalysisStream(c *gin.Context) {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
 				if _, err := w.Write(buf[:n]); err != nil {
+					// 写入错误，停止
 					return false
 				}
 				// 手动 flush，让数据尽快发送
@@ -126,9 +127,11 @@ func AnalysisStream(c *gin.Context) {
 				}
 			}
 			if err != nil {
-				break
+				// 读取完毕（err != nil），停止 Stream
+				return false
 			}
+			// n == 0 && err == nil 的情况：短暂等待后重试
+			// 不做任何 sleep，避免 busy loop
 		}
-		return true
 	})
 }

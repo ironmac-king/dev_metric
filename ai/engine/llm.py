@@ -1147,8 +1147,10 @@ NL2Structure Prompt 用于将用户自然语言转换为结构化数据，输出
         Yields:
             str: LLM 返回的文本片段
         """
+        import time
         try:
             # OpenAI SDK 的流式调用
+            start_time = time.time()
             stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
@@ -1156,10 +1158,16 @@ NL2Structure Prompt 用于将用户自然语言转换为结构化数据，输出
                 max_tokens=max_tokens,
                 stream=True
             )
+            first_token_time = None
 
             for chunk in stream:
+                if first_token_time is None:
+                    first_token_time = time.time()
+                    logger.info(f"[LLMEngine] 流式首token延迟: {(first_token_time - start_time)*1000:.0f}ms")
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
+
+            logger.info(f"[LLMEngine] 流式完成, 总耗时: {(time.time() - start_time)*1000:.0f}ms")
 
         except Exception as e:
             try:

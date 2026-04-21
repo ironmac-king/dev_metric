@@ -123,8 +123,13 @@
             </div>
           </div>
 
-          <!-- 消息内容 -->
-          <div class="message-content" v-if="editingMessageIndex !== index && (!msg.result_data || msg.result_data.length === 0) && (!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0)" v-html="formatMessage(msg.content)"></div>
+          <!-- 消息内容（当有result_data时不显示，因为表格里已有结果） -->
+          <div class="message-content" v-if="editingMessageIndex !== index && (!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0) && (!msg.result_data || msg.result_data.length === 0) && msg.content && msg.content.trim()" v-html="formatMessage(msg.content)"></div>
+
+          <!-- 追问提示消息（当needs_clarification为true但没有候选选项时显示clarification_message） -->
+          <div v-if="msg.needs_clarification && msg.clarification_message && (!msg.matched_metrics || msg.matched_metrics.length === 0) && (!msg.dimension_value_candidates || msg.dimension_value_candidates.length === 0) && msg.clarification_type !== 'category_level' && msg.clarification_type !== 'slot_missing'" class="clarification-message">
+            {{ msg.clarification_message }}
+          </div>
 
           <!-- 指标候选选择 -->
           <div v-if="msg.needs_clarification && msg.matched_metrics && msg.matched_metrics.length > 0" class="metric-candidates">
@@ -160,18 +165,37 @@
             </div>
           </div>
 
-          <!-- 猜你想问建议 -->
-          <div v-if="msg.suggest && msg.suggest.length > 0" class="suggest-questions">
-            <div class="suggest-header">您是否想了解：</div>
-            <div class="suggest-list">
+          <!-- 品类级别选择 -->
+          <div v-if="msg.needs_clarification && msg.clarification_type === 'category_level'" class="metric-candidates">
+            <div class="candidates-list">
               <div
-                v-for="(item, idx) in msg.suggest"
+                v-for="(level, idx) in (msg.category_level_options || ['一级品类', '二级品类', '三级品类'])"
                 :key="idx"
-                class="suggest-item"
-                @click="$emit('select-suggestion', item)"
+                class="candidate-item cursor-pointer"
+                :class="{ selected: selectedCategoryLevelIdx === idx }"
+                @click="$emit('select-category-level', idx, level)"
               >
-                {{ item }}
+                <span class="candidate-name">{{ level }}</span>
+                <span class="candidate-code">[{{ idx + 1 }}]</span>
               </div>
+            </div>
+          </div>
+
+          <!-- 槽位选择（slot_missing） -->
+          <div v-if="msg.needs_clarification && msg.clarification_type === 'slot_missing'" class="metric-candidates">
+            <div class="candidates-list">
+              <div
+                v-for="(option, idx) in (msg.pending_slot_options || msg._pending_slot_options || [])"
+                :key="idx"
+                class="candidate-item cursor-pointer"
+                :class="{ selected: selectedSlotIdx === idx }"
+                @click="$emit('select-slot', idx, option)"
+              >
+                <span class="candidate-name">{{ option }}</span>
+              </div>
+            </div>
+            <div v-if="msg.pending_slots && msg.pending_slots.length > 1" class="slot-progress">
+              还需选择：{{ getPendingSlotsDisplay(msg.pending_slots, msg.pending_slot_name) }}
             </div>
           </div>
 
@@ -242,6 +266,21 @@
                 @current-change="(p) => $emit('page-change', p, msg)"
                 @size-change="(s) => $emit('page-size-change', s, msg)"
               />
+            </div>
+          </div>
+
+          <!-- 猜你想问建议 -->
+          <div v-if="msg.suggest && msg.suggest.length > 0" class="suggest-questions">
+            <div class="suggest-header">您是否想了解：</div>
+            <div class="suggest-list">
+              <div
+                v-for="(item, idx) in msg.suggest"
+                :key="idx"
+                class="suggest-item"
+                @click="$emit('select-suggestion', item)"
+              >
+                {{ item }}
+              </div>
             </div>
           </div>
 
@@ -410,6 +449,8 @@ const props = defineProps<{
   editingContent: string
   selectedCandidateIdx: number | null
   selectedDimValueIdx: number | null
+  selectedCategoryLevelIdx: number | null
+  selectedSlotIdx: number | null
   selectedDims: Record<string, string[]>
   progress?: number
   progressStage?: string
@@ -546,9 +587,7 @@ function formatMessageTime(time) {
 
 function formatMessage(content) {
   if (!content) return ''
-  return content
-    .replace(/\n/g, '<br>')
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+  return content.replace(/\n/g, '<br>')
 }
 
 function isWarningContent(content) {
@@ -567,6 +606,8 @@ function formatCellValue(value, key, msg) {
   const dimensionColNames = getDimensionColumnNames(msg?.drill_down_dims)
   const isDimensionCol = dimensionColNames.has(key)
   const isComparisonCol = key === '同比变化率' || key === '环比变化率'
+  // 占比列应该显示为百分比
+  const isPercentageCol = key.includes('占比') || key.includes('率') || key.includes('百分比')
   // 时间维度列（日报/月报/年报）不应该被格式化
   const isTimeCol = ['日', '月', '年', '日期', '年份', '月份'].includes(key)
   if (!isComparisonCol) {
@@ -590,18 +631,20 @@ function formatCellValue(value, key, msg) {
       }
       const num = parseFloat(value)
       if (!isNaN(num)) {
-        return new Intl.NumberFormat('zh-CN', {
+        const formatted = new Intl.NumberFormat('zh-CN', {
           minimumFractionDigits: 0,
           maximumFractionDigits: 2
         }).format(num)
+        return isPercentageCol ? formatted + '%' : formatted
       }
     }
     if (typeof value === 'number') {
       if (isDimensionCol || isTimeCol) return value
-      return new Intl.NumberFormat('zh-CN', {
+      const formatted = new Intl.NumberFormat('zh-CN', {
         minimumFractionDigits: 0,
         maximumFractionDigits: 2
       }).format(value)
+      return isPercentageCol ? formatted + '%' : formatted
     }
     return value
   }
@@ -626,6 +669,24 @@ function hasRowComparison(msg) {
   if (!firstRow) return false
   const keys = Object.keys(firstRow)
   return keys.some(k => k === '去年同期' || k === '同比变化率' || k === '上月同期' || k === '环比变化率')
+}
+
+function getPendingSlotsDisplay(pendingSlots: string[], currentSlotName: string): string {
+  // 过滤掉当前正在选择的槽位，返回剩余槽位的显示名称
+  const slotDisplayNames: Record<string, string> = {
+    'metric': '指标',
+    'time_range': '时间范围',
+    'platform': '平台',
+    'site': '站点',
+    'entity': '主体维度',
+    'ad_type': '广告类型',
+    'logistics': '物流方式',
+    'caliber': '数据口径'
+  }
+  return pendingSlots
+    .filter(slot => slot !== currentSlotName)
+    .map(slot => slotDisplayNames[slot] || slot)
+    .join('、')
 }
 
 function scrollToBottom() {
@@ -711,11 +772,13 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
   display: flex;
   flex-direction: column;
   gap: 16px;
+  width: 100%;
 }
 
 .message {
   display: flex;
   gap: 10px;
+  width: 100%;
 }
 
 .message.user {
@@ -737,8 +800,9 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
 }
 
 .message-bubble {
-  max-width: 72%;
+  max-width: 100%;
   min-width: 60px;
+  flex-shrink: 0;
 }
 
 .message-content {
@@ -755,6 +819,17 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
   background: var(--primary);
   color: #ffffff;
   border: none;
+}
+
+.clarification-message {
+  background: var(--bg-card);
+  padding: 12px 16px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  margin-top: 8px;
 }
 
 .message-time {
@@ -1510,5 +1585,87 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
 /* 隐藏思考过程 */
 .chat-messages.hide-thinking :deep(.thinking-process) {
   display: none !important;
+}
+
+/* Markdown 内容样式 */
+.message-content :deep(h1),
+.message-content :deep(h2),
+.message-content :deep(h3),
+.message-content :deep(h4),
+.message-content :deep(h5),
+.message-content :deep(h6) {
+  margin: 0.5em 0;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.message-content :deep(h1) { font-size: 1.4em; }
+.message-content :deep(h2) { font-size: 1.25em; }
+.message-content :deep(h3) { font-size: 1.1em; }
+
+.message-content :deep(p) {
+  margin: 0.5em 0;
+}
+
+.message-content :deep(ul),
+.message-content :deep(ol) {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.message-content :deep(li) {
+  margin: 0.25em 0;
+}
+
+.message-content :deep(code) {
+  background: var(--bg-primary);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
+}
+
+.message-content :deep(pre) {
+  background: #1E1E2E;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+
+.message-content :deep(pre code) {
+  background: transparent;
+  padding: 0;
+  color: #CDD6F4;
+}
+
+.message-content :deep(strong) {
+  font-weight: 600;
+}
+
+.message-content :deep(table) {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  width: 100%;
+}
+
+.message-content :deep(th),
+.message-content :deep(td) {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.message-content :deep(th) {
+  background: var(--bg-primary);
+  font-weight: 600;
+}
+
+.message-content :deep(blockquote) {
+  margin: 0.5em 0;
+  padding: 0.5em 1em;
+  border-left: 3px solid var(--primary);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
 }
 </style>

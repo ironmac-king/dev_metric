@@ -1,16 +1,28 @@
 /**
- * LLM.V1 API 封装
+ * LLM.V1 & V2 API 封装
  */
 import request from './index'
 
 export const llmAskApi = {
   /**
-   * 发送问题
+   * 发送问题 (V1)
    * @param {Object} params - { question, session_id }
    */
   ask(params) {
     return request({
       url: '/llm-ask',
+      method: 'post',
+      data: params,
+    })
+  },
+
+  /**
+   * 发送问题 (V2)
+   * @param {Object} params - { question, session_id }
+   */
+  askV2(params) {
+    return request({
+      url: '/llm-ask/v2',
       method: 'post',
       data: params,
     })

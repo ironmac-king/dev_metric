@@ -390,6 +390,24 @@ class IntentRouter:
         if mql.intent == MQLIntent.QUERY_RANKING:
             mql.top_n = result.get("top_n", 10)
 
+        # 解析排序方向（最少/最小 → ASC；最多/最大 → DESC）
+        order_by_direction = result.get("order_by", {}).get("direction", "") if isinstance(result.get("order_by"), dict) else ""
+        if not order_by_direction:
+            order_by_direction = result.get("order_by_direction", "")
+        if not order_by_direction:
+            # 根据问题关键词推断排序方向
+            question_lower = question.lower()
+            if any(kw in question_lower for kw in ['最少', '最小', '最低', '最差', '最弱', '最慢']):
+                order_by_direction = "ASC"
+            elif any(kw in question_lower for kw in ['最多', '最大', '最高', '最好', '最强', '最快']):
+                order_by_direction = "DESC"
+        if order_by_direction:
+            from ..schema import OrderBySpec
+            mql.order_by = OrderBySpec(
+                field="",
+                direction=order_by_direction.upper()
+            )
+
         return mql
 
     def _get_default_intent_prompt(self) -> str:
@@ -402,7 +420,12 @@ class IntentRouter:
 
 【输出格式】
 只输出JSON，不要有其他内容：
-{{"intent": "意图", "confidence": 0.0-1.0, "metric": {{"code": "", "name": "指标名称"}}, "time": {{"type": "relative", "original": "时间"}}, "dimensions": [{{"type": "维度"}}], "comparison": {{"enabled": false}}, "top_n": 0}}
+{{"intent": "意图", "confidence": 0.0-1.0, "metric": {{"code": "", "name": "指标名称"}}, "time": {{"type": "relative", "original": "时间"}}, "dimensions": [{{"type": "维度"}}], "comparison": {{"enabled": false}}, "top_n": 0, "order_by_direction": "ASC或DESC"}}
+
+【排序方向规则】
+- 最多/最大/最高/最好 → DESC
+- 最少/最小/最低/最差 → ASC
+- 默认 DESC
 
 【意图类型】
 - query_value: 查指标数值（多少、总额）

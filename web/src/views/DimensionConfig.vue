@@ -15,9 +15,35 @@
       </div>
     </div>
 
+    <!-- 顶部 Tab 切换 -->
+    <div class="page-tabs">
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'values' }"
+        @click="activeTab = 'values'"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <rect x="2" y="3" width="12" height="2" rx="1" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="2" y="7" width="12" height="2" rx="1" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="2" y="11" width="8" height="2" rx="1" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        维度值配置
+      </button>
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'types' }"
+        @click="switchToTypeMappings"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2 4H14M2 8H10M2 12H12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        类型映射
+      </button>
+    </div>
+
     <div class="page-content">
       <!-- 左侧表名列表 -->
-      <div class="table-panel">
+      <div class="table-panel" v-if="activeTab === 'values'">
         <div class="panel-header">
           <span>数据表</span>
           <span class="table-count">{{ tables.length }}</span>
@@ -64,9 +90,10 @@
           </el-input>
         </div>
       </div>
+      <!-- v-if 关闭 -->
 
-      <!-- 右侧维度配置列表 -->
-      <div class="config-panel">
+      <!-- 右侧维度值配置列表 -->
+      <div class="config-panel" v-if="activeTab === 'values'">
         <div class="config-header">
           <span class="config-title">维度配置 {{ selectedTable ? `- ${selectedTable}` : '' }}</span>
           <el-button type="primary" size="small" @click="openCreateDialog" :disabled="!selectedTable">
@@ -102,6 +129,38 @@
           </el-table-column>
         </el-table>
       </div>
+
+      <!-- 右侧类型映射配置列表（独占一行） -->
+      <div class="config-panel type-mapping-panel" v-if="activeTab === 'types'">
+        <div class="config-header">
+          <span class="config-title">维度类型映射（全局）</span>
+          <el-button type="primary" size="small" @click="openTypeMappingDialog()">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style="margin-right:4px">
+              <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            新增映射
+          </el-button>
+        </div>
+
+        <el-table :data="typeMappings" stripe class="config-table">
+          <el-table-column prop="dimension_type" label="维度类型" width="180" />
+          <el-table-column prop="column_name" label="列名" width="180" />
+          <el-table-column prop="description" label="描述" min-width="200" />
+          <el-table-column prop="status" label="状态" width="80">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 1 ? 'success' : 'info'" size="small">
+                {{ row.status === 1 ? '启用' : '停用' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="openTypeMappingDialog(row)">编辑</el-button>
+              <el-button type="danger" link size="small" @click="handleDeleteTypeMapping(row.id)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
     </div>
 
     <!-- 新增/编辑弹窗 -->
@@ -126,13 +185,35 @@
         <el-button type="primary" @click="handleSave">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 新增/编辑类型映射弹窗 -->
+    <el-dialog v-model="typeMappingDialogVisible" :title="typeMappingEditId ? '编辑映射' : '新增映射'" width="500px">
+      <el-form :model="typeMappingForm" label-width="100px">
+        <el-form-item label="维度类型">
+          <el-input v-model="typeMappingForm.dimension_type" placeholder="如 日期、日、月" />
+        </el-form-item>
+        <el-form-item label="列名">
+          <el-input v-model="typeMappingForm.column_name" placeholder="如 FDATE、MONTHS、WEEKS" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="typeMappingForm.description" placeholder="如 日期维度、季度维度" />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-switch v-model="typeMappingForm.status" :active-value="1" :inactive-value="0" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="typeMappingDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleSaveTypeMapping">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { dimensionConfigAPI } from '@/api'
+import { dimensionConfigAPI, dimensionTypeMappingAPI } from '@/api'
 
 const tables = ref([])
 const selectedTable = ref('')
@@ -141,6 +222,64 @@ const dialogVisible = ref(false)
 const isEdit = ref(false)
 const newTableName = ref('')
 const form = ref({ table_name: '', dimension_name: '', column_name: '', dimension_values: '[]', status: 1 })
+
+// 类型映射相关
+const activeTab = ref('values')
+const typeMappings = ref([])
+const typeMappingDialogVisible = ref(false)
+const typeMappingEditId = ref(null)
+const typeMappingForm = ref({ dimension_type: '', column_name: '', description: '', status: 1 })
+
+function switchToTypeMappings() {
+  activeTab.value = 'types'
+  loadTypeMappings()
+}
+
+async function loadTypeMappings() {
+  try {
+    const res = await dimensionTypeMappingAPI.list()
+    typeMappings.value = res.data || []
+  } catch (e) {
+    console.error('加载类型映射失败', e)
+  }
+}
+
+function openTypeMappingDialog(row) {
+  if (row) {
+    typeMappingEditId.value = row.id
+    typeMappingForm.value = { ...row }
+  } else {
+    typeMappingEditId.value = null
+    typeMappingForm.value = { dimension_type: '', column_name: '', description: '', status: 1 }
+  }
+  typeMappingDialogVisible.value = true
+}
+
+async function handleSaveTypeMapping() {
+  try {
+    if (typeMappingEditId.value) {
+      await dimensionTypeMappingAPI.update(typeMappingEditId.value, typeMappingForm.value)
+    } else {
+      await dimensionTypeMappingAPI.create(typeMappingForm.value)
+    }
+    typeMappingDialogVisible.value = false
+    ElMessage.success('保存成功')
+    loadTypeMappings()
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
+}
+
+async function handleDeleteTypeMapping(id) {
+  try {
+    await ElMessageBox.confirm('确认删除？', '提示')
+    await dimensionTypeMappingAPI.delete(id)
+    ElMessage.success('删除成功')
+    loadTypeMappings()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败')
+  }
+}
 
 function parseValues(jsonStr) {
   try { return JSON.parse(jsonStr) } catch { return [] }
@@ -275,6 +414,40 @@ onMounted(() => {
   padding: 16px 24px;
   background: var(--bg-card);
   border-bottom: 1px solid var(--border);
+}
+
+/* Tab 切换 */
+.page-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 16px 20px 0;
+}
+
+.tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  border-radius: 8px 8px 0 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border-bottom: 2px solid transparent;
+}
+
+.tab-btn:hover {
+  color: var(--primary);
+  background: var(--bg-primary);
+}
+
+.tab-btn.active {
+  color: var(--primary);
+  background: var(--bg-card);
+  border-bottom: 2px solid var(--primary);
 }
 
 .nav-left {
@@ -425,6 +598,10 @@ onMounted(() => {
   border-radius: 12px;
   padding: 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.03);
+}
+
+.type-mapping-panel {
+  grid-column: 1 / -1;
 }
 
 .config-header {

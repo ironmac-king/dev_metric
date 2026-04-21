@@ -23,12 +23,7 @@
           <el-popover placement="bottom" :width="280" trigger="click">
             <template #reference>
               <div class="ai-avatar cursor-pointer" :style="aiAvatarStyle">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5"/>
-                  <circle cx="12" cy="9" r="2.5" fill="currentColor"/>
-                  <circle cx="12" cy="15" r="1.5" fill="currentColor" opacity="0.5"/>
-                  <path d="M9 15C9 15 10.2 18 12 18C13.8 18 15 15 15 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                </svg>
+                <div ref="lottieContainer" class="lottie-avatar"></div>
               </div>
             </template>
             <div class="ai-avatar-settings">
@@ -158,7 +153,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, inject, watch } from 'vue'
+import { ref, computed, onMounted, nextTick, inject, watch, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { llmAskApi } from '@/api/llmAsk'
 import AskPreferencesPanel from './components/AskPreferencesPanel.vue'
@@ -166,6 +161,7 @@ import ChatSession from '@/components/ask/ChatSession.vue'
 import ChatMessage from '@/components/ask/ChatMessage.vue'
 import QuickActions from '@/components/ask/QuickActions.vue'
 import ChatInput from '@/components/ask/ChatInput.vue'
+import lottie from 'lottie-web'
 
 // 核心状态
 const question = ref('')
@@ -175,6 +171,8 @@ const sessionId = ref(localStorage.getItem('llm_v1_session_id') || '')
 const sessionHistory = ref<any[]>([])
 const sidebarCollapsed = ref(false)
 const chatMessageRef = ref<InstanceType<typeof ChatMessage> | null>(null)
+const lottieContainer = ref<HTMLElement | null>(null)
+let lottieAnim: any = null
 
 // 消息编辑状态
 const editingMessageIndex = ref(-1)
@@ -237,6 +235,26 @@ onMounted(async () => {
   if (savedSessionId) {
     sessionId.value = savedSessionId
     await loadSession(savedSessionId)
+  }
+
+  // 初始化 Lottie 动画
+  nextTick(() => {
+    if (lottieContainer.value) {
+      lottieAnim = lottie.loadAnimation({
+        container: lottieContainer.value,
+        renderer: 'svg',
+        loop: true,
+        autoplay: true,
+        path: '/lottie/Assistant-Bot.json'
+      })
+    }
+  })
+})
+
+onUnmounted(() => {
+  if (lottieAnim) {
+    lottieAnim.destroy()
+    lottieAnim = null
   }
 })
 
@@ -704,6 +722,12 @@ watch(() => question.value, (val) => {
   align-items: center;
   justify-content: center;
   color: #ffffff;
+  overflow: hidden;
+}
+
+.lottie-avatar {
+  width: 36px;
+  height: 36px;
 }
 
 .header-info h2 {

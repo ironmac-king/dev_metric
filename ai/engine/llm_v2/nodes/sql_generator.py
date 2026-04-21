@@ -240,7 +240,7 @@ class SQLGeneratorNode:
                 if match:
                     return match.group(1)
                 # 匹配 SUM(xxx) AS alias 或直接字段
-                match = re.search(r'SELECT\s+.*?\s+AS\s+`?(\w+)`?\s+FROM', sql_upper, re.DOTALL)
+                match = re.search(r'SELECT\s+.*?\s+AS\s+([\w\u4e00-\u9fff]+)\s*FROM', sql_upper, re.DOTALL)
                 if match:
                     alias = match.group(1)
                     # 如果 alias 等于默认字段，可能是真实字段名
@@ -251,9 +251,15 @@ class SQLGeneratorNode:
             den_field = _extract_field_from_sql(den.starrocks_sql, den.field or "ORDERED_PRODUCTSALES")
             mol_agg = mol.aggregation.value if hasattr(mol.aggregation, 'value') else (mol.aggregation or "SUM")
             den_agg = den.aggregation.value if hasattr(den.aggregation, 'value') else (den.aggregation or "SUM")
-            # 生成占比表达式
-            ratio_expr = f"{mol_agg}({mol_field}) * 100.0 / {den_agg}({den_field})"
-            ratio_name = mol.name if mol.name else "占比"
+            # 生成占比表达式（使用 ABS 取绝对值，因为退款数据可能是负数）
+            ratio_expr = f"ABS({mol_agg}({mol_field}) * 100.0 / {den_agg}({den_field}))"
+            # 构造占比名称：分子 + "占" + 分母 + "比重"
+            if mol.name and den.name:
+                ratio_name = f"{mol.name}占{den.name}比重"
+            elif mol.name:
+                ratio_name = f"{mol.name}占比"
+            else:
+                ratio_name = "占比"
             select_parts.append(f"{ratio_expr} AS {ratio_name}")
             logger.info(f"[_build_select] 占比模式: {mol_agg}({mol_field}) * 100.0 / {den_agg}({den_field})")
         # 添加指标列
@@ -266,12 +272,12 @@ class SQLGeneratorNode:
                 starrocks_sql = mql.metric.starrocks_sql.strip()
                 logger.info(f"[_build_select] starrocks_sql: {starrocks_sql[:200]}")
 
-                # 检测是否是复合指标（包含 / 或 *）
-                if '/' in starrocks_sql or '*' in starrocks_sql:
+                # 检测是否是复合指标（包含 / 或 * 或 ISNULL）
+                if '/' in starrocks_sql or '*' in starrocks_sql or 'ISNULL' in starrocks_sql.upper():
                     # 复合指标：提取完整的 SELECT ... AS alias 表达式
                     # 例如: SELECT SUM(TOTALSALES)/SUM(TOTALORDERS) AS `AD_AOV` FROM ...
                     # 注意: [^FROM] 匹配 F/R/O/M 单字符，不是字符串 FROM
-                    match = re.search(r'SELECT\s+(.+?)\s+AS\s+`?(\w+)`?\s+FROM', starrocks_sql, re.IGNORECASE | re.DOTALL)
+                    match = re.search(r'SELECT\s+(.+?)\s+AS\s+([\w\u4e00-\u9fff]+)\s*FROM', starrocks_sql, re.IGNORECASE | re.DOTALL)
                     if match:
                         inner_expr = match.group(1).strip()
                         alias = match.group(2)
@@ -401,26 +407,47 @@ class SQLGeneratorNode:
 
     def _build_order_by(self, mql: MQLSchema) -> str:
         """构建 ORDER BY 子句"""
+        # 如果显式指定了排序字段和方向，使用它
         if mql.order_by and mql.order_by.field:
             return f"ORDER BY {mql.order_by.field} {mql.order_by.direction}"
 
         # 默认按指标降序（有 GROUP BY 时必须用聚合函数）
         if mql.metric and mql.dimensions:
+            direction = "DESC"
+            if mql.order_by and mql.order_by.direction:
+                direction = mql.order_by.direction
+
             metric_alias = "ORDERED_PRODUCTSALES"
+            actual_field = None
             if mql.metric.starrocks_sql:
-                # 提取 starrocks_sql 中的别名
-                match = re.search(r'AS\s*`?(\w+)`?', mql.metric.starrocks_sql, re.IGNORECASE)
+                starrocks_sql = mql.metric.starrocks_sql.strip()
+                # 提取别名
+                match = re.search(r'AS\s+([\w\u4e00-\u9fff]+)', starrocks_sql, re.IGNORECASE)
                 if match:
                     metric_alias = match.group(1)
 
-                # 如果 starrocks_sql 包含除法（复合指标/ratio），不能用 SUM(alias)
-                # 直接用 SELECT 的第一个字段排序（通常是 GROUP BY 的维度列）
-                if '/' in mql.metric.starrocks_sql or '*' in mql.metric.starrocks_sql:
-                    logger.info(f"[_build_order_by] 复合指标不使用 ORDER BY alias，改用维度排序")
-                    return ""
+                # 尝试提取实际字段用于 ORDER BY
+                # 1. ISNULL 内的实际字段名
+                isnull_match = re.search(r'ISNULL\s*\(\s*([\w]+)', starrocks_sql, re.IGNORECASE)
+                if isnull_match:
+                    actual_field = isnull_match.group(1)
+                    logger.info(f"[_build_order_by] ISNULL指标，用实际字段排序: {actual_field}")
+                    return f"ORDER BY SUM({actual_field}) {direction}"
+
+                # 2. 简单的 SUM(col) AS alias - 提取聚合函数内的实际列名
+                # 用于 ORDER BY，因为别名在 ORDER BY 中不可用
+                agg_match = re.search(r'(SUM|AVG|COUNT|MAX|MIN)\s*\(\s*([\w]+)\s*\)', starrocks_sql, re.IGNORECASE)
+                if agg_match:
+                    actual_field = agg_match.group(2)  # 如 PAGEVIEWS_TOTAL
+                    logger.info(f"[_build_order_by] 提取聚合列用于排序: {actual_field}")
+                    return f"ORDER BY SUM({actual_field}) {direction}"
+
+                # 如果提取不到实际字段，回退到直接用别名排序
+                logger.info(f"[_build_order_by] 无法提取聚合列，用别名排序: {metric_alias}")
+                return f"ORDER BY {metric_alias} {direction}"
 
             # 有 GROUP BY 时，ORDER BY 必须用聚合函数
-            return f"ORDER BY SUM({metric_alias}) DESC"
+            return f"ORDER BY SUM({metric_alias}) {direction}"
 
         return ""
 

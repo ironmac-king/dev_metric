@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"dev_metric/config"
+	"dev_metric/internal/cache"
 	"dev_metric/internal/model"
 	"dev_metric/internal/repository/postgres"
 	"dev_metric/internal/repository/starrocks"
 	"dev_metric/pkg/response"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -171,6 +174,26 @@ func ExecuteQuery(c *gin.Context) {
 		return
 	}
 
+	// 生成缓存 key（SQL 的 SHA256 哈希）
+	hash := sha256.Sum256([]byte(req.SQL))
+	cacheKey := fmt.Sprintf("query:cache:%s", hex.EncodeToString(hash[:]))
+
+	// 尝试从缓存获取
+	ctx := c.Request.Context()
+	var cachedResult struct {
+		Data  interface{} `json:"data"`
+		Count int         `json:"count"`
+	}
+	if err := cache.GetJSON(ctx, cacheKey, &cachedResult); err == nil {
+		// 缓存命中
+		response.Success(c, gin.H{
+			"data":  cachedResult.Data,
+			"count": cachedResult.Count,
+			"cached": true,
+		})
+		return
+	}
+
 	// 执行查询
 	result, err := starrocks.QueryRaw(req.SQL)
 	if err != nil {
@@ -178,9 +201,21 @@ func ExecuteQuery(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, gin.H{
-		"data": result,
+	// 写入缓存，TTL 5分钟
+	cacheResult := gin.H{
+		"data":  result,
 		"count": len(result),
+	}
+	if err := cache.SetJSON(ctx, cacheKey, cacheResult, 5*time.Minute); err != nil {
+		fmt.Printf("[ExecuteQuery] 缓存写入失败: %v\n", err)
+	} else {
+		fmt.Printf("[ExecuteQuery] 缓存写入成功, key: %s, count: %d\n", cacheKey, len(result))
+	}
+
+	response.Success(c, gin.H{
+		"data":  result,
+		"count": len(result),
+		"cached": false,
 	})
 }
 

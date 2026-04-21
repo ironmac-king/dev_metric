@@ -29,6 +29,9 @@ func Init(cfg *config.DatabaseConfig) error {
 		return fmt.Errorf("连接 PostgreSQL 失败: %w", err)
 	}
 
+	// 设置客户端编码为 UTF-8
+	db.Exec("SET client_encoding TO 'UTF8'")
+
 	// 自动迁移表结构
 	if err := autoMigrate(); err != nil {
 		return fmt.Errorf("自动迁移表结构失败: %w", err)
@@ -76,6 +79,10 @@ func autoMigrate() error {
 		&model.FormulaSyntaxConfig{},
 		// 问数分析日志
 		&model.AskAnalysisLog{},
+		// 槽位追问配置
+		&model.SlotDefinition{},
+		&model.SlotDependency{},
+		&model.SlotRelation{},
 	)
 }
 

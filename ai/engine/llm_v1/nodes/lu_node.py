@@ -78,18 +78,19 @@ class LUNode:
 
         # Step 1.5: 同义词预处理 - 将用户输入中的同义词替换为标准术语
         # 例如："不含税收入" -> "未税收入"
+        # 策略：优先匹配更长的同义词，避免部分匹配问题
         config_loader = get_config_loader()
-        resolved_question = config_loader.resolve_synonym(question)
-        if resolved_question != question:
-            logger.info(f"[LUNode] 同义词替换: '{question}' -> '{resolved_question}'")
-        else:
-            # 如果没有匹配到同义词，尝试更激进的替换（匹配同义词中的任意一个词）
-            business_terms = config_loader.get_config().business_terms
-            for syn, standard in business_terms.items():
-                if syn in question:
-                    resolved_question = question.replace(syn, standard)
-                    logger.info(f"[LUNode] 部分同义词替换: '{question}' -> '{resolved_question}'")
-                    break
+        business_terms = config_loader.get_config().business_terms
+
+        # 按长度降序排列，优先匹配更长的词
+        sorted_terms = sorted(business_terms.items(), key=lambda x: len(x[0]), reverse=True)
+
+        resolved_question = question
+        for syn, standard in sorted_terms:
+            if syn in question:
+                resolved_question = question.replace(syn, standard)
+                logger.info(f"[LUNode] 同义词替换: '{question}' -> '{resolved_question}' (matched: '{syn}' -> '{standard}')")
+                break
 
         # Step 2: RAG 检索相关指标（使用替换后的文本）
         metric_context = await self._retrieve_metric_context(resolved_question if resolved_question != question else question)
@@ -105,9 +106,34 @@ class LUNode:
         # Step 5: 解析 LLM 输出
         output = self._parse_llm_response(response_text)
 
+        # 始终保存原始问题到 slots（供后续节点检测占比等关键词）
+        if output.slots is None:
+            output.slots = {}
+        output.slots["original_question"] = question
+        # 只有在有同义词替换时才保存 resolved_question
+        if resolved_question != question:
+            output.slots["resolved_question"] = resolved_question
+            logger.info(f"[LUNode] 保存 resolved_question 到 slots: {resolved_question}")
+
         # Step 6: 处理多轮继承
-        if context and not output.slots.get("metric") and context.current_metric:
-            output = self._apply_context_inheritance(output, context)
+        # 继承条件：
+        # 1. 当前没有 metric → 继承上轮 metric
+        # 2. 当前输入只有维度词（如"三级品类"、"二级品类"）→ 强制继承上轮 metric
+        # 3. 当前输入是意图追问文本（如"同比环比变化对比看"、"查看趋势"）→ 强制继承上轮 metric
+        if context and context.current_metric:
+            is_dimension_only = self._is_dimension_only_question(question)
+            is_intent_followup, followup_operations = self._is_intent_followup_question(question)
+            if is_dimension_only:
+                logger.info(f"[LUNode] 检测到仅维度问题，强制继承上轮 metric: {context.current_metric}")
+            elif is_intent_followup:
+                logger.info(f"[LUNode] 检测到意图追问，强制继承上轮 metric: {context.current_metric}")
+            if not output.slots.get("metric") or is_dimension_only or is_intent_followup:
+                output = self._apply_context_inheritance(output, context, force_override_metric=is_intent_followup)
+
+            # 如果检测到意图追问且有特定操作类型（如 compare、trend），设置 operations
+            if is_intent_followup and followup_operations:
+                output.slots["operations"] = followup_operations
+                logger.info(f"[LUNode] 设置 operations: {followup_operations}")
 
         # Step 7: 置信度检查
         output = self._check_confidence(output)
@@ -377,12 +403,18 @@ class LUNode:
             clarification_message="抱歉，我无法理解您的问题，请重新描述。",
         )
 
-    def _apply_context_inheritance(self, output: LUOutput, context) -> LUOutput:
-        """应用多轮对话上下文继承"""
+    def _apply_context_inheritance(self, output: LUOutput, context, force_override_metric: bool = False) -> LUOutput:
+        """应用多轮对话上下文继承
+
+        Args:
+            output: LU 输出
+            context: 会话上下文
+            force_override_metric: 是否强制覆盖 metric（用于意图追问场景）
+        """
         slots = output.slots.copy() if output.slots else {}
 
-        # 如果当前 slots 没有 metric，尝试从上下文继承
-        if not slots.get("metric") and context.current_metric:
+        # 如果当前 slots 没有 metric，或者强制要求覆盖，则从上下文继承
+        if (not slots.get("metric") or force_override_metric) and context.current_metric:
             slots["metric"] = context.current_metric
             slots["metric_code"] = context.current_metric_code
 
@@ -391,6 +423,13 @@ class LUNode:
 
         if not slots.get("dimensions") and context.current_dimensions:
             slots["dimensions"] = context.current_dimensions
+
+        # 防御性检查：当问题包含"分布"类关键词但维度是"日期"时，清除维度让 SF 节点重新映射
+        # 例如 "本月销售额分布在哪？" 不应该继承上轮的日期维度，而应该映射到平台/站点
+        original_question = slots.get("original_question", "")
+        if "分布" in original_question and slots.get("dimensions") == ["日期"]:
+            logger.info(f"[LUNode] 检测到'分布'追问但维度为日期，清除维度让 SF 节点重新映射")
+            slots["dimensions"] = None
 
         # 更新输出
         return LUOutput(
@@ -402,6 +441,137 @@ class LUNode:
             clarification_type=output.clarification_type,
             clarification_message=output.clarification_message,
         )
+
+    def _is_dimension_only_question(self, question: str) -> bool:
+        """
+        检测是否为仅维度问题（没有指标名，只有维度词）
+
+        例如：
+        - "三级品类" → True
+        - "二级品类" → True
+        - "一级品类" → True
+        - "平台" → True
+        - "店铺" → True
+        - "销售额" → False（有指标名）
+        - "本月销售额" → False（有指标名）
+        """
+        if not question:
+            return False
+
+        question = question.strip().lower()
+
+        # 纯维度词列表（按长度降序排列）
+        dimension_words = [
+            "三级品类", "二级品类", "一级品类",
+            "品类", "类目", "商品类", "产品类",
+            "平台", "站点",
+            "店铺", "商店",
+            "sku", "asin",
+            "月份", "年度", "季度", "周",
+            "日期", "每日", "每天",
+        ]
+
+        # 清理问题文本（去除时间词等修饰词）
+        cleaned = question
+        time_words = ["本月", "上月", "近7天", "近30天", "上周", "本周", "昨天", "今天"]
+        for tw in time_words:
+            cleaned = cleaned.replace(tw, "")
+
+        cleaned = cleaned.strip()
+
+        # 如果清理后只剩下维度词，则是纯维度问题
+        for dim in dimension_words:
+            if dim in cleaned:
+                # 进一步检查：清理后不包含明显的指标关键词
+                metric_keywords = ["销售额", "收入", "利润", "成本", "订单", "点击", "转化", "会话",
+                                   "退款", "退货", "广告", "花费", "运费", "费率", "客单价", "产出"]
+                for kw in metric_keywords:
+                    if kw in cleaned:
+                        return False
+                return True
+
+        return False
+
+    def _is_intent_followup_question(self, question: str) -> tuple:
+        """
+        检测是否为意图追问（点击建议按钮时发送的纯意图文本）
+
+        返回: (is_intent_followup: bool, operations: list or None)
+        如果返回的 operations 不为 None，说明需要设置特定操作类型
+
+        例如：
+        - "同比环比变化对比看" → (True, [{"type": "compare", "compare_type": "同比环比"}])
+        - "查看趋势" → (True, [{"type": "trend"}])
+        - "本月销售额是多少" → (False, None)
+        - "三级品类" → (False, None)
+        """
+        if not question:
+            return False, None
+
+        question = question.strip()
+
+        logger.info(f"[_is_intent_followup_question] 检查追问模式: question='{question}', len={len(question)}")
+
+        # 意图追问关键词（按长度降序排列）
+        intent_followup_patterns = [
+            "同比环比变化对比看", "同比环比对比看", "同比环比",
+            "对比看", "对比分析",
+            "查看趋势", "看趋势", "趋势分析",
+            "变化趋势", "涨跌情况",
+            "本月销售占比分布全览", "销售占比分布全览",
+            "销售额本月走势", "本月走势",
+            "分布如何", "占比如何", "占比情况",
+            "哪个最高", "哪个最低", "最高的是",
+            "明细查看", "查看明细",
+            "拆解分析", "结构分析",
+        ]
+
+        # 直接匹配完整的追问文本
+        for pattern in intent_followup_patterns:
+            if pattern in question:
+                # 检查是否包含同比/环比关键词
+                has_yoy = "同比" in question
+                has_mom = "环比" in question
+                if has_yoy or has_mom:
+                    # 同时包含同比和环比时，返回两个独立操作
+                    if has_yoy and has_mom:
+                        return True, [
+                            {"type": "compare", "compare_type": "同比"},
+                            {"type": "compare", "compare_type": "环比"}
+                        ]
+                    elif has_yoy:
+                        return True, [{"type": "compare", "compare_type": "同比"}]
+                    else:
+                        return True, [{"type": "compare", "compare_type": "环比"}]
+                if "趋势" in question or "走势" in question:
+                    return True, [{"type": "trend"}]
+                if "占比" in question or "比例" in question:
+                    return True, [{"type": "percentage"}]
+                return True, None
+
+        # 检查是否只有意图动词（很短的问题）
+        if len(question) <= 10:
+            intent_verbs = ["对比", "比较", "趋势", "变化", "涨跌", "分布", "占比", "最高", "最低", "明细", "拆解", "分析"]
+            for verb in intent_verbs:
+                if verb in question:
+                    # 特别处理同比/环比
+                    has_yoy = "同比" in question
+                    has_mom = "环比" in question
+                    if has_yoy or has_mom:
+                        if has_yoy and has_mom:
+                            return True, [
+                                {"type": "compare", "compare_type": "同比"},
+                                {"type": "compare", "compare_type": "环比"}
+                            ]
+                        elif has_yoy:
+                            return True, [{"type": "compare", "compare_type": "同比"}]
+                        else:
+                            return True, [{"type": "compare", "compare_type": "环比"}]
+                    if "趋势" in question or "走势" in question:
+                        return True, [{"type": "trend"}]
+                    return True, None
+
+        return False, None
 
     def _check_confidence(self, output: LUOutput) -> LUOutput:
         """置信度检查"""

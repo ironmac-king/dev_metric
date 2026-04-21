@@ -334,7 +334,17 @@
                     <td class="name-cell">{{ term.term }}</td>
                     <td>
                       <div class="synonym-tags">
-                        <el-tag v-for="syn in (term.synonyms || [])" :key="syn" size="small" type="info" style="margin: 2px">{{ syn }}</el-tag>
+                        <el-tag
+                          v-for="(syn, idx) in (term.synonyms || [])"
+                          :key="syn"
+                          size="small"
+                          type="info"
+                          closable
+                          @close="removeSynonym(term.id, idx)"
+                          style="margin: 2px"
+                        >
+                          {{ syn }}
+                        </el-tag>
                         <span v-if="!term.synonyms || term.synonyms.length === 0" class="no-synonym">暂无</span>
                       </div>
                     </td>
@@ -740,10 +750,39 @@
           </el-select>
         </el-form-item>
         <el-form-item label="维度字段">
-          <el-input v-model="termForm.dimension_field" placeholder="如：FSITECODE（维度列名）" />
+          <el-select
+            v-model="termForm.dimension_field"
+            placeholder="选择维度字段"
+            filterable
+            allow-create
+            clearable
+            style="width: 100%"
+            @change="(val) => loadDimensionValues(val)"
+          >
+            <el-option
+              v-for="f in dimensionFieldOptions"
+              :key="f"
+              :label="f"
+              :value="f"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="维度值">
-          <el-input v-model="termForm.dimension_value" placeholder="如：amazon（标准化值）" />
+          <el-select
+            v-model="termForm.dimension_value"
+            placeholder="选择或输入维度值"
+            filterable
+            allow-create
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="v in dimensionValueOptions"
+              :key="v"
+              :label="v"
+              :value="v"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="termForm.description" type="textarea" :rows="2" />
@@ -1172,7 +1211,8 @@ const filteredBusinessTerms = computed(() => {
   return businessTerms.value.filter(term =>
     term.term?.toLowerCase().includes(q) ||
     term.synonyms?.some(s => s.toLowerCase().includes(q)) ||
-    term.dimension_field?.toLowerCase().includes(q)
+    term.dimension_field?.toLowerCase().includes(q) ||
+    term.dimension_value?.toLowerCase().includes(q)
   )
 })
 
@@ -1256,9 +1296,37 @@ const termDialogTitle = ref('添加术语映射')
 const termForm = ref({
   term: '',
   synonyms: [],
-  description: ''
+  description: '',
+  dimension_field: '',
+  dimension_value: ''
 })
 const editingTermId = ref(null)
+const dimensionFieldOptions = ref([])
+const dimensionValueOptions = ref([])
+
+async function loadDimensionFields() {
+  try {
+    const res = await fetch('/api/v1/dimension-type-mappings').then(r => r.json())
+    const fields = [...new Set(res.data.map(m => m.dimension_type || m.dimension_field).filter(f => f))]
+    dimensionFieldOptions.value = fields
+  } catch (e) {
+    console.error('加载维度字段失败:', e)
+  }
+}
+
+function loadDimensionValues(dimField) {
+  if (!dimField) {
+    termForm.value.dimension_value = ''
+    dimensionValueOptions.value = []
+    return
+  }
+  const values = [...new Set(
+    businessTerms.value
+      .filter(t => t.dimension_field === dimField && t.dimension_value)
+      .map(t => t.dimension_value)
+  )]
+  dimensionValueOptions.value = values
+}
 
 async function loadData() {
   try {
@@ -1280,6 +1348,8 @@ async function loadData() {
   } catch (e) {
     console.error('加载数据失败:', e)
   }
+  // 加载维度字段选项
+  loadDimensionFields()
 }
 
 // Intent
@@ -1520,6 +1590,30 @@ async function saveTerm() {
     }
   } catch (e) {
     ElMessage.error('保存失败')
+  }
+}
+
+async function removeSynonym(termId, synonymIndex) {
+  const term = businessTerms.value.find(t => t.id === termId)
+  if (!term) return
+  const newSynonyms = [...(term.synonyms || [])]
+  newSynonyms.splice(synonymIndex, 1)
+  try {
+    await fetch(`/api/v1/metadata/terms/${termId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...term, synonyms: newSynonyms })
+    })
+    ElMessage.success('同义词已删除')
+    loadData()
+    // 热更新 AI 服务缓存
+    try {
+      await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+    } catch (e) {
+      console.warn('热更新失败:', e)
+    }
+  } catch (e) {
+    ElMessage.error('删除失败')
   }
 }
 

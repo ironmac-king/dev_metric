@@ -86,6 +86,33 @@ class SQLNode:
             except Exception as e:
                 logger.warning(f"[SQLNode] 时间范围计算失败: {e}")
 
+        # 特殊处理：率指标 + 有维度 + 无比较操作 → 直接构建 SQL（不走 LLM）
+        # 如果有比较操作（同比/环比），需要走 LLM 路径来扩展时间范围
+        if sf_output.is_rate_metric and sf_output.dimensions:
+            operations = sf_output.operations or []
+            has_compare = any(
+                isinstance(op, dict) and op.get("type") == "compare"
+                for op in operations
+            )
+            if not has_compare:
+                logger.info(f"[SQLNode] 率指标 + 维度（无比较），直接构建 SQL")
+                return self._build_rate_metric_sql(sf_output)
+            else:
+                logger.info(f"[SQLNode] 率指标 + 维度 + 有比较操作，走 LLM 路径")
+
+        # 特殊处理：动态占比计算（percentage 操作但没有预定义指标）
+        operations = sf_output.operations or []
+        has_percentage = any(
+            isinstance(op, dict) and op.get("type") == "percentage"
+            for op in operations
+        )
+        if has_percentage and not sf_output.starrocks_sql:
+            # 尝试构建动态占比 SQL
+            logger.info(f"[SQLNode] 检测到动态占比计算")
+            ratio_sql = await self._try_build_dynamic_ratio_sql(sf_output)
+            if ratio_sql:
+                return ratio_sql
+
         # Step 1: 检索 SQL 示例
         sql_examples = self._sql_retriever.retrieve(
             question="",  # TODO: 传入原始问题
@@ -154,39 +181,41 @@ class SQLNode:
         - 同比 (YoY): 本月 (2026-04-01 ~ 2026-04-17) + 去年同期 (2025-04-01 ~ 2025-04-17)
         - 环比 (MoM/QoQ): 本月 (2026-04-01 ~ 2026-04-17) + 上月 (2026-03-01 ~ 2026-03-31)
 
-        注意：如果 time_range 中已经包含 compare_start 和 compare_end（由 LU 节点设置），则跳过计算
+        注意：同时支持同比和环比时，设置多组时间范围
         """
-        # 如果已经有 compare_start 和 compare_end（LU 节点已设置），直接使用
-        if sf_output.time_range.get("compare_start") and sf_output.time_range.get("compare_end"):
-            logger.info(
-                f"[SQLNode] 使用 LU 设置的比较时间范围: "
-                f"{sf_output.time_range.get('compare_start')} ~ {sf_output.time_range.get('compare_end')}"
-            )
-            return
-
         operations = sf_output.operations or []
 
-        # 查找 compare 操作
-        compare_op = None
+        # 查找所有 compare 操作
+        compare_ops = []
         for op in operations:
             if isinstance(op, dict) and op.get("type") == "compare":
-                compare_op = op
-                break
+                compare_ops.append(op)
             elif op == "compare":
-                compare_op = {"type": "compare", "compare_type": "同比"}  # 默认为同比
-                break
+                compare_ops.append({"type": "compare", "compare_type": "同比"})
 
-        if not compare_op:
+        if not compare_ops:
+            logger.info(f"[SQLNode] 没有 compare_ops，不需要扩展时间范围, operations={operations}")
             return  # 不需要扩展
 
         time_start = sf_output.time_range.get("start", "")
         time_end = sf_output.time_range.get("end", "")
 
+        # 如果没有时间范围，使用当前时间自动计算"本月"
         if not time_start or not time_end:
-            return
-
-        # 获取比较类型：同比 或 环比
-        compare_type = compare_op.get("compare_type", "同比") if isinstance(compare_op, dict) else "同比"
+            from datetime import datetime, timedelta
+            today = datetime.now()
+            # 计算本月第一天
+            first_day_this_month = today.replace(day=1)
+            # 计算本月最后一天
+            if today.month == 12:
+                last_day_this_month = today.replace(day=31, month=12)
+            else:
+                last_day_this_month = today.replace(day=1, month=today.month + 1) - timedelta(days=1)
+            time_start = first_day_this_month.strftime("%Y-%m-%d")
+            time_end = last_day_this_month.strftime("%Y-%m-%d")
+            sf_output.time_range["start"] = time_start
+            sf_output.time_range["end"] = time_end
+            logger.info(f"[SQLNode] 自动计算本月时间范围: {time_start} ~ {time_end}")
 
         # 尝试解析时间范围
         try:
@@ -197,36 +226,42 @@ class SQLNode:
             start_dt = datetime.strptime(time_start[:10], "%Y-%m-%d")
             end_dt = datetime.strptime(time_end[:10], "%Y-%m-%d")
 
-            if "环比" in compare_type or "上月" in compare_type or "QoQ" in compare_type:
-                # 环比：计算上月
-                # 获取上月的第一天和最后一天
-                first_day_this_month = start_dt.replace(day=1)
-                last_day_last_month = first_day_this_month - timedelta(days=1)
-                first_day_last_month = last_day_last_month.replace(day=1)
+            for compare_op in compare_ops:
+                compare_type = compare_op.get("compare_type", "同比")
 
-                compare_start = first_day_last_month.strftime("%Y-%m-%d")
-                compare_end = last_day_last_month.strftime("%Y-%m-%d")
+                if "环比" in compare_type or "上月" in compare_type or "QoQ" in compare_type:
+                    # 环比：计算上月
+                    first_day_this_month = start_dt.replace(day=1)
+                    last_day_last_month = first_day_this_month - timedelta(days=1)
+                    first_day_last_month = last_day_last_month.replace(day=1)
 
-                logger.info(
-                    f"[SQLNode] 扩展时间范围(环比): 当前 {time_start} ~ {time_end}, "
-                    f"上月 {compare_start} ~ {compare_end}"
-                )
-            else:
-                # 同比：计算去年同期（默认）
-                last_year_start = start_dt.replace(year=start_dt.year - 1)
-                last_year_end = end_dt.replace(year=end_dt.year - 1)
+                    mom_start = first_day_last_month.strftime("%Y-%m-%d")
+                    mom_end = last_day_last_month.strftime("%Y-%m-%d")
 
-                compare_start = last_year_start.strftime("%Y-%m-%d")
-                compare_end = last_year_end.strftime("%Y-%m-%d")
+                    logger.info(
+                        f"[SQLNode] 扩展时间范围(环比): 当前 {time_start} ~ {time_end}, "
+                        f"上月 {mom_start} ~ {mom_end}"
+                    )
 
-                logger.info(
-                    f"[SQLNode] 扩展时间范围(同比): 当前 {time_start} ~ {time_end}, "
-                    f"去年同期 {compare_start} ~ {compare_end}"
-                )
+                    sf_output.time_range["mom_start"] = mom_start
+                    sf_output.time_range["mom_end"] = mom_end
+                    logger.info(f"[SQLNode] 设置 mom_start={mom_start}, mom_end={mom_end}")
+                else:
+                    # 同比：计算去年同期（默认）
+                    last_year_start = start_dt.replace(year=start_dt.year - 1)
+                    last_year_end = end_dt.replace(year=end_dt.year - 1)
 
-            # 更新 sf_output.time_range
-            sf_output.time_range["compare_start"] = compare_start
-            sf_output.time_range["compare_end"] = compare_end
+                    yoy_start = last_year_start.strftime("%Y-%m-%d")
+                    yoy_end = last_year_end.strftime("%Y-%m-%d")
+
+                    logger.info(
+                        f"[SQLNode] 扩展时间范围(同比): 当前 {time_start} ~ {time_end}, "
+                        f"去年同期 {yoy_start} ~ {yoy_end}"
+                    )
+
+                    sf_output.time_range["yoy_start"] = yoy_start
+                    sf_output.time_range["yoy_end"] = yoy_end
+                    logger.info(f"[SQLNode] 设置 yoy_start={yoy_start}, yoy_end={yoy_end}")
 
         except Exception as e:
             logger.warning(f"[SQLNode] 扩展时间范围失败: {e}")
@@ -446,6 +481,197 @@ class SQLNode:
             table=sf_output.table,
         )
 
+    def _build_rate_metric_sql(self, sf_output) -> SQLOutput:
+        """
+        构建率指标 SQL（支持 GROUP BY）
+
+        例如: base_sql = "SUM(TRANSPORTATION)/SUM(INCOME_BCSS)"
+
+        Args:
+            sf_output: SF 节点输出
+
+        Returns:
+            SQLOutput: 构建好的 SQL
+        """
+        # 从 starrocks_sql 提取核心公式
+        # starrocks_sql 格式: SELECT SUM(x)/SUM(y) AS `xxx` FROM ... WHERE 1=1
+        # 需要提取出纯公式: SUM(x)/SUM(y)
+        import re
+        starrocks_sql = sf_output.starrocks_sql or ""
+
+        # 用正则提取 SUM(x)/SUM(y) 公式
+        formula_match = re.search(r'SUM\s*\(\s*\w+\s*\)\s*/\s*SUM\s*\(\s*\w+\s*\)', starrocks_sql, re.IGNORECASE)
+        if formula_match:
+            base_sql = formula_match.group()
+            logger.info(f"[SQLNode] 提取率指标公式: {base_sql}")
+        else:
+            # 兜底：尝试清理完整 SQL
+            base_sql = starrocks_sql
+            if "WHERE" in base_sql:
+                base_sql = base_sql.split("WHERE")[0].strip()
+            if "GROUP BY" in base_sql:
+                base_sql = base_sql.split("GROUP BY")[0].strip()
+            if "ORDER BY" in base_sql:
+                base_sql = base_sql.split("ORDER BY")[0].strip()
+            # 移除 SELECT 和 FROM 之间的部分
+            if "SELECT" in base_sql:
+                parts = base_sql.split("SELECT")
+                base_sql = parts[-1] if parts[-1].strip() else base_sql
+            if "FROM" in base_sql:
+                base_sql = base_sql.split("FROM")[0].strip()
+            logger.warning(f"[SQLNode] 无法提取公式，使用清理后SQL: {base_sql}")
+
+        dimensions = sf_output.dimensions or {}
+
+        # 构建 SELECT 子句
+        if dimensions:
+            dim_cols = list(dimensions.values())
+            select_clause = f"{', '.join(dim_cols)}, {base_sql} AS `比率`"
+            group_by_clause = f"GROUP BY {', '.join(dim_cols)}"
+        else:
+            select_clause = base_sql
+            group_by_clause = ""
+
+        # 构建 WHERE 子句
+        where_parts = []
+        if sf_output.time_range.get("start"):
+            where_parts.append(f"FDATE >= '{sf_output.time_range['start']}'")
+        if sf_output.time_range.get("end"):
+            where_parts.append(f"FDATE <= '{sf_output.time_range['end']}'")
+
+        # 组合 SQL
+        sql = f"SELECT {select_clause} FROM {sf_output.table}"
+        if where_parts:
+            sql += " WHERE " + " AND ".join(where_parts)
+        else:
+            sql += " WHERE 1=1"
+        if group_by_clause:
+            sql += " " + group_by_clause
+
+        logger.info(f"[SQLNode] 构建率指标 SQL: {sql[:200]}...")
+
+        return SQLOutput(
+            sql=sql,
+            sql_type="query_value",
+            params={},
+            has_comparison=False,
+            has_percentage=True,
+            table=sf_output.table,
+        )
+
+    async def _try_build_dynamic_ratio_sql(self, sf_output) -> Optional[SQLOutput]:
+        """
+        尝试构建动态占比 SQL
+
+        当用户问"X占Y的比例"但没有匹配到预定义指标时，
+        通过指标字段映射表查找字段并构建 SQL
+
+        Args:
+            sf_output: SF 节点输出
+
+        Returns:
+            SQLOutput 或 None（无法构建时）
+        """
+        from ..metric_client import get_metric_client
+
+        operations = sf_output.operations or []
+
+        # 提取 base_metric 和 compare_metric
+        base_metric = None
+        compare_metric = None
+        for op in operations:
+            if isinstance(op, dict) and op.get("type") == "percentage":
+                base_metric = op.get("base_metric")
+                compare_metric = op.get("compare_metric")
+                break
+
+        # 如果缺失，尝试从问题文本解析
+        if not base_metric or not compare_metric:
+            resolved_question = sf_output.resolved_question or sf_output.original_question or ""
+            ratio_match = re.search(r'在(.+?)中的占比', resolved_question)
+            if ratio_match:
+                compare_metric = ratio_match.group(1).strip()
+                before_part = resolved_question[:ratio_match.start()]
+                # 提取 base_metric
+                metric_patterns = [
+                    r'退款金额数量', r'退款金额', r'退款数量', r'退款额',
+                    r'销量', r'销售额', r'销售量', r'收入', r'总收入', r'总营收',
+                ]
+                for pattern in metric_patterns:
+                    if pattern in before_part:
+                        base_metric = pattern
+                        break
+
+        if not base_metric or not compare_metric:
+            logger.warning(f"[SQLNode] 无法提取 base/compare metric")
+            return None
+
+        # 查找字段映射
+        metric_client = get_metric_client()
+        mapping = metric_client.get_metric_field_mapping()
+
+        base_field = mapping.get(base_metric, "")
+        compare_field = mapping.get(compare_metric, "")
+
+        if not base_field or not compare_field:
+            logger.warning(f"[SQLNode] 未找到字段映射: {base_metric}→?, {compare_metric}→?")
+            return None
+
+        # 构建核心除法 SQL
+        base_sql = f"SUM({base_field})/SUM({compare_field})"
+
+        # 使用率指标 SQL 构建逻辑
+        return self._build_rate_metric_sql_with_base(sf_output, base_sql)
+
+    def _build_rate_metric_sql_with_base(self, sf_output, base_sql: str) -> SQLOutput:
+        """
+        使用指定的基础 SQL 构建率指标 SQL
+
+        Args:
+            sf_output: SF 节点输出
+            base_sql: 基础 SQL，如 "SUM(a)/SUM(b)"
+
+        Returns:
+            SQLOutput
+        """
+        dimensions = sf_output.dimensions or {}
+
+        # 构建 SELECT 子句
+        if dimensions:
+            dim_cols = list(dimensions.values())
+            select_clause = f"{', '.join(dim_cols)}, {base_sql} AS `比率`"
+            group_by_clause = f"GROUP BY {', '.join(dim_cols)}"
+        else:
+            select_clause = base_sql
+            group_by_clause = ""
+
+        # 构建 WHERE 子句
+        where_parts = []
+        if sf_output.time_range.get("start"):
+            where_parts.append(f"FDATE >= '{sf_output.time_range['start']}'")
+        if sf_output.time_range.get("end"):
+            where_parts.append(f"FDATE <= '{sf_output.time_range['end']}'")
+
+        # 组合 SQL
+        sql = f"SELECT {select_clause} FROM {sf_output.table}"
+        if where_parts:
+            sql += " WHERE " + " AND ".join(where_parts)
+        else:
+            sql += " WHERE 1=1"
+        if group_by_clause:
+            sql += " " + group_by_clause
+
+        logger.info(f"[SQLNode] 构建动态占比 SQL: {sql[:200]}...")
+
+        return SQLOutput(
+            sql=sql,
+            sql_type="query_value",
+            params={},
+            has_comparison=False,
+            has_percentage=True,
+            table=sf_output.table,
+        )
+
     def _safe_format_template(self, template: str, vars: dict) -> str:
         """
         安全格式化模板，处理以下情况：
@@ -488,41 +714,171 @@ class SQLNode:
             for op in operations
         )
 
+        # 提取占比操作的分子分母
+        base_metric = None
+        compare_metric = None
+        for op in operations:
+            if isinstance(op, dict) and op.get("type") == "percentage":
+                base_metric = op.get("base_metric")
+                compare_metric = op.get("compare_metric")
+                logger.info(f"[SQLNode] 提取到占比操作: base_metric={base_metric}, compare_metric={compare_metric}")
+                break
+
+        # 优先使用 operations 中的占比信息
+        # 如果缺失，尝试从 resolved_question 或 original_question 中解析（关键词触发解析）
+        resolved_question = sf_output.resolved_question or ""
+        original_question = sf_output.original_question or ""
+
+        # 关键：即使 has_percentage=False，如果问题包含"占比"关键词，也尝试解析
+        # 优先使用 resolved_question（经过同义词替换的版本），如果为空则使用 original_question
+        ratio_text = resolved_question if resolved_question else original_question
+        should_parse_ratio = has_percentage or ("占比" in ratio_text or "比例" in ratio_text)
+
+        if should_parse_ratio and (not base_metric or not compare_metric) and ratio_text:
+            import re
+            # 匹配占比模式
+            # 格式1: "A在B中的占比" - 例如 "退款金额数量在销量中的占比"
+            # 格式2: "A占B的比例" - 例如 "销售额占总收入的比例"
+            # 格式3: "A在B中的比例" - 例如 "退款金额数量在销量中的比例"
+
+            # 常见指标词模式（从右向左）
+            metric_patterns = [
+                r'退款金额数量', r'退款金额', r'退款数量', r'退款额',
+                r'销量', r'销售额', r'销售量', r'收入', r'总收入', r'总营收',
+                r'订单量', r'订单额', r'订单金额',
+                r'访客量', r'访客数', r'浏览量', r'浏览数',
+                r'转化率', r'点击率', r'利用率',
+            ]
+
+            def extract_base_compare(ratio_text: str):
+                """从问题文本中提取分子和分母"""
+                # 尝试格式1: "A在B中的占比"
+                ratio_match = re.search(r'在(.+?)中的占比', ratio_text)
+                if ratio_match:
+                    compare_part = ratio_match.group(1).strip()
+                    before_part = ratio_text[:ratio_match.start()]
+                    # 从 before_part 提取指标词
+                    for pattern in metric_patterns:
+                        if pattern in before_part:
+                            return pattern, compare_part
+                    # 尝试后缀匹配
+                    suffix_match = re.search(r'([\w\u4e00-\u9fa5]*?(?:数量|金额|额|率|比))$', before_part)
+                    if suffix_match:
+                        return suffix_match.group(1), compare_part
+                    return None, compare_part
+
+                # 尝试格式2: "A占B的比例"
+                ratio_match = re.search(r'占(.+?)的比例', ratio_text)
+                if ratio_match:
+                    compare_part = ratio_match.group(1).strip()
+                    before_part = ratio_text[:ratio_match.start()]
+                    for pattern in metric_patterns:
+                        if pattern in before_part:
+                            return pattern, compare_part
+                    suffix_match = re.search(r'([\w\u4e00-\u9fa5]*?(?:数量|金额|额|率|比))$', before_part)
+                    if suffix_match:
+                        return suffix_match.group(1), compare_part
+                    return None, compare_part
+
+                # 尝试格式3: "A在B中的比例"
+                ratio_match = re.search(r'在(.+?)中的比例', ratio_text)
+                if ratio_match:
+                    compare_part = ratio_match.group(1).strip()
+                    before_part = ratio_text[:ratio_match.start()]
+                    for pattern in metric_patterns:
+                        if pattern in before_part:
+                            return pattern, compare_part
+                    suffix_match = re.search(r'([\w\u4e00-\u9fa5]*?(?:数量|金额|额|率|比))$', before_part)
+                    if suffix_match:
+                        return suffix_match.group(1), compare_part
+                    return None, compare_part
+
+                return None, None
+
+            extracted_base, extracted_compare = extract_base_compare(ratio_text)
+            logger.info(f"[SQLNode] 从问题文本解析占比: base={extracted_base}, compare={extracted_compare}")
+            if not base_metric and extracted_base:
+                base_metric = extracted_base
+            if not compare_metric and extracted_compare:
+                compare_metric = extracted_compare
+
+        # 关键：如果解析到了 base_metric 和 compare_metric，更新 has_percentage 标志
+        if not has_percentage and base_metric and compare_metric:
+            has_percentage = True
+            logger.info(f"[SQLNode] 通过解析更新 has_percentage=True")
+
         # 构建衍生指标要求
         compare_requirement = "无对比计算"
-        percentage_requirement = "需要生成占比计算（使用 SUM(...) OVER() 窗口函数）" if has_percentage else "无占比计算"
+        if has_percentage and base_metric and compare_metric:
+            percentage_requirement = f"""需要生成占比计算：
+- 分子：{base_metric}（需要 SUM 聚合）
+- 分母：{compare_metric}（需要 SUM 聚合）
+- 格式：SUM({base_metric}) / SUM({compare_metric})
+- 必须添加 ROUND(..., 2) 保留两位小数
+- 分子分母都必须是 SUM 聚合"""
+        elif has_percentage:
+            percentage_requirement = """需要生成占比计算（两个指标相除）：
+- 格式：SUM(分子指标) / SUM(分母指标)
+- 示例：退款率 = SUM(fqty_tk) / SUM(ORDER_QTY)
+- 必须添加 ROUND(..., 2) 保留两位小数
+- 分子分母都必须是 SUM 聚合，不能遗漏任何一个"""
+        else:
+            percentage_requirement = "无占比计算"
+
 
         # 如果有比较操作，在要求中说明时间范围扩展
+        # 支持同时处理同比和环比
         if has_compare:
-            compare_start = sf_output.time_range.get('compare_start', '')
-            compare_end = sf_output.time_range.get('compare_end', '')
+            logger.info(f"[SQLNode] 检测到 has_compare=True, operations={operations}")
+            yoy_start = sf_output.time_range.get('yoy_start', '')
+            yoy_end = sf_output.time_range.get('yoy_end', '')
+            mom_start = sf_output.time_range.get('mom_start', '')
+            mom_end = sf_output.time_range.get('mom_end', '')
 
-            # 获取比较类型：同比 或 环比
-            compare_type = "同比"
+            current_start = sf_output.time_range.get('start', '')
+            current_end = sf_output.time_range.get('end', '')
+
+            # 检查有哪些比较类型
+            compare_types = set()
             for op in operations:
                 if isinstance(op, dict) and op.get("type") == "compare":
-                    compare_type = op.get("compare_type", "同比")
-                    break
+                    ct = op.get("compare_type", "同比")
+                    if "环比" in ct or "上月" in ct or "QoQ" in ct:
+                        compare_types.add("环比")
+                    else:
+                        compare_types.add("同比")
+                elif op == "compare":
+                    compare_types.add("同比")
 
-            if compare_start and compare_end:
-                if "环比" in compare_type or "上月" in compare_type or "QoQ" in compare_type:
-                    # 环比：使用 JOIN 方式比较当前周期与上一周期
-                    compare_requirement = (
-                        f"需要生成环比计算（对比上一周期）。"
-                        f"重要：使用 JOIN 方式，JOIN 条件为 t1.month_num = t2.month_num + 1（上一月）。"
-                        f"当前周期（{sf_output.time_range.get('start')} ~ {sf_output.time_range.get('end')}）"
-                        f"，上一周期（{compare_start} ~ {compare_end}）。"
-                        f"示例：t1 子查询当前周期数据，t2 子查询上一周期数据，ON 条件用月份差值为1。"
-                    )
-                else:
-                    # 同比：使用 JOIN 方式比较当前周期与去年同期
-                    compare_requirement = (
-                        f"需要生成同比计算（对比去年同期）。"
-                        f"重要：使用 JOIN 方式，ON 条件为 t1.MONTHS = t2.MONTHS（月份匹配）。"
-                        f"当前周期（{sf_output.time_range.get('start')} ~ {sf_output.time_range.get('end')}）"
-                        f"，去年同期（{compare_start} ~ {compare_end}）。"
-                        f"示例：t1 子查询当前周期数据，t2 子查询去年同期数据，ON 条件用 MONTH(FDATE) 匹配。"
-                    )
+            logger.info(f"[SQLNode] compare_types: {compare_types}")
+
+            compare_requirement_parts = []
+
+            # 调试日志
+            logger.info(f"[SQLNode] compare_types: {compare_types}, yoy_start={yoy_start}, yoy_end={yoy_end}, mom_start={mom_start}, mom_end={mom_end}")
+
+            # 构建同比要求
+            if "同比" in compare_types and yoy_start and yoy_end:
+                compare_requirement_parts.append(
+                    f"【同比计算】需要生成同比计算（对比去年同期）。"
+                    f"当前周期（{current_start} ~ {current_end}），去年同期（{yoy_start} ~ {yoy_end}）。"
+                    f"使用 JOIN 方式，ON 条件为 t1.MONTHS = t2.MONTHS（月份匹配）。"
+                )
+
+            # 构建环比要求
+            if "环比" in compare_types and mom_start and mom_end:
+                compare_requirement_parts.append(
+                    f"【环比计算】需要生成环比计算（对比上一周期）。"
+                    f"当前周期（{current_start} ~ {current_end}），上一周期（{mom_start} ~ {mom_end}）。"
+                    f"使用 JOIN 方式，ON 条件为 t1.MONTHS = t2.MONTHS（月份匹配）。"
+                )
+
+            if compare_requirement_parts:
+                compare_requirement = "\n".join(compare_requirement_parts)
+                logger.info(f"[SQLNode] compare_requirement_parts: {compare_requirement_parts}")
+            else:
+                compare_requirement = "需要生成同比和/或环比计算，使用 JOIN 方式连接两个时间周期的聚合结果。"
+                logger.warning(f"[SQLNode] compare_requirement_parts 为空，使用默认描述")
 
         # 准备模板变量
         # dimensions 字典的 values 是数据库列名（如 "FDATE"），keys 是中文维度名（如"日期"）

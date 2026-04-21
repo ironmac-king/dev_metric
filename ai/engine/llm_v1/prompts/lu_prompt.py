@@ -45,7 +45,13 @@ LU_PROMPT = """你是一个意图识别专家。根据用户问题识别其查�
 
 4. **占比操作 percentage**
    - 当用户说"占比"、"份额"、"比例"时需要添加
-   - operations: [{"type": "percentage"}]
+   - 重要句式："A在B中的占比" → A是分子(被除数)，B是分母(除数)
+     - base_metric: 分子（A），如"退款数量"、"退款金额"
+     - compare_metric: 分母（B），如"销量"、"销售额"
+   - **常见错误**：把分母当成分子！请严格按"被除数/除数"理解
+   - 示例1："退款数量在销量中的占比" → base_metric="退款数量", compare_metric="销量"
+   - 示例2："销售额占总营收的比例" → base_metric="销售额", compare_metric="总营收"
+   - operations: [{"type": "percentage", "base_metric": "退款数量", "compare_metric": "销量"}]
 
 ## 时间维度映射（重要！）
 
