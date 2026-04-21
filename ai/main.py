@@ -1126,19 +1126,13 @@ async def reload_config():
         reload_prompt_manager()
         logger.info("[reload-config] PromptManager 已重新加载")
 
-        # 热更新业务术语同义词（LLM.V1）
-        from ai.engine.llm_v1.config_loader import get_config_loader
-        config_loader = get_config_loader()
-        config_loader.reload_business_terms()
-        logger.info("[reload-config] LLM.V1 业务术语已热更新")
-
-        # 热更新旧版 RuleEngine 业务术语（兼容）
+        # 热更新业务术语（RuleEngine）
         from ai.engine.rule_engine import RuleEngine
         rule_engine = RuleEngine()
         rule_engine.reload_business_terms()
         logger.info("[reload-config] RuleEngine 业务术语已热更新")
 
-        return {"success": True, "message": "LLM.V1 配置已重新加载"}
+        return {"success": True, "message": "配置已重新加载"}
     except Exception as e:
         logger.error(f"重新加载配置失败: {e}")
         return {"success": False, "message": str(e)}
@@ -1202,10 +1196,6 @@ def load_semantic_vectors():
 # 注册决策分析路由
 from ai.analysis import router as analysis_router
 app.include_router(analysis_router)
-
-# 注册 LLM.V1 路由
-from ai.engine.llm_v1.router import router as llm_v1_router
-app.include_router(llm_v1_router)
 
 # 注册 LLM.V2 路由
 try:

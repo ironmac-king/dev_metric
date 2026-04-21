@@ -30,11 +30,6 @@ const routes = [
         component: () => import('../views/Alerts.vue')
       },
       {
-        path: 'llm-ask',
-        name: 'LLMAsk',
-        component: () => import('../views/LLMAsk.vue')
-      },
-      {
         path: 'ask-analysis',
         name: 'AskAnalysis',
         component: () => import('../views/AskAnalysis.vue')

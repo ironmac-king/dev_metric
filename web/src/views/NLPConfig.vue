@@ -903,7 +903,6 @@
               <el-option label="sql_generation" value="sql_generation" />
               <el-option label="general" value="general" />
               <el-option label="decision_analysis" value="decision_analysis" />
-              <el-option label="llm_v1" value="llm_v1" />
             </el-select>
           </el-form-item>
           <el-form-item label="描述" class="form-item-inline form-item-desc">
