@@ -560,9 +560,8 @@ async function handleStreamMode(text, aiMsgIndex) {
   }
 
   let lastEventType = ''
-  let streamDone = false  // 标记流式是否已完成
 
-  while (!streamDone) {
+  while (true) {
     const { done, value } = await reader.read()
     if (done) break
 
@@ -652,14 +651,13 @@ async function handleStreamMode(text, aiMsgIndex) {
         if (aiMsgIndex < messages.value.length) {
           messages.value[aiMsgIndex].thinkingSteps = []
         }
-        // 标记流式完成，退出 while 循环
-        streamDone = true
+        // 退出 while 循环
         break
       }
     }
   }
 
-  // 处理剩余 buffer
+  // 处理剩余 buffer（仅在非 break 退出时执行）
   if (buffer) {
     const eventData = parseSSE(buffer)
     if (eventData && lastEventType === 'chunk') {

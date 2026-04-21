@@ -129,15 +129,6 @@ class IntentRouter:
                 "clarification_options": [{"label": d, "value": d} for d in generic_dims]
             }
 
-    def _handle_greeting(self) -> Dict[str, Any]:
-        """处理寒暄"""
-        return {
-            "mql": None,
-            "needs_clarification": False,
-            "clarification_message": "",
-            "answer": "您好！我是智能问数助手，可以帮您查询业务数据。请问您想查询什么指标？",
-        }
-
     async def _handle_followup(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
         """处理短追问"""
         logger.info("[IntentRouter] 处理短追问")

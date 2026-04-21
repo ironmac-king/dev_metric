@@ -7,6 +7,34 @@ from ai.config.logging_config import get_logger
 
 logger = get_logger("ai.metric_client")
 
+# 同义词映射表（标准名称 -> 同义词列表）
+_SYNONYMS = {
+    # 广告相关
+    "广告点击率": ["广告转化率", "ctr", "click_rate", "点击率", "广告点击"],
+    "广告花费": ["广告成本", "广告支出", "ad_cost", "spend", "广告费用"],
+    "广告点击": ["点击量", "clicks", "点击次数"],
+    "广告转化率": ["ctr", "cvr", "conversion_rate", "转化率"],
+    # 利润相关
+    "毛利润": ["税前利润", "利润", "profit"],
+    "毛利率": ["税前利润率", "利润率", "profit_margin", "margin", "利润占比"],
+    "税前利润": ["毛利润", "利润", "profit"],
+    "税前利润率": ["毛利率", "利润率", "profit_margin", "margin"],
+    # 销售额相关
+    "销售额": ["销售", "sales", "收入", "总销售额", "营收"],
+    "订单量": ["订单数", "订单", "orders", "total_orders"],
+    "客单价": ["平均订单价值", "aov", "average_order_value"],
+    # 访客相关
+    "访客数": ["访客", "visitors", "流量", "sessions"],
+    "转化率": ["cvr", "conversion_rate"],
+    # 页面访问相关
+    "页面访问量": ["pv", "PV", "page views", "PageViews", "访问量", "页面pv"],
+}
+
+# 反向映射（从同义词到标准名称）- 初始化一次
+_SYNONYMS_REVERSE = {
+    syn.lower(): canonical for canonical, syns in _SYNONYMS.items() for syn in syns
+}
+
 # 全局 HTTP 客户端（连接池复用）
 _http_client: Optional[httpx.Client] = None
 
@@ -75,35 +103,6 @@ class MetricClient:
 
         修复：短查询词(<3字符)不使用模糊子串匹配，避免"pv"匹配到"costfeess_rate"等问题
         """
-        # 同义词映射表（标准名称 -> 同义词列表）
-        SYNONYMS = {
-            # 广告相关
-            "广告点击率": ["广告转化率", "ctr", "click_rate", "点击率", "广告点击"],
-            "广告花费": ["广告成本", "广告支出", "ad_cost", "spend", "广告费用"],
-            "广告点击": ["点击量", "clicks", "点击次数"],
-            "广告转化率": ["ctr", "cvr", "conversion_rate", "转化率"],
-            # 利润相关
-            "毛利润": ["税前利润", "利润", "profit"],
-            "毛利率": ["税前利润率", "利润率", "profit_margin", "margin", "利润占比"],
-            "税前利润": ["毛利润", "利润", "profit"],
-            "税前利润率": ["毛利率", "利润率", "profit_margin", "margin"],
-            # 销售额相关
-            "销售额": ["销售", "sales", "收入", "总销售额", "营收"],
-            "订单量": ["订单数", "订单", "orders", "total_orders"],
-            "客单价": ["平均订单价值", "aov", "average_order_value"],
-            # 访客相关
-            "访客数": ["访客", "visitors", "流量", "sessions"],
-            "转化率": ["cvr", "conversion_rate"],
-            # 页面访问相关
-            "页面访问量": ["pv", "PV", "page views", "PageViews", "访问量", "页面pv"],
-        }
-
-        # 构建反向映射（从同义词到标准名称）
-        SYNONYMS_REVERSE = {}
-        for canonical, syns in SYNONYMS.items():
-            for syn in syns:
-                SYNONYMS_REVERSE[syn.lower()] = canonical
-
         try:
             all_metrics = self.get_all_metrics()
             metric_name_lower = metric_name.lower()
@@ -117,8 +116,8 @@ class MetricClient:
 
             # 2. 同义词精确匹配（用户输入 -> 同义词 -> 标准名称 -> 指标）
             # 使用反向映射：pv -> "页面访问量" -> 查找指标名="页面访问量"的指标
-            if metric_name_lower in SYNONYMS_REVERSE:
-                canonical_name = SYNONYMS_REVERSE[metric_name_lower]
+            if metric_name_lower in _SYNONYMS_REVERSE:
+                canonical_name = _SYNONYMS_REVERSE[metric_name_lower]
                 logger.info(f"[get_metric_by_name] 同义词匹配: '{metric_name}' -> '{canonical_name}'")
                 for m in all_metrics:
                     name = m.get("name", "")
@@ -136,7 +135,7 @@ class MetricClient:
             if len(metric_name_lower) < 3:
                 logger.warning(f"[get_metric_by_name] 查询词过短 '{metric_name}'，跳过模糊子串匹配")
                 # 仍尝试同义词模糊匹配
-                for syn_key, syn_list in SYNONYMS.items():
+                for syn_key, syn_list in _SYNONYMS.items():
                     if metric_name_lower in syn_key.lower():
                         for syn in syn_list:
                             syn_lower = syn.lower()
