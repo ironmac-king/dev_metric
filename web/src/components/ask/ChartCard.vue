@@ -36,6 +36,35 @@
       <div class="metric-label">{{ chartOptions.label }}</div>
     </div>
 
+    <!-- MoM 对比卡片模式 -->
+    <div v-else-if="chartType === 'comparison' && chartOptions" class="comparison-card">
+      <div class="comparison-header">
+        <span class="comparison-title">{{ props.metricName || '环比对比' }}</span>
+        <span v-if="chartOptions.trendText" class="comparison-trend" :class="chartOptions.trendClass">
+          {{ chartOptions.trendText }}
+        </span>
+      </div>
+      <div class="comparison-values">
+        <div class="comparison-item">
+          <div class="comparison-label">上期（2月）</div>
+          <div class="comparison-value">{{ chartOptions.compareVal }}</div>
+        </div>
+        <div class="comparison-arrow">→</div>
+        <div class="comparison-item">
+          <div class="comparison-label">当期（3月）</div>
+          <div class="comparison-value">{{ chartOptions.currentVal }}</div>
+        </div>
+        <div class="comparison-item change">
+          <div class="comparison-label">变化率</div>
+          <div class="comparison-value" :class="chartOptions.trendClass">
+            <span v-if="chartOptions.trend === '增长'">↑</span>
+            <span v-else-if="chartOptions.trend === '下降'">↓</span>
+            {{ chartOptions.changeRate }}
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-else ref="chartContainer" class="chart-container" :style="{ height: height + 'px', width: '100%' }"></div>
 
     <!-- 数据解读 -->
@@ -136,6 +165,14 @@ const chartType = computed(() => {
 
   if (!props.data || props.data.length === 0) return 'table'
 
+  // MoM 对比数据检测：同时有 current_val, compare_val, change_rate
+  if (props.data.length === 1) {
+    const row = props.data[0]
+    if (row && 'current_val' in row && 'compare_val' in row && 'change_rate' in row) {
+      return 'comparison'
+    }
+  }
+
   // 单条汇总数据，显示为数字卡片
   if (props.data.length === 1) {
     const keys = Object.keys(props.data[0])
@@ -208,6 +245,24 @@ const chartOptions = computed(() => {
         return val !== null && val !== '' && (typeof val === 'number' || !isNaN(parseFloat(val)))
       }))
 
+  // MoM 对比卡片模式优先检查
+  if (chartType.value === 'comparison') {
+    const row = data[0]
+    const currentVal = parseFloat(row.current_val) || 0
+    const compareVal = parseFloat(row.compare_val) || 0
+    const changeRate = row.change_rate || '0'
+    const trend = row.trend || ''
+    return {
+      type: 'comparison',
+      currentVal: formatChartValue(currentVal),
+      compareVal: formatChartValue(compareVal),
+      changeRate: `${changeRate}%`,
+      trend: trend,
+      trendClass: trend === '增长' ? 'up' : trend === '下降' ? 'down' : 'flat',
+      trendText: trend === '增长' ? `↑ ${changeRate}%` : trend === '下降' ? `↓ ${changeRate}%` : '持平'
+    }
+  }
+
   // 单值卡片模式优先检查
   if (chartType.value === 'card' && numericKeys.length > 0) {
     const numericKey = numericKeys[0]
@@ -248,8 +303,8 @@ const chartOptions = computed(() => {
         let html = `<div style="font-weight:500;margin-bottom:4px">${xValue}</div>`
         params.forEach(p => {
           const formattedValue = formatChartValue(p.value)
-          // 优先使用中文指标名，否则使用数据库字段名
-          const label = props.metricName || p.seriesName
+          // 单系列时使用中文指标名，多系列时使用各系列自己的名字（如 current_val、compare_val）
+          const label = (params.length === 1 && props.metricName) ? props.metricName : p.seriesName
           html += `<div style="display:flex;justify-content:space-between;gap:16px">
             <span style="color:#6b7280">${p.marker}${label}</span>
             <span style="font-weight:500;color:#374151">${formattedValue}</span>
@@ -677,6 +732,97 @@ onBeforeUnmount(() => {
 .metric-label {
   font-size: 14px;
   color: #6B7280;
+}
+
+/* MoM 对比卡片 */
+.comparison-card {
+  padding: 20px;
+  background: linear-gradient(135deg, #F5F3FF 0%, #FFFFFF 100%);
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  border-radius: 12px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.comparison-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.comparison-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: #374151;
+}
+
+.comparison-trend {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.comparison-trend.up {
+  color: #10B981;
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.comparison-trend.down {
+  color: #EF4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.comparison-trend.flat {
+  color: #6B7280;
+  background: rgba(107, 114, 128, 0.1);
+}
+
+.comparison-values {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.comparison-item {
+  flex: 1;
+  text-align: center;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 8px;
+}
+
+.comparison-item.change {
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+}
+
+.comparison-label {
+  font-size: 12px;
+  color: #6B7280;
+  margin-bottom: 6px;
+}
+
+.comparison-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.comparison-value.up {
+  color: #10B981;
+}
+
+.comparison-value.down {
+  color: #EF4444;
+}
+
+.comparison-arrow {
+  font-size: 20px;
+  color: #9CA3AF;
+  flex-shrink: 0;
 }
 
 /* Fullscreen */

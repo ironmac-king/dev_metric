@@ -804,7 +804,9 @@ function rateMessage(msg, rating) {
 }
 
 function selectClarification(option) {
-  question.value = option.value
+  // 发送 option.label（如"按一级品类"）而不是 option.value（如"GROUP_1"）
+  // 后端会将短追问与 inherited_mql 组合生成完整 SQL
+  question.value = option.label
   handleSend()
 }
 
@@ -1312,6 +1314,7 @@ function scrollToBottom() {
   color: #fff;
   border: none;
   box-shadow: 0 6px 20px rgba(99, 102, 241, 0.3), 0 2px 4px rgba(99, 102, 241, 0.15);
+  padding: 10px 16px;
 }
 
 /* 用户消息气泡小三角 */

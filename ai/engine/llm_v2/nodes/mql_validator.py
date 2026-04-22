@@ -94,6 +94,9 @@ class MQLSemanticValidator:
         needs_metric_api = True
         if mql.metric and mql.metric.starrocks_sql:
             # starrocks_sql 已填充，跳过 metric API 调用
+            logger.info(f"[MQLSemanticValidator] 快速路径: metric.starrocks_sql={repr(mql.metric.starrocks_sql[:50] if mql.metric.starrocks_sql else '')}")
+            needs_metric_api = False
+            # starrocks_sql 已填充，跳过 metric API 调用
             logger.info(f"[MQLSemanticValidator] 快速路径: metric.starrocks_sql 已填充，跳过 API")
             needs_metric_api = False
             # 仍做基本规则检查
@@ -143,6 +146,7 @@ class MQLSemanticValidator:
 
     async def _validate_metric(self, metric: MQLMetric) -> Tuple[bool, str]:
         """验证指标并填充 starrocks_sql"""
+        logger.info(f"[_validate_metric] ENTRY: code={metric.code!r}, name={metric.name!r}, starrocks_sql={metric.starrocks_sql!r}")
         # 如果有 code，尝试从指标库获取 starrocks_sql
         if metric.code:
             metric_info = await self._get_metric_info(metric.code)
@@ -203,7 +207,11 @@ class MQLSemanticValidator:
 
         # 如果没有 code 但有 name，尝试通过 name 查找
         if not metric.code and metric.name:
+            logger.info(f"[_validate_metric] 通过 name 查找: metric.name={repr(metric.name)}")
             metric_info = await self._get_metric_info_by_name(metric.name)
+            logger.info(f"[_validate_metric] name 查找结果: metric_info is None={metric_info is None}")
+            if metric_info:
+                logger.info(f"[_validate_metric] metric_info keys: {list(metric_info.keys())}")
             if metric_info:
                 metric.code = metric_info.get("metric_code", metric.code)
                 if not metric.starrocks_sql and metric_info.get("starrocks_sql"):

@@ -28,6 +28,27 @@ class MQLGenerator:
     def __init__(self):
         self._prompt_manager = get_prompt_manager()
         self._llm_engine = get_llm_engine()
+        self._dimension_name_to_column = None  # 动态维度映射
+
+    def _load_dimension_configs(self):
+        """从 API 加载维度配置，构建 dimension_name → column_name 映射"""
+        if self._dimension_name_to_column is not None:
+            return
+        try:
+            from ai.client.metric_client import MetricClient
+            client = MetricClient()
+            configs = client.get_dimension_configs()
+            if configs:
+                self._dimension_name_to_column = {}
+                for cfg in configs:
+                    dimName = cfg.get("dimension_name", "")
+                    colName = cfg.get("column_name", "")
+                    if dimName and colName:
+                        self._dimension_name_to_column[dimName] = colName
+                logger.info(f"[MQLGenerator] 从 dimension_configs 加载了 {len(self._dimension_name_to_column)} 个维度映射")
+        except Exception as e:
+            logger.warning(f"[MQLGenerator] 加载 dimension_configs 失败: {e}")
+            self._dimension_name_to_column = None
 
     async def generate(
         self,
@@ -365,8 +386,17 @@ class MQLGenerator:
             except ValueError:
                 mql.time = TimeRange(original=time_data.get("original", "本月"))
 
-        # 维度 - 中文到英文的映射
-        dim_type_map = {
+        # 加载 dimension_configs 动态映射
+        self._load_dimension_configs()
+
+        # 维度 - 中文到英文的映射（动态加载优先，硬编码作为回退）
+        # dimension_configs 返回 dimension_name → column_name 的映射
+        dim_type_map = {}
+        if self._dimension_name_to_column:
+            dim_type_map.update(self._dimension_name_to_column)
+
+        # 硬编码映射作为回退（处理 dimension_configs 中没有的情况）
+        fallback_map = {
             "店铺": "SHOP",
             "站点": "SITE",
             "平台": "PLATFORM",
@@ -392,6 +422,9 @@ class MQLGenerator:
             "三级品类": "GROUP_3",
             "四级品类": "GROUP_4",
         }
+        for k, v in fallback_map.items():
+            if k not in dim_type_map:
+                dim_type_map[k] = v
 
         # 维度 - 不从 LLM 提取 column，避免幻觉，使用 sql_generator 的映射
         for dim_data in result.get("dimensions", []):
@@ -497,6 +530,14 @@ class MQLGenerator:
         # 指标继承
         if not mql.metric and inherited_mql and inherited_mql.metric:
             mql.metric = inherited_mql.metric
+
+        # Top N 继承（用于排名查询的追问回复）
+        if inherited_mql and inherited_mql.top_n and inherited_mql.top_n > 0:
+            mql.top_n = inherited_mql.top_n
+
+        # Order By 继承
+        if not mql.order_by and inherited_mql and inherited_mql.order_by:
+            mql.order_by = inherited_mql.order_by
 
         # 自动注入时序维度（每天/每周/每月/每年）
         if not mql.dimensions:
@@ -614,7 +655,8 @@ class MQLGenerator:
 - REGION: 地区/区域
 - FCOUNTRY: 国家
 - PLATFORM: 平台
-- FSITE: 站点/店铺
+- FSITE: 店铺
+- FSITECODE: 站点
 - FCHANNEL: 渠道
 - FBRANDS: 品牌
 - FPRODUCTLINE: 产品线

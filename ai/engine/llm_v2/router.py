@@ -97,6 +97,12 @@ async def ask_question_v2(req: AskRequestV2):
             created_at=datetime.now().isoformat(),
         )
 
+        # 恢复上轮 MQL（用于多轮对话上下文继承）
+        inherited_mql = v2_session_mql.get(session_id)
+        if inherited_mql:
+            state.inherited_mql = inherited_mql
+            logger.info(f"[V2] 恢复上轮 MQL: session_id={session_id}, intent={inherited_mql.intent.value if inherited_mql else 'N/A'}")
+
         # 2. 获取 V2 Graph
         v2_graph = get_v2_graph()
 
@@ -174,6 +180,11 @@ async def ask_question_v2(req: AskRequestV2):
             tracker.record_node(step.step, step.duration_ms, step.status == "completed")
 
         logger.info(f"[V2] 回答完成: {response.answer[:50]}..., 耗时 {duration_ms}ms")
+
+        # 保存当前 MQL 到 session store（用于多轮对话上下文继承）
+        if result_state and result_state.mql:
+            v2_session_mql[session_id] = result_state.mql
+            logger.info(f"[V2] 保存 MQL 到 session: session_id={session_id}, intent={result_state.mql.intent.value if result_state.mql.intent else 'N/A'}, dimensions={[d.type for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}")
 
         return response
 

@@ -11,6 +11,7 @@ import (
 	"dev_metric/pkg/response"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -163,13 +164,9 @@ func ExecuteQuery(c *gin.Context) {
 		return
 	}
 
-	// 安全校验：只允许 SELECT 查询
-	sqlLower := req.SQL
-	if len(sqlLower) > 10 {
-		sqlLower = sqlLower[:10]
-	}
-	// 简单的 SELECT 检查
-	if len(req.SQL) < 6 || req.SQL[:6] != "SELECT" && req.SQL[:6] != "select" {
+	// 安全校验：只允许 SELECT 或 WITH (CTE) 查询
+	sqlLower := strings.ToLower(strings.TrimSpace(req.SQL))
+	if len(req.SQL) < 6 || (!strings.HasPrefix(sqlLower, "select") && !strings.HasPrefix(sqlLower, "with")) {
 		response.Error(c, response.CodeBadRequest, "只允许 SELECT 查询")
 		return
 	}

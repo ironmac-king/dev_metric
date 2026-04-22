@@ -28,6 +28,8 @@ _SYNONYMS = {
     "转化率": ["cvr", "conversion_rate"],
     # 页面访问相关
     "页面访问量": ["pv", "PV", "page views", "PageViews", "访问量", "页面pv"],
+    # 退货相关
+    "退货订单": ["退货订单量", "退货笔数", "退订"],
 }
 
 # 反向映射（从同义词到标准名称）- 初始化一次
@@ -56,6 +58,7 @@ class MetricClient:
     # 类级缓存：所有实例共享同一个缓存，避免重复 HTTP 调用
     _metrics_cache: Optional[List[Dict[str, Any]]] = None
     _dimensions_cache: Optional[List[Dict[str, Any]]] = None
+    _terms_cache: Optional[List[Dict[str, Any]]] = None
 
     def __init__(self, base_url: str = "http://localhost:8080"):
         self.base_url = base_url
@@ -94,6 +97,13 @@ class MetricClient:
                         if response.status_code == 200:
                             data = response.json().get("data", {})
                             m["dimensions"] = data.get("dimensions", [])
+                            # 补充关键字段（metric list 不包含这些）
+                            if not m.get("starrocks_sql") and data.get("starrocks_sql"):
+                                m["starrocks_sql"] = data.get("starrocks_sql")
+                            if not m.get("starrocks_table") and data.get("starrocks_table"):
+                                m["starrocks_table"] = data.get("starrocks_table")
+                            if not m.get("starrocks_field") and data.get("starrocks_field"):
+                                m["starrocks_field"] = data.get("starrocks_field")
                     return m
             return None
         except Exception as e:
@@ -133,7 +143,55 @@ class MetricClient:
                     if canonical_name.lower() in name or canonical_name.lower() in name_en:
                         return self._get_metric_with_details(m)
 
-            # 3. 短查询词保护：< 3 字符不使用模糊子串匹配
+            # 3. 业务术语同义词查找（Go 后端 business_terms 表配置的同义词）
+            # 用户输入 -> 业务术语的 synonyms 列表 -> 找到 term 标准名称 -> 用标准名称查指标
+            terms = self.get_business_terms()
+            for t in terms:
+                syns = t.get("synonyms") or []
+                term_name = t.get("term", "")
+                # 检查用户输入是否匹配该 term 的任意 synonyms
+                for syn in syns:
+                    if metric_name_lower == syn.lower() or metric_name_lower in syn.lower():
+                        # 找到匹配，用 term 标准名称查指标
+                        logger.info(f"[get_metric_by_name] 业务术语同义词匹配: '{metric_name}' -> term='{term_name}'")
+                        # 用 term_name 做模糊匹配找指标
+                        for m in all_metrics:
+                            name = m.get("name", "").lower()
+                            name_en = m.get("name_en", "").lower()
+                            if term_name.lower() == name or term_name.lower() == name_en:
+                                return self._get_metric_with_details(m)
+                            if term_name.lower() in name or term_name.lower() in name_en:
+                                return self._get_metric_with_details(m)
+                        break
+
+            # 3.5 前缀剔除 fallback：如果匹配失败，尝试去掉"总"、"全部"等前缀后重新匹配
+            prefixes_to_strip = ["总", "全部", "所有", "整个"]
+            for prefix in prefixes_to_strip:
+                if metric_name_lower.startswith(prefix) and len(metric_name_lower) > len(prefix):
+                    stripped_name = metric_name_lower[len(prefix):]
+                    logger.info(f"[get_metric_by_name] 前缀剔除 fallback: '{metric_name}' -> '{stripped_name}'")
+                    # 用剔除前缀后的名称重新搜索
+                    for m in all_metrics:
+                        name = m.get("name", "").lower()
+                        name_en = m.get("name_en", "").lower()
+                        if stripped_name == name or stripped_name == name_en:
+                            return self._get_metric_with_details(m)
+                        # 也尝试在名称中包含
+                        if stripped_name in name or stripped_name in name_en:
+                            return self._get_metric_with_details(m)
+                    # 也检查业务术语
+                    for t in terms:
+                        term_name = t.get("term", "").lower()
+                        if stripped_name == term_name:
+                            # 找到了，用这个 term 找指标
+                            for mt in all_metrics:
+                                mt_name = mt.get("name", "").lower()
+                                mt_name_en = mt.get("name_en", "").lower()
+                                if term_name == mt_name or term_name == mt_name_en:
+                                    return self._get_metric_with_details(mt)
+                    break
+
+            # 4. 短查询词保护：< 3 字符不使用模糊子串匹配
             if len(metric_name_lower) < 3:
                 logger.warning(f"[get_metric_by_name] 查询词过短 '{metric_name}'，跳过模糊子串匹配")
                 # 仍尝试同义词模糊匹配
@@ -148,7 +206,7 @@ class MetricClient:
                                     return self._get_metric_with_details(m)
                 return None
 
-            # 4. 模糊匹配（带边界检查，确保是完整词匹配）
+            # 5. 模糊匹配（带边界检查，确保是完整词匹配）
             best_match = None
             best_score = 0
             for m in all_metrics:
@@ -160,11 +218,11 @@ class MetricClient:
                 if metric_name_lower == name_en or metric_name_lower == name:
                     score = 100
                 # 同义词完整词匹配
-                elif metric_name_lower in synonyms:
-                    for syn in synonyms:
-                        if syn.lower() == name or syn.lower() == name_en:
-                            score = 90
-                            break
+                elif metric_name_lower in _SYNONYMS_REVERSE:
+                    # 通过反向映射找到标准名称，再用标准名称匹配指标
+                    canonical = _SYNONYMS_REVERSE[metric_name_lower]
+                    if canonical.lower() == name or canonical.lower() == name_en:
+                        score = 90
                 # name_en 以查询词结尾（更具体的指标）
                 elif name_en.endswith(metric_name_lower):
                     score = 60
@@ -179,20 +237,23 @@ class MetricClient:
             if best_score >= 50:
                 return self._get_metric_with_details(best_match)
 
-            # 5. 同义词模糊匹配（用户输入 -> 同义词 -> 指标名 in 同义词）
-            for syn in synonyms:
-                syn_lower = syn.lower()
-                for m in all_metrics:
-                    name = m.get("name", "")
-                    name_en = m.get("name_en", "")
-                    if (syn_lower in name.lower()) or (syn_lower in name_en.lower()):
-                        return self._get_metric_with_details(m)
+            # 6. 同义词模糊匹配（用户输入 -> 同义词 -> 指标名 in 同义词）
+            for canonical, syn_list in _SYNONYMS.items():
+                for syn in syn_list:
+                    syn_lower = syn.lower()
+                    if metric_name_lower == syn_lower or metric_name_lower in syn_lower:
+                        # 找到匹配，用 canonical 标准名称查指标
+                        for m in all_metrics:
+                            name = m.get("name", "").lower()
+                            name_en = m.get("name_en", "").lower()
+                            if canonical.lower() == name or canonical.lower() == name_en:
+                                return self._get_metric_with_details(m)
 
             # 6. 反向同义词匹配（指标名在同义词列表中）
             for m in all_metrics:
                 name = m.get("name", "")
                 name_en = m.get("name_en", "")
-                for key, syns in SYNONYMS.items():
+                for key, syns in _SYNONYMS.items():
                     if (name.lower() == key.lower() or name_en.lower() == key.lower()):
                         # 检查用户输入是否匹配任意同义词
                         if metric_name_lower in [s.lower() for s in syns]:
@@ -238,8 +299,10 @@ class MetricClient:
         return response.json()["data"]
 
     def get_business_terms(self) -> List[Dict[str, Any]]:
-        """获取所有业务术语"""
-        return self.get_all_terms()
+        """获取所有业务术语（带类级缓存）"""
+        if MetricClient._terms_cache is None:
+            MetricClient._terms_cache = self.get_all_terms()
+        return MetricClient._terms_cache
 
     def get_metric_data(self, metric_id: int) -> Dict[str, Any]:
         """获取指标数据"""

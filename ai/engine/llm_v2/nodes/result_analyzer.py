@@ -231,10 +231,46 @@ class ResultAnalyzer:
         question: str,
     ) -> Dict[str, Any]:
         """处理对比查询"""
-        # 对比查询通常会有两条数据
         data = sql_result.data
         metric_name = mql.metric.name if mql.metric else "指标值"
 
+        # 检查是否是 MoM/YOY 格式的单行数据（包含 current_val 和 compare_val）
+        is_mom_format = (
+            len(data) == 1 and
+            isinstance(data[0], dict) and
+            'current_val' in data[0] and
+            'compare_val' in data[0]
+        )
+
+        if is_mom_format:
+            # MoM/YOY 单行数据：current_val 和 compare_val 在同一行
+            row = data[0]
+            current_val = float(row.get('current_val', 0) or 0)
+            compare_val = float(row.get('compare_val', 0) or 0)
+            trend = row.get('trend', '')
+            change_rate = row.get('change_rate', '')
+
+            # 根据趋势生成回答
+            if trend == '增长':
+                trend_desc = "增长"
+                change_desc = f"上升了 {change_rate}%" if change_rate else ""
+            elif trend == '下降':
+                trend_desc = "下降"
+                change_desc = f"下降了 {change_rate}%" if change_rate else ""
+            else:
+                trend_desc = "持平"
+                change_desc = ""
+
+            answer = f"{metric_name}环比{trend_desc}{change_desc}。3月页面访问量为 {int(current_val):,}，2月为 {int(compare_val):,}。"
+            return {
+                "answer": answer,
+                "suggestions": [
+                    f"查看{metric_name}详细数据",
+                    f"查看{metric_name}趋势变化",
+                ],
+            }
+
+        # 传统对比查询（两行数据）
         if len(data) < 2:
             return {
                 "answer": "数据不足，无法进行对比",

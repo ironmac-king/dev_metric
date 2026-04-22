@@ -18,7 +18,7 @@ from typing import Dict, Any, Literal, Optional, Tuple
 from datetime import datetime
 
 from ai.config.logging_config import get_logger
-from .schema import V2State, MQLSchema, push_history
+from .schema import V2State, MQLSchema, MQLDimension, push_history
 from .observability import get_tracer, create_trace_context
 from ai.client.metric_client import MetricClient
 
@@ -93,6 +93,14 @@ async def intent_router(state: V2State):
                     state.is_generic_result = True
                     state.context_cache["clarification_message"] = result.get("clarification_message", "")
                     state.context_cache["clarification_options"] = result.get("clarification_options", [])
+
+                    # 当有 default_dimension 时，将其应用到 state.mql.dimensions
+                    default_dim = result.get("default_dimension", "")
+                    if default_dim and state.mql and not state.mql.dimensions:
+                        dim = MQLDimension(type=default_dim, value=None)
+                        state.mql.dimensions = [dim]
+                        logger.info(f"[intent_router] 应用 default_dimension: {default_dim} -> mql.dimensions")
+
                     logger.info(f"[intent_router] 设置 is_generic_result=True, clarification_options={result.get('clarification_options', [])}")
                     state.add_thinking_step(
                         "intent_router",
@@ -223,10 +231,15 @@ async def mql_generator(state: V2State) -> V2State:
         if mql:
             # 保留 intent_router 设置的 order_by（mql_generator 可能没有设置）
             inherited_order_by = state.mql.order_by if state.mql else None
+            # 保留 intent_router 设置的 dimensions（mql_generator 的 LLM 可能丢失维度信息）
+            inherited_dimensions = state.mql.dimensions if state.mql and state.mql.dimensions else []
             state.mql = mql
             if inherited_order_by and not mql.order_by:
                 mql.order_by = inherited_order_by
                 logger.info(f"[mql_generator] 保留 intent_router 设置的 order_by: {inherited_order_by.direction}")
+            if not mql.dimensions and inherited_dimensions:
+                mql.dimensions = inherited_dimensions
+                logger.info(f"[mql_generator] 保留 intent_router 设置的 dimensions: {[d.type for d in inherited_dimensions]}")
             push_history(state, json.dumps(mql.to_dict(), ensure_ascii=False))
 
         state.add_thinking_step(
@@ -361,6 +374,8 @@ async def sql_generator(state: V2State) -> V2State:
 
     try:
         generator = SQLGeneratorNode()
+        logger.info(f"[sql_generator] cross_metric: {state.mql.cross_metric if state.mql else None}")
+        logger.info(f"[sql_generator] mql.metric: {state.mql.metric.name if state.mql and state.mql.metric else None}")
         sql_result = await generator.generate(state.mql)
 
         state.sql =sql_result.get("sql", "")

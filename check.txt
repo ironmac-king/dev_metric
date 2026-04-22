@@ -1,3 +1,2 @@
-name: 销售环比
-keywords: 上期对比,上期增长,和上期比
-has 环比: False
+Columns: ['店铺', '销售额']
+First row keys: ['店铺', '销售额']

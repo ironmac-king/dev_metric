@@ -126,6 +126,7 @@ class MQLMetric:
             "field": self.field,
             "aggregation": self.aggregation.value if isinstance(self.aggregation, Enum) else self.aggregation,
             "unit": self.unit,
+            "starrocks_sql": self.starrocks_sql,
             "is_formula": self.is_formula,
             "formula_type": self.formula_type,
             "molecule_metric": self.molecule_metric,
@@ -212,6 +213,23 @@ class ComparisonSpec:
 
 
 @dataclass
+class CrossMetricSpec:
+    """跨指标对比规格（指标A vs 指标B）"""
+    metric_name: str = ""          # 对比的指标名称
+    operator: str = "lt"          # 比较运算符: lt(小于), gt(大于), eq(等于), lte(小于等于), gte(大于等于)
+    metric_a_alias: str = ""      # 指标A的SQL别名（用于SQL生成）
+    metric_b_alias: str = ""      # 指标B的SQL别名
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "metric_name": self.metric_name,
+            "operator": self.operator,
+            "metric_a_alias": self.metric_a_alias,
+            "metric_b_alias": self.metric_b_alias,
+        }
+
+
+@dataclass
 class PaginationSpec:
     """分页规格"""
     page: int = 1
@@ -285,6 +303,9 @@ class MQLSchema:
     # 对比规格
     comparison: Optional[ComparisonSpec] = None
 
+    # 跨指标对比
+    cross_metric: Optional[CrossMetricSpec] = None
+
     # 分页
     pagination: Optional[PaginationSpec] = None
 
@@ -325,6 +346,7 @@ class MQLSchema:
             "dimensions": [d.to_dict() for d in self.dimensions],
             "filters": [f.to_dict() for f in self.filters],
             "comparison": self.comparison.to_dict() if self.comparison else None,
+            "cross_metric": self.cross_metric.to_dict() if self.cross_metric else None,
             "pagination": self.pagination.to_dict() if self.pagination else None,
             "order_by": self.order_by.to_dict() if self.order_by else None,
             "drill_down": self.drill_down.to_dict() if self.drill_down else None,

@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Dict, Any
 from ai.config.logging_config import get_logger
 from ai.client.metric_client import MetricClient
-from ..schema import MQLSchema, MQLMetric, MQLDimension, TimeRange, TimeType, SQLResult, CalculationPattern
+from ..schema import MQLSchema, MQLMetric, MQLDimension, TimeRange, TimeType, SQLResult, CalculationPattern, CrossMetricSpec
 
 logger = get_logger("ai.llm_v2.sql_generator")
 
@@ -173,6 +173,26 @@ class SQLGeneratorNode:
 
     def _build_sql(self, mql: MQLSchema) -> str:
         """构建 SQL"""
+        # 跨指标对比：生成自连接 SQL
+        if mql.cross_metric and mql.cross_metric.metric_name:
+            return self._build_cross_metric_sql(mql)
+
+        # MoM/YOY 对比：生成双时间段 SQL
+        if mql.calculation_patterns:
+            from ..schema import CalculationPattern
+            def _is_mom(p):
+                if isinstance(p, CalculationPattern):
+                    return p == CalculationPattern.MOM or p.value == "mom"
+                return str(p).lower() == "mom"
+            def _is_yoy(p):
+                if isinstance(p, CalculationPattern):
+                    return p == CalculationPattern.YOY or p.value == "yoy"
+                return str(p).lower() == "yoy"
+            has_mom = any(_is_mom(p) for p in mql.calculation_patterns)
+            has_yoy = any(_is_yoy(p) for p in mql.calculation_patterns)
+            if has_mom or has_yoy:
+                return self._build_mom_sql(mql)
+
         # 1. 确定表名
         table = mql.metric.table if mql.metric and mql.metric.table else self._default_table
 
@@ -207,8 +227,401 @@ class SQLGeneratorNode:
 
         return "\n".join(sql_parts)
 
+    def _build_cross_metric_sql(self, mql: MQLSchema) -> str:
+        """构建跨指标对比 SQL（CTE 自连接）
+
+        思路：将每个指标的 starrocks_sql 转换为带维度的聚合子查询，
+        再通过 CTE/子查询 JOIN 在一起，最后应用比较条件过滤。
+        """
+        logger.info(f"[_build_cross_metric_sql] cross_metric={mql.cross_metric.metric_name}, operator={mql.cross_metric.operator}")
+
+        # 1. 获取维度列
+        dim_columns = []
+        for dim in mql.dimensions:
+            col = dim.column
+            if not col:
+                col = self._get_dimension_column(dim.type)
+            if col:
+                dim_columns.append(col)
+        if not dim_columns:
+            dim_columns = ["YEARS", "MONTHS"]
+
+        dim_select = ", ".join(dim_columns)
+        dim_group = ", ".join(dim_columns)
+        dim_join = " AND ".join([f"a.{c} = b.{c}" for c in dim_columns])
+
+        # 2. 获取 WHERE 条件（时间等）
+        where_clause = self._build_where(mql)
+        if where_clause.upper().startswith("WHERE"):
+            where_clause = where_clause[5:].strip()
+        where_sql = f"WHERE {where_clause}" if where_clause else ""
+
+        # 3. 获取指标 A（主指标）的聚合表达式
+        metric_a_name = mql.metric.name if mql.metric else ""
+        metric_a_sql, metric_a_alias = self._extract_metric_expression(mql.metric, "metric_a")
+        if not metric_a_sql:
+            return f"SELECT 'ERROR: 主指标 {metric_a_name} 无 starrocks_sql' AS error"
+
+        # 4. 获取指标 B（对比指标）的聚合表达式
+        metric_b_name = mql.cross_metric.metric_name
+        metric_b_info = self._metric_client.get_metric_by_name(metric_b_name)
+        if not metric_b_info or not metric_b_info.get("starrocks_sql"):
+            return f"SELECT 'ERROR: 对比指标 {metric_b_name} 未找到' AS error"
+        # 构建一个临时 MQLMetric 用于提取
+        metric_b = MQLMetric(
+            name=metric_b_name,
+            starrocks_sql=metric_b_info.get("starrocks_sql", ""),
+            field=metric_b_info.get("starrocks_field", ""),
+        )
+        metric_b_sql, metric_b_alias = self._extract_metric_expression(metric_b, "metric_b")
+
+        # 5. 比较运算符
+        op = mql.cross_metric.operator
+        op_map = {"lt": "<", "gt": ">", "eq": "=", "lte": "<=", "gte": ">="}
+        sql_op = op_map.get(op, "<")
+
+        # 6. 拼接完整 SQL（CTE 方式）
+        # 注意：WHERE 条件必须在每个 CTE 内部都应用，否则子查询结果不对
+        # 当 where_clause 为空时，使用 1=1 作为占位条件，避免语法错误
+        where_cond = where_clause[5:].strip() if where_clause.upper().startswith("WHERE") else where_clause
+        where_in_cte = where_cond if where_cond else "1=1"
+        # SELECT 子句中维度列需要加表前缀 a.
+        dim_select_a = ", ".join([f"a.{c}" for c in dim_columns])
+        sql = f"""
+WITH metric_a AS (
+    SELECT {dim_select}, {metric_a_sql} AS {metric_a_alias}
+    FROM {self._default_table}
+    WHERE {where_in_cte}
+    GROUP BY {dim_group}
+),
+metric_b AS (
+    SELECT {dim_select}, {metric_b_sql} AS {metric_b_alias}
+    FROM {self._default_table}
+    WHERE {where_in_cte}
+    GROUP BY {dim_group}
+)
+SELECT {dim_select_a}, a.{metric_a_alias} AS {metric_a_alias}, b.{metric_b_alias} AS {metric_b_alias}
+FROM metric_a a
+INNER JOIN metric_b b ON {dim_join}
+WHERE a.{metric_a_alias} {sql_op} b.{metric_b_alias}
+ORDER BY {dim_group}
+LIMIT 20
+""".strip()
+        logger.info(f"[_build_cross_metric_sql] SQL: {sql[:300]}")
+        return sql
+
+    def _build_mom_sql(self, mql: MQLSchema) -> str:
+        """构建 MoM/YOY 对比 SQL
+
+        使用条件聚合在一个查询中计算当前周期和对比周期的值。
+        """
+        logger.info(f"[_build_mom_sql] Building MoM/YOY SQL")
+
+        # 1. 获取业务维度列（不包括 YEARS, MONTHS）
+        dim_columns = []
+        for dim in mql.dimensions:
+            col = dim.column
+            if not col:
+                col = self._get_dimension_column(dim.type)
+            if col:
+                dim_columns.append(col)
+
+        # 2. 获取当前周期时间条件
+        current_where = self._build_where(mql)
+        if current_where.upper().startswith("WHERE"):
+            current_where = current_where[5:].strip()
+        current_where_sql = f"WHERE {current_where}" if current_where else "WHERE 1=1"
+
+        # 3. 获取对比周期时间条件
+        compare_start = ""
+        compare_end = ""
+        if mql.comparison:
+            compare_start = mql.comparison.compare_period_start or ""
+            compare_end = mql.comparison.compare_period_end or ""
+
+        # 如果没有对比时间，根据 MoM/YOY 自行推断
+        if not compare_start or not compare_end:
+            from ..schema import CalculationPattern
+            def _is_mom(p):
+                if isinstance(p, CalculationPattern):
+                    return p == CalculationPattern.MOM or p.value == "mom"
+                return str(p).lower() == "mom"
+            has_mom = any(_is_mom(p) for p in mql.calculation_patterns)
+            if has_mom and current_where:
+                # 从 current_where 提取当前周期的 start 和 end
+                # current_where 格式: "FDATE >= '2026-04-01' AND FDATE <= '2026-04-21'"
+                import re
+                start_match = re.search(r"FDATE >= '(\d{4}-\d{2}-\d{2})'", current_where)
+                end_match = re.search(r"FDATE <= '(\d{4}-\d{2}-\d{2})'", current_where)
+                if start_match and end_match:
+                    try:
+                        from datetime import datetime, timedelta
+                        start_dt = datetime.strptime(start_match.group(1), "%Y-%m-%d")
+                        end_dt = datetime.strptime(end_match.group(1), "%Y-%m-%d")
+                        day_count = (end_dt - start_dt).days + 1  # 当前周期天数
+
+                        # 环比上月：上月 1 日到对应天数
+                        # 例如 4-01~4-21（21天）→ 3-01~3-20
+                        # 上月 1 日 = 当前月 1 日往前推 1 个月
+                        prev_month_start = start_dt - timedelta(days=1)
+                        # 清理日期，只保留到月（day=1）
+                        prev_month_start = prev_month_start.replace(day=1)
+                        # 上月 end = 上月 1 日 + (day_count - 1) 天，但要确保不超过上月最大天数
+                        import calendar
+                        prev_month_max_day = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
+                        prev_end_day = min(day_count, prev_month_max_day)
+                        compare_start = prev_month_start.strftime("%Y-%m-%d")
+                        compare_end = prev_month_start.replace(day=prev_end_day).strftime("%Y-%m-%d")
+                        logger.info(f"[_build_mom_sql] Inferred MoM: current {start_dt.date()}~{end_dt.date()} ({day_count}天), compare {compare_start} to {compare_end}")
+                    except Exception as e:
+                        logger.warning(f"[_build_mom_sql] 推断 MoM 失败: {e}")
+
+            # YOY 同比：去年同期（保持相同天数）
+            def _is_yoy(p):
+                if isinstance(p, CalculationPattern):
+                    return p == CalculationPattern.YOY or p.value == "yoy"
+                return str(p).lower() == "yoy"
+            has_yoy = any(_is_yoy(p) for p in mql.calculation_patterns)
+            if has_yoy and current_where and not compare_start:
+                # 还没有 compare_start，说明 MoM 没匹配或不是 MoM
+                import re
+                start_match = re.search(r"FDATE >= '(\d{4}-\d{2}-\d{2})'", current_where)
+                end_match = re.search(r"FDATE <= '(\d{4}-\d{2}-\d{2})'", current_where)
+                if start_match and end_match:
+                    try:
+                        from datetime import datetime, timedelta
+                        start_dt = datetime.strptime(start_match.group(1), "%Y-%m-%d")
+                        end_dt = datetime.strptime(end_match.group(1), "%Y-%m-%d")
+                        day_count = (end_dt - start_dt).days + 1
+
+                        # 同比：去年同期
+                        # 例如 2026-04-01~04-21 → 2025-04-01~04-21
+                        prev_year_start = start_dt.replace(year=start_dt.year - 1)
+                        prev_year_end = end_dt.replace(year=end_dt.year - 1)
+                        compare_start = prev_year_start.strftime("%Y-%m-%d")
+                        compare_end = prev_year_end.strftime("%Y-%m-%d")
+                        logger.info(f"[_build_mom_sql] Inferred YoY: current {start_dt.date()}~{end_dt.date()} ({day_count}天), compare {compare_start} to {compare_end}")
+                    except Exception as e:
+                        logger.warning(f"[_build_mom_sql] 推断 YoY 失败: {e}")
+
+        # 4. 获取指标的原始字段表达式（用于条件聚合，不需要外层聚合函数）
+        metric_field_sql = self._extract_raw_metric_expression(mql.metric)
+        if not metric_field_sql:
+            return f"SELECT 'ERROR: 指标无 starrocks_sql' AS error"
+
+        # 5. 构建 MoM SQL - 使用条件聚合避免 JOIN 问题
+        # 关键：如果没有业务维度（dim_columns 为空），不按 MONTHS 分组，
+        #      让两个月的数据直接聚合在一起计算 change_rate
+        current_cond = current_where[6:].strip() if current_where.upper().startswith('WHERE') else current_where
+
+        # 6. 构建对比周期条件（只有当对比周期有效时才添加）
+        has_valid_compare = bool(compare_start and compare_end)
+        if has_valid_compare:
+            compare_where = f"(FDATE >= '{compare_start}' AND FDATE <= '{compare_end}')"
+        else:
+            # 没有有效对比周期时，compare_where 为空字符串，后续 SQL 构建会处理
+            compare_where = ""
+
+        if dim_columns:
+            # 有业务维度，按业务维度 + MONTHS 分组
+            dim_select = ", ".join(dim_columns)
+            dim_group = dim_select
+            # 添加 MONTHS 到分组，用于区分月份
+            select_clause = f"{dim_select}, MONTHS"
+            group_clause = f"{dim_group}, MONTHS"
+
+            # 根据是否有有效对比周期构建不同的 SQL
+            if has_valid_compare:
+                sql = f"""
+SELECT {select_clause},
+       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS current_val,
+       SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END) AS compare_val,
+       CASE WHEN SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END) > 0
+            THEN ROUND((SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
+            ELSE NULL END AS change_rate,
+       CASE WHEN SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) > SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END)
+            THEN '增长'
+            WHEN SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) < SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END)
+            THEN '下降'
+            ELSE '持平' END AS trend
+FROM {self._default_table}
+WHERE ( {current_cond} )
+   OR ( {compare_where} )
+GROUP BY {group_clause}
+ORDER BY {dim_group}, MONTHS
+LIMIT 20
+""".strip()
+            else:
+                # 没有有效对比周期，只查当前周期
+                sql = f"""
+SELECT {select_clause},
+       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS current_val,
+       NULL AS compare_val,
+       NULL AS change_rate,
+       NULL AS trend
+FROM {self._default_table}
+WHERE ( {current_cond} )
+GROUP BY {group_clause}
+ORDER BY {dim_group}, MONTHS
+LIMIT 20
+""".strip()
+        else:
+            # 没有业务维度，直接对比两个月（不去 GROUP BY MONTHS）
+            # 两个月的数据会聚合在一起，直接计算 change_rate
+            if has_valid_compare:
+                sql = f"""
+SELECT
+       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS current_val,
+       SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END) AS compare_val,
+       CASE WHEN SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END) > 0
+            THEN ROUND((SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
+            ELSE NULL END AS change_rate,
+       CASE WHEN SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) > SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END)
+            THEN '增长'
+            WHEN SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) < SUM(CASE WHEN {compare_where} THEN {metric_field_sql} ELSE 0 END)
+            THEN '下降'
+            ELSE '持平' END AS trend
+FROM {self._default_table}
+WHERE ( {current_cond} )
+   OR ( {compare_where} )
+""".strip()
+            else:
+                # 没有有效对比周期，只查当前周期
+                sql = f"""
+SELECT
+       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS current_val,
+       NULL AS compare_val,
+       NULL AS change_rate,
+       NULL AS trend
+FROM {self._default_table}
+WHERE ( {current_cond} )
+""".strip()
+
+        logger.info(f"[_build_mom_sql] SQL: {sql[:300]}")
+        return sql
+
+    def _extract_raw_metric_expression(self, metric: MQLMetric) -> str:
+        """从 metric 的 starrocks_sql 提取原始字段表达式（不含聚合函数）
+
+        用于条件聚合（CASE WHEN 内部），因为外层 SUM 会做聚合。
+
+        Returns:
+            str: 原始字段表达式，如 "PAGEVIEWS_TOTAL" 或 "IFNULL(a,0)-IFNULL(b,0)"
+        """
+        if not metric or not metric.starrocks_sql:
+            return metric.field if metric else "ORDERED_PRODUCTSALES"
+
+        starrocks_sql = metric.starrocks_sql.strip()
+
+        # 检查是否是复合指标（包含 IFNULL/ISNULL/COALESCE 或算术运算符）
+        if any(kw in starrocks_sql.upper() for kw in ['IFNULL', 'ISNULL', 'COALESCE', '-', '*', '/']):
+            # 复合指标：提取 SELECT 和 FROM 之间的表达式
+            expr_match = re.search(r'SELECT\s+(.+?)\s+AS\s+[\w\u4e00-\u9fff]+\s+FROM', starrocks_sql, re.IGNORECASE | re.DOTALL)
+            if expr_match:
+                expr = expr_match.group(1).strip()
+                logger.info(f"[_extract_raw_metric_expression] 复合指标: {expr}")
+                return expr
+            # 回退：用 split 提取
+            parts = re.split(r'\s+FROM\s+', starrocks_sql, flags=re.IGNORECASE)
+            if len(parts) >= 2:
+                select_part = ' FROM '.join(parts[:-1])
+                alias_match = re.search(r'\s+AS\s+([\w\u4e00-\u9fff]+)\s*$', select_part, re.IGNORECASE)
+                if alias_match:
+                    expr = select_part[:alias_match.start()].strip()
+                    if expr.upper().startswith('SELECT'):
+                        expr = expr[6:].strip()
+                    logger.info(f"[_extract_raw_metric_expression] 复合指标split: {expr}")
+                    return expr
+
+        # 简单指标：提取 SUM/AVG/COUNT/MAX/MIN (field) 中的 field
+        match = re.search(r'(SUM|AVG|COUNT|MAX|MIN)\s*\(\s*(\w+)\s*\)', starrocks_sql, re.IGNORECASE)
+        if match:
+            field = match.group(2)
+            logger.info(f"[_extract_raw_metric_expression] 简单指标字段: {field}")
+            return field
+
+        # 回退：使用默认字段
+        logger.warning(f"[_extract_raw_metric_expression] 无法提取字段，使用默认: {metric.field}")
+        return metric.field or "ORDERED_PRODUCTSALES"
+
+    def _extract_metric_expression(self, metric: MQLMetric, prefix: str) -> tuple:
+        """从 metric 的 starrocks_sql 提取聚合表达式和别名
+
+        Returns:
+            (expression: str, alias: str)
+            expression: 直接可用于 SELECT 的聚合表达式，如 "SUM(TOTALORDERS)"
+            alias: SQL 别名，如 "metric_a"
+        """
+        if not metric or not metric.starrocks_sql:
+            field = metric.field if metric else "ORDERED_PRODUCTSALES"
+            agg = "SUM"
+            if metric and metric.aggregation:
+                agg = metric.aggregation.value if hasattr(metric.aggregation, 'value') else metric.aggregation
+            return f"{agg}({field})", prefix
+
+        starrocks_sql = metric.starrocks_sql.strip()
+
+        # 尝试提取 AS 别名
+        alias_match = re.search(r'AS\s+([\w\u4e00-\u9fff]+)', starrocks_sql, re.IGNORECASE)
+        alias = alias_match.group(1) if alias_match else prefix
+
+        # 检查是否是复合指标（包含 IFNULL/ISNULL/COALESCE）
+        if any(kw in starrocks_sql.upper() for kw in ['IFNULL', 'ISNULL', 'COALESCE', '-', '*', '/']):
+            # 复合指标：从 "SELECT expr AS alias FROM ..." 提取 expr
+            expr_match = re.search(r'SELECT\s+(.+?)\s+AS\s+[\w\u4e00-\u9fff]+\s+FROM', starrocks_sql, re.IGNORECASE | re.DOTALL)
+            if expr_match:
+                expr = expr_match.group(1).strip()
+                return expr, alias
+            # 如果上面的正则匹配失败（因为 " AS " 可能写成 ")AS" 没有空格），
+            # 用 split 方案：按 " FROM " 分割（注意 IFNULL 内的 " FROM " 不会匹配因为有前缀空格）
+            parts = re.split(r'\s+FROM\s+', starrocks_sql, flags=re.IGNORECASE)
+            if len(parts) >= 2:
+                select_and_alias = ' FROM '.join(parts[:-1])  # 第一部分是 SELECT ... AS alias
+                # 在 select_and_alias 中找 " AS " 分隔符（别名前面可能有空格）
+                # 用更宽松的正则：支持 " AS " 或 ")AS" 等情况
+                alias_match2 = re.search(r'\s+AS\s+([\w\u4e00-\u9fff]+)\s*$', select_and_alias, re.IGNORECASE)
+                if alias_match2:
+                    alias = alias_match2.group(1)
+                    inner = select_and_alias[:alias_match2.start()].strip()
+                    if inner.upper().startswith('SELECT'):
+                        inner = inner[6:].strip()
+                    return inner, alias
+                else:
+                    # 还是找不到 AS，试一下不用 \s+ 的宽松匹配
+                    # 找最后一个 " AS " 或 ")AS" 模式
+                    alt_match = re.search(r'AS\s+([\w\u4e00-\u9fff]+)\s*$', select_and_alias, re.IGNORECASE)
+                    if alt_match:
+                        alias = alt_match.group(1)
+                        inner = select_and_alias[:alt_match.start()].strip()
+                        if inner.upper().startswith('SELECT'):
+                            inner = inner[6:].strip()
+                        return inner, alias
+            # 兜底：去掉开头的 SELECT 和结尾的 FROM alias 部分
+            sql_clean = starrocks_sql.strip()
+            if sql_clean.upper().startswith('SELECT'):
+                sql_clean = sql_clean[6:].strip()
+            from_idx = sql_clean.upper().rfind(' FROM ')
+            if from_idx > 0:
+                sql_clean = sql_clean[:from_idx].strip()
+            as_idx = sql_clean.upper().rfind(' AS ')
+            if as_idx > 0:
+                expr = sql_clean[:as_idx].strip()
+            else:
+                expr = sql_clean
+            return expr, alias
+        else:
+            # 简单指标：提取 SUM/AVG/COUNT/MAX/MIN (field)
+            match = re.search(r'(SUM|AVG|COUNT|MAX|MIN)\s*\(\s*(\w+)\s*\)', starrocks_sql, re.IGNORECASE)
+            if match:
+                agg, field = match.groups()
+                return f"{agg}({field})", alias
+            # 回退
+            field = metric.field if metric else "ORDERED_PRODUCTSALES"
+            return f"SUM({field})", alias
+
     def _build_select(self, mql: MQLSchema) -> str:
         """构建 SELECT 子句"""
+        logger.info(f"[_build_select] starrocks_sql={mql.metric.starrocks_sql[:80] if mql.metric and mql.metric.starrocks_sql else 'EMPTY'}")
         select_parts = []
 
         # 添加维度列
@@ -264,6 +677,7 @@ class SQLGeneratorNode:
             logger.info(f"[_build_select] 占比模式: {mol_agg}({mol_field}) * 100.0 / {den_agg}({den_field})")
         # 添加指标列
         elif mql.metric:
+            logger.info(f"[_build_select] metric.starrocks_sql={repr(mql.metric.starrocks_sql[:80] if mql.metric.starrocks_sql else '')}, metric.field={repr(mql.metric.field)}")
             metric_field = mql.metric.field or "ORDERED_PRODUCTSALES"
             metric_agg = mql.metric.aggregation.value if hasattr(mql.metric.aggregation, 'value') else mql.metric.aggregation
 
@@ -272,19 +686,31 @@ class SQLGeneratorNode:
                 starrocks_sql = mql.metric.starrocks_sql.strip()
                 logger.info(f"[_build_select] starrocks_sql: {starrocks_sql[:200]}")
 
-                # 检测是否是复合指标（包含 / 或 * 或 ISNULL）
-                if '/' in starrocks_sql or '*' in starrocks_sql or 'ISNULL' in starrocks_sql.upper():
+                # 检测是否是复合指标（包含 / 或 * 或 IFNULL/ISNULL）
+                if '/' in starrocks_sql or '*' in starrocks_sql or 'IFNULL' in starrocks_sql.upper():
                     # 复合指标：提取完整的 SELECT ... AS alias 表达式
-                    # 例如: SELECT SUM(TOTALSALES)/SUM(TOTALORDERS) AS `AD_AOV` FROM ...
-                    # 注意: [^FROM] 匹配 F/R/O/M 单字符，不是字符串 FROM
-                    match = re.search(r'SELECT\s+(.+?)\s+AS\s+([\w\u4e00-\u9fff]+)\s*FROM', starrocks_sql, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        inner_expr = match.group(1).strip()
-                        alias = match.group(2)
-                        logger.info(f"[_build_select] 复合指标匹配成功: inner_expr={inner_expr}, alias={alias}")
-                        select_parts.append(f"{inner_expr} AS {alias}")
+                    # 用 split 而非正则来处理嵌套 FROM（如 IFNULL 函数内的 FROM 字段名）
+                    # "SELECT sum(IFNULL(units_ordered, 0) - IFNULL(totalunits, 0)) AS alias FROM table"
+                    #                           ^^^^^^^^^^^^^^^^ 这些 FROM 只是字段名，不是 SQL FROM 子句
+                    parts = re.split(r'\s+FROM\s+', starrocks_sql, flags=re.IGNORECASE)
+                    if len(parts) >= 2:
+                        # 最后一个 part 是 FROM 子句，前面所有 part 拼起来是 SELECT ... AS alias
+                        select_and_alias = ' FROM '.join(parts[:-1])  # 还原，不丢失内容
+                        # 从 select_and_alias 中提取 AS alias 和 inner_expr
+                        alias_match = re.search(r'\s+AS\s+([\w\u4e00-\u9fff]+)\s*$', select_and_alias, re.IGNORECASE)
+                        if alias_match:
+                            alias = alias_match.group(1)
+                            inner_expr = select_and_alias[:alias_match.start()].strip()
+                            # 去掉开头的 SELECT 关键字
+                            if inner_expr.upper().startswith('SELECT'):
+                                inner_expr = inner_expr[6:].strip()
+                            logger.info(f"[_build_select] 复合指标split提取成功: inner_expr={inner_expr}, alias={alias}")
+                            select_parts.append(f"{inner_expr} AS {alias}")
+                        else:
+                            logger.warning(f"[_build_select] 复合指标提取alias失败，回退到默认值")
+                            select_parts.append(f"{metric_agg}({metric_field})")
                     else:
-                        logger.warning(f"[_build_select] 复合指标正则匹配失败，回退到默认值")
+                        logger.warning(f"[_build_select] 复合指标split失败，回退到默认值")
                         select_parts.append(f"{metric_agg}({metric_field})")
                 else:
                     # 简单指标：匹配单个聚合函数
@@ -315,7 +741,8 @@ class SQLGeneratorNode:
 
         # 时间条件
         if mql.time:
-            if mql.time.type == TimeType.DATE_RANGE:
+            if mql.time.type in (TimeType.DATE_RANGE, TimeType.ABSOLUTE_MONTH, TimeType.ABSOLUTE_QUARTER, TimeType.ABSOLUTE_YEAR):
+                # date_range、absolute_month、absolute_quarter、absolute_year 都使用 start/end
                 if mql.time.start:
                     where_parts.append(f"FDATE >= '{mql.time.start}'")
                 if mql.time.end:
@@ -411,8 +838,11 @@ class SQLGeneratorNode:
         if mql.order_by and mql.order_by.field:
             return f"ORDER BY {mql.order_by.field} {mql.order_by.direction}"
 
+        # 排名查询必须有 ORDER BY（即使没有维度）
+        is_ranking = mql.intent and "ranking" in mql.intent.value.lower()
+
         # 默认按指标降序（有 GROUP BY 时必须用聚合函数）
-        if mql.metric and mql.dimensions:
+        if mql.metric and (mql.dimensions or is_ranking):
             direction = "DESC"
             if mql.order_by and mql.order_by.direction:
                 direction = mql.order_by.direction
@@ -426,12 +856,24 @@ class SQLGeneratorNode:
                 if match:
                     metric_alias = match.group(1)
 
+                # 如果 starrocks_sql 包含复合表达式（包含 /, *, -, IFNULL, ISNULL, COALESCE 等），
+                # 则 SELECT 使用完整表达式 AS alias，ORDER BY 也应使用该别名而非提取单列
+                # 关键模式：")-IFNULL(" 或 ")-" 表示两个表达式相减 → 用别名排序
+                if any(kw in starrocks_sql.upper() for kw in ['IFNULL', 'ISNULL', 'COALESCE']):
+                    # 排除简单的 IFNULL/ISNULL 单列聚合（如 SUM(IFNULL(col,0))），只对复合表达式用别名
+                    simple_isnull = re.search(r'(?:SUM|AVG|COUNT|MAX|MIN)\s*\(\s*(?:IFNULL|ISNULL)\s*\(\s*\w+\s*,', starrocks_sql, re.IGNORECASE)
+                    # 排除简单的 ISNULL 单列聚合（如 SUM(ISNULL(col,0))），只对复合表达式用别名
+                    simple_isnull = re.search(r'(?:SUM|AVG|COUNT|MAX|MIN)\s*\(\s*ISNULL\s*\(\s*\w+\s*,', starrocks_sql, re.IGNORECASE)
+                    if not simple_isnull:
+                        logger.info(f"[_build_order_by] 复合指标使用别名排序: {metric_alias}")
+                        return f"ORDER BY {metric_alias} {direction}"
+
                 # 尝试提取实际字段用于 ORDER BY
-                # 1. ISNULL 内的实际字段名
-                isnull_match = re.search(r'ISNULL\s*\(\s*([\w]+)', starrocks_sql, re.IGNORECASE)
+                # 1. IFNULL/ISNULL 内的实际字段名（只匹配简单 IFNULL(col, 0)，复合表达式不用这个路径）
+                isnull_match = re.search(r'(IFNULL|ISNULL)\s*\(\s*([\w]+)\s*,', starrocks_sql, re.IGNORECASE)
                 if isnull_match:
-                    actual_field = isnull_match.group(1)
-                    logger.info(f"[_build_order_by] ISNULL指标，用实际字段排序: {actual_field}")
+                    actual_field = isnull_match.group(2)  # 提取 IFNULL( 后面的字段名
+                    logger.info(f"[_build_order_by] IFNULL/ISNULL指标，提取字段排序: {actual_field}")
                     return f"ORDER BY SUM({actual_field}) {direction}"
 
                 # 2. 简单的 SUM(col) AS alias - 提取聚合函数内的实际列名

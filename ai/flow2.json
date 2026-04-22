@@ -1,0 +1,260 @@
+{
+  "session_id": "full-flow-test",
+  "answer": "根据各站点的销售额排名如下（从高到低）：\n\n1. **美国亚马逊**：65.07亿元\n2. **德国亚马逊**：56.53亿元\n3. **英国亚马逊**：32.88亿元\n4. **墨西哥亚马逊**：27.53亿元\n5. **日本亚马逊**：22.08亿元\n6. **法国亚马逊**：19.22亿元\n7. **澳大利亚亚马逊**：10.65亿元\n8. **加拿大亚马逊**：12.57亿元\n9. **新加坡亚马逊**：1.02亿元\n10. **阿联酋亚马逊**：9.35亿元\n11. **西班牙亚马逊**：9.11亿元\n12. **沙特亚马逊**：7.42亿元\n13. **意大利亚马逊**：7.16亿元\n14. **荷兰亚马逊**：2.33亿元\n15. **比利时亚马逊**：1.85亿元\n16. **印度亚马逊**：2972.87万元\n17. **波兰亚马逊**：2497.29万元\n18. **瑞典亚马逊**：566.57万元\n19. **土耳其亚马逊**：1660.26万元\n20. **巴西亚马逊(HK)**：665.04万元\n21. **爱尔兰亚马逊**：1304.92万元\n22. **巴西亚马逊**：暂无销售数据\n\n注：销售额单位为元（部分站点可能为美元换算）。",
+  "suggest": [
+    "查看销售额的排名",
+    "哪些店铺的销售额增长最快"
+  ],
+  "sql": "SELECT `FSITE`, SUM(ORDERED_PRODUCTSALES) AS `ORDERED_PRODUCTSALES` FROM ids.IDS_AMZ_COMPREHENSIVE_DI WHERE 1=1 GROUP BY `FSITE` LIMIT 100 OFFSET 0",
+  "thinking_steps": [
+    {
+      "step": "意图理解",
+      "status": "completed",
+      "content": "LLM 识别为「排名分析」，置信度 0.95",
+      "timestamp": "2026-04-15T00:42:23.349924",
+      "llm_used": false
+    },
+    {
+      "step": "实体识别",
+      "status": "completed",
+      "content": "指标：销售额 | 时间：last_month | 维度：店铺",
+      "timestamp": "2026-04-15T00:42:24.051907",
+      "llm_used": false
+    },
+    {
+      "step": "parse_sql",
+      "status": "completed",
+      "content": "解析 starrocks_sql，提取 1 个字段",
+      "timestamp": "2026-04-15T00:42:24.167589",
+      "llm_used": false
+    },
+    {
+      "step": "render_sql",
+      "status": "completed",
+      "content": "渲染SQL: SELECT \n\tSUM(ORDERED_PRODUCTSALES) AS `ORDERED_PRODUCTSALES`\nFROM  ids.IDS_AMZ_COMPREHENSIVE_DI\nWHERE 1=1...",
+      "timestamp": "2026-04-15T00:42:24.167599",
+      "llm_used": false
+    },
+    {
+      "step": "build_sql",
+      "status": "completed",
+      "content": "构建 SQL: SELECT `FSITE`, SUM(ORDERED_PRODUCTSALES) AS `ORDERED_PRODUCTSALES`\nFROM  ids.IDS_AMZ_COMPREHENSIVE_DI\nWHERE 1=1 GROUP B... (group_by_dims=['FSITE'])",
+      "timestamp": "2026-04-15T00:42:24.167603",
+      "llm_used": false
+    },
+    {
+      "step": "pagination",
+      "status": "completed",
+      "content": "分页: page=1, page_size=100",
+      "timestamp": "2026-04-15T00:42:24.167606",
+      "llm_used": false
+    },
+    {
+      "step": "query_intent_compare",
+      "status": "warning",
+      "content": "",
+      "timestamp": "2026-04-15T00:42:24.167609",
+      "llm_used": false
+    },
+    {
+      "step": "sql_gen",
+      "status": "completed",
+      "content": "使用 QueryBuilder 生成 SQL，指标：销售额",
+      "timestamp": "2026-04-15T00:42:24.167614",
+      "llm_used": false
+    },
+    {
+      "step": "sql_verify",
+      "status": "passed",
+      "content": "SQL校验通过",
+      "timestamp": "2026-04-15T00:42:24.168010",
+      "llm_used": false
+    },
+    {
+      "step": "generated_sql",
+      "status": "completed",
+      "content": "\n  SELECT `FSITE`, SUM(ORDERED_PRODUCTSALES) AS `ORDERED_PRODUCTSALES`\n  FROM ids.IDS_AMZ_COMPREHENSIVE_DI\n  WHERE 1=1\n  GROUP BY `FSITE`\n  LIMIT 100 OFFSET 0",
+      "timestamp": "2026-04-15T00:42:24.168053",
+      "llm_used": false
+    },
+    {
+      "step": "数据查询",
+      "status": "completed",
+      "content": "查询到 2 条数据",
+      "timestamp": "2026-04-15T00:42:24.169649",
+      "llm_used": false
+    }
+  ],
+  "needs_clarification": false,
+  "clarification_message": null,
+  "clarification_type": null,
+  "matched_metrics": null,
+  "dimension_value_candidates": null,
+  "dimension_value_matched_text": null,
+  "drill_down_dims": [
+    {
+      "dimension_name": "站点",
+      "dimension_field": "FSITECODE"
+    },
+    {
+      "dimension_name": "SKU",
+      "dimension_field": "SKU"
+    },
+    {
+      "dimension_name": "季度",
+      "dimension_field": "QUARTERS"
+    },
+    {
+      "dimension_name": "ASIN",
+      "dimension_field": "ASIN"
+    },
+    {
+      "dimension_name": "运营负责人",
+      "dimension_field": "PEOPLEGROUP"
+    },
+    {
+      "dimension_name": "广告负责人",
+      "dimension_field": "ADSDIRECTOR"
+    },
+    {
+      "dimension_name": "运营主管负责人",
+      "dimension_field": "PEOPLEGROUP_CHARGE"
+    },
+    {
+      "dimension_name": "运营经理负责人",
+      "dimension_field": "PEOPLEGROUP_DIRECTOR"
+    },
+    {
+      "dimension_name": "一级品类",
+      "dimension_field": "GROUP_1"
+    },
+    {
+      "dimension_name": "二级品类",
+      "dimension_field": "GROUP_2"
+    },
+    {
+      "dimension_name": "三级品类",
+      "dimension_field": "GROUP_3"
+    },
+    {
+      "dimension_name": "四级品类",
+      "dimension_field": "GROUP_4"
+    },
+    {
+      "dimension_name": "产品状态",
+      "dimension_field": "PRODUCT_STATUS"
+    },
+    {
+      "dimension_name": "产品等级",
+      "dimension_field": "PRODUCT_LEVEL"
+    },
+    {
+      "dimension_name": "大编码",
+      "dimension_field": "MODEL"
+    },
+    {
+      "dimension_name": "sku",
+      "dimension_field": "sku"
+    },
+    {
+      "dimension_name": "平台",
+      "dimension_field": "PLATFORM"
+    }
+  ],
+  "breadcrumbs": [],
+  "result_data": [
+    {
+      "店铺": "土耳其亚马逊",
+      "销售额": "16602638.431978"
+    },
+    {
+      "店铺": "荷兰亚马逊",
+      "销售额": "233329466.990389"
+    },
+    {
+      "店铺": "印度亚马逊",
+      "销售额": "29728695.661064"
+    },
+    {
+      "店铺": "波兰亚马逊",
+      "销售额": "24972932.845348"
+    },
+    {
+      "店铺": "新加坡亚马逊",
+      "销售额": "102272531.545383"
+    },
+    {
+      "店铺": "墨西哥亚马逊",
+      "销售额": "2752848686.508118"
+    },
+    {
+      "店铺": "阿联酋亚马逊",
+      "销售额": "934726082.282745"
+    },
+    {
+      "店铺": "日本亚马逊",
+      "销售额": "2207961909.162962"
+    },
+    {
+      "店铺": "加拿大亚马逊",
+      "销售额": "1257344017.395611"
+    },
+    {
+      "店铺": "西班牙亚马逊",
+      "销售额": "910870151.993677"
+    },
+    {
+      "店铺": "法国亚马逊",
+      "销售额": "1922005175.383720"
+    },
+    {
+      "店铺": "美国亚马逊",
+      "销售额": "6506879970.145490"
+    },
+    {
+      "店铺": "澳大利亚亚马逊",
+      "销售额": "1065228900.031428"
+    },
+    {
+      "店铺": "爱尔兰亚马逊",
+      "销售额": "13049232.463531"
+    },
+    {
+      "店铺": "英国亚马逊",
+      "销售额": "3287777359.985928"
+    },
+    {
+      "店铺": "沙特亚马逊",
+      "销售额": "741531353.067134"
+    },
+    {
+      "店铺": "巴西亚马逊",
+      "销售额": null
+    },
+    {
+      "店铺": "比利时亚马逊",
+      "销售额": "184831232.300219"
+    },
+    {
+      "店铺": "意大利亚马逊",
+      "销售额": "716195189.973480"
+    },
+    {
+      "店铺": "德国亚马逊",
+      "销售额": "5652800171.535998"
+    },
+    {
+      "店铺": "巴西亚马逊(HK)",
+      "销售额": "6650436.584781"
+    },
+    {
+      "店铺": "瑞典亚马逊",
+      "销售额": "56656823.985806"
+    }
+  ],
+  "total": 22,
+  "page": 1,
+  "page_size": 100,
+  "comparison_results": null,
+  "metric_code": "MKI-02-0009"
+}

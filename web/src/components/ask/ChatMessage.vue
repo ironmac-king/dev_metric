@@ -807,11 +807,11 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
 
 .message-content {
   background: var(--bg-card);
-  padding: 12px 16px;
+  padding: 8px 11px;
   border-radius: 20px;
   border: 1px solid var(--border);
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.5;
   color: var(--text-primary);
 }
 
@@ -1489,7 +1489,7 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
 /* 消息样式 - 气泡风格 (类应用在 .chat-messages 上) */
 .chat-messages.style-bubbles :deep(.message-content) {
   background: var(--bg-card) !important;
-  padding: 12px 16px;
+  padding: 8px 11px;
   border-radius: 20px;
   border: 1px solid var(--border);
 }
@@ -1504,7 +1504,7 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
 /* 消息样式 - 卡片风格 */
 .chat-messages.style-cards :deep(.message-content) {
   background: var(--bg-card) !important;
-  padding: 14px 18px;
+  padding: 10px 13px;
   border-radius: 12px;
   border: 1px solid var(--border);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
@@ -1521,24 +1521,24 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
 .chat-messages.font-small :deep(.message-content) {
   font-size: 12px !important;
   line-height: 1.5;
-  padding: 10px 14px;
+  padding: 7px 10px;
 }
 
 .chat-messages.font-medium :deep(.message-content) {
   font-size: 14px !important;
-  line-height: 1.6;
-  padding: 12px 16px;
+  line-height: 1.5;
+  padding: 8px 11px;
 }
 
 .chat-messages.font-large :deep(.message-content) {
   font-size: 16px !important;
-  line-height: 1.7;
-  padding: 14px 18px;
+  line-height: 1.5;
+  padding: 10px 13px;
 }
 
 /* 紧凑模式 */
 .chat-messages.compact-mode :deep(.message-content) {
-  padding: 8px 12px !important;
+  padding: 6px 8px !important;
 }
 
 .chat-messages.compact-mode :deep(.thinking-process) {

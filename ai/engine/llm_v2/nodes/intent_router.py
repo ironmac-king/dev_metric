@@ -5,27 +5,132 @@
 - 识别用户意图（query_value / query_trend / query_comparison 等）
 - 判断是否需要追问
 - 继承上轮对话上下文
+- 本地模型优先匹配，LLM 兜底
 """
 import json
 from typing import Dict, Any, Optional, List
 from ai.config.logging_config import get_logger
 from ai.engine.prompt_manager import get_prompt_manager
 from ai.engine.llm import get_llm_engine
-from ..schema import V2State, MQLSchema, MQLIntent, MQLDimension
+from ..schema import V2State, MQLSchema, MQLIntent, MQLDimension, TimeRange, TimeType
 
 logger = get_logger("ai.llm_v2.intent_router")
+
+# 本地模型实体类型 → MQLSchema 维度类型 映射
+ENTITY_TYPE_TO_DIM_COLUMN = {
+    'DIM': 'DIM',           # 通用维度类型
+    'DIM_VALUE': 'DIM_VALUE',  # 维度值
+    'SKU_VALUE': 'SKU',     # SKU 编码
+}
+
+# 时间表达式映射（简单场景用，复杂场景交给 LLM）
+TIME_EXPRESSION_MAP = {
+    '今日': '本月',
+    '昨日': '昨日',
+    '本周': '本周',
+    '上周': '上周',
+    '本月': '本月',
+    '上月': '上月',
+    '本季度': '本季度',
+    '上季度': '上季度',
+    '本年': '本年',
+    '去年': '去年',
+}
 
 
 class IntentRouter:
     """
     意图路由智能体
 
-    使用 LLM 识别用户意图，并判断是否需要追问。
+    使用本地 Joint BERT 模型做精准匹配，匹配成功则跳过 LLM，
+    匹配失败则使用 LLM 兜底识别。
     """
+
+    # 排名追问的常用维度选项（中文标签 → 英文类型）
+    RANKING_DIMENSION_OPTIONS = [
+        {"label": "按平台", "value": "PLATFORM"},
+        {"label": "按店铺", "value": "SHOP"},
+        {"label": "按渠道", "value": "CHANNEL"},
+        {"label": "按品类", "value": "GROUP_3"},
+        {"label": "按品牌", "value": "BRAND"},
+        {"label": "按国家", "value": "COUNTRY"},
+        {"label": "按产品线", "value": "PRODUCT_LINE"},
+    ]
 
     def __init__(self):
         self._prompt_manager = get_prompt_manager()
         self._llm_engine = get_llm_engine()
+        self._dimension_type_mappings = None
+        self._local_model = None  # 本地模型延迟加载
+
+    def _get_local_model(self):
+        """延迟加载本地模型"""
+        if self._local_model is None:
+            try:
+                from .local_intent_model import get_local_intent_model
+                self._local_model = get_local_intent_model()
+                logger.info("[IntentRouter] 本地 Joint BERT 模型加载成功")
+            except Exception as e:
+                logger.warning(f"[IntentRouter] 本地模型加载失败: {e}")
+                self._local_model = None
+        return self._local_model
+
+    def _load_dimension_mappings(self):
+        """从 API 加载维度类型映射"""
+        if self._dimension_type_mappings is None:
+            try:
+                from ai.client.metric_client import MetricClient
+                client = MetricClient()
+                # 优先使用 dimension_configs（包含业务维度配置）
+                configs = client.get_dimension_configs()
+                if configs:
+                    self._dimension_type_mappings = configs
+                    logger.info(f"[IntentRouter] 从 dimension_configs 加载了 {len(configs)} 个维度配置")
+                else:
+                    # 回退到 dimension_type_mappings
+                    self._dimension_type_mappings = client.get_dimension_type_mappings()
+                    logger.info(f"[IntentRouter] 从 dimension_type_mappings 加载了 {len(self._dimension_type_mappings)} 个维度类型映射")
+            except Exception as e:
+                logger.warning(f"[IntentRouter] 加载维度映射失败: {e}")
+                self._dimension_type_mappings = []
+
+    def _get_ranking_dimension_options(self) -> List[Dict[str, str]]:
+        """获取排名追问的维度选项（从配置动态加载）"""
+        self._load_dimension_mappings()
+        if self._dimension_type_mappings:
+            # 排除时间粒度类型，只保留业务维度
+            time_column_names = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
+            options = []
+            seen_values = set()  # 用于去重
+
+            for m in self._dimension_type_mappings:
+                # dimension_configs 返回: dimension_name (中文名称), column_name (维度类型代码)
+                # dimension_type_mappings 返回: dimension_type (中文), column_name (列名)
+                dim_name = m.get("dimension_name", "") or m.get("dimension_type", "") or ""
+                column_name = m.get("column_name", "") or ""
+
+                # 跳过时间维度
+                if column_name.upper() in time_column_names:
+                    continue
+
+                # 跳过没有维度名称的
+                if not dim_name:
+                    continue
+
+                # column_name 作为维度类型代码（如 "PLATFORM"、"FSITE"）
+                # 用于 SQL 生成器的 DIMENSION_COLUMN_MAP 映射
+                value = column_name
+                if value and value not in seen_values:
+                    seen_values.add(value)
+                    # dimension_name 本身就是中文名称（如"平台"、"店铺"）
+                    label = f"按{dim_name}" if not dim_name.startswith("按") else dim_name
+                    options.append({"label": label, "value": value})
+
+            if options:
+                logger.info(f"[IntentRouter] 排名维度选项: {options}")
+                return options
+        # 回退到默认选项
+        return self.RANKING_DIMENSION_OPTIONS
 
     async def route(self, question: str, inherited_mql: Optional[MQLSchema] = None) -> Dict[str, Any]:
         """
@@ -52,13 +157,28 @@ class IntentRouter:
         if inherited_mql and self._is_short_followup(question):
             return await self._handle_followup(question, inherited_mql)
 
-        # 3. LLM 意图识别
-        return await self._llm_intent_recognition(question, inherited_mql)
+        # 3. 本地模型预识别（精准匹配 + LLM 兜底）
+        return await self._local_then_llm_intent_recognition(question, inherited_mql)
 
     def _is_short_followup(self, question: str) -> bool:
-        """判断是否为短追问"""
+        """判断是否为短追问或维度选择"""
         short_keywords = ["呢", "呢？", "？", "啊", "哦", "嗯", "再", "还", "环比呢", "同比呢", "趋势呢"]
-        return len(question) < 10 or any(kw in question for kw in short_keywords)
+        if any(kw in question for kw in short_keywords):
+            return True
+
+        # 检测是否是单个维度类型代码（如 FSITECODE、FSITE、PLATFORM 等）
+        # 当用户从追问选项中选择维度时，前端发送的是 option.value（如 FSITECODE）
+        dimension_codes = {
+            "FSITECODE", "FSITE", "PLATFORM", "FCHANNEL", "FBRANDS", "FPRODUCTLINE",
+            "FADTYPE", "GROUP_1", "GROUP_2", "GROUP_3", "GROUP_4", "SKU", "ASIN",
+            "FCOUNTRY", "REGION", "FDATE", "MONTHS", "WEEKS", "YEARS", "QUARTERS",
+            "PRODUCT_STATUS", "PRODUCT_LEVEL", "MODEL", "PEOPLEGROUP", "ADSDIRECTOR",
+            "PEOPLEGROUP_CHARGE", "PEOPLEGROUP_DIRECTOR"
+        }
+        if question.upper() in dimension_codes or question in dimension_codes:
+            return True
+
+        return len(question) < 10
 
     def _is_greeting(self, question: str) -> bool:
         """判断是否为寒暄"""
@@ -140,10 +260,86 @@ class IntentRouter:
                 "clarification_message": "请问您想查询什么指标？",
             }
 
+        # 检测是否是单个维度类型代码（如 FSITECODE、FSITE、PLATFORM 等）
+        dimension_codes = {
+            "FSITECODE", "FSITE", "PLATFORM", "FCHANNEL", "FBRANDS", "FPRODUCTLINE",
+            "FADTYPE", "GROUP_1", "GROUP_2", "GROUP_3", "GROUP_4", "SKU", "ASIN",
+            "FCOUNTRY", "REGION", "FDATE", "MONTHS", "WEEKS", "YEARS", "QUARTERS",
+            "PRODUCT_STATUS", "PRODUCT_LEVEL", "MODEL", "PEOPLEGROUP", "ADSDIRECTOR",
+            "PEOPLEGROUP_CHARGE", "PEOPLEGROUP_DIRECTOR"
+        }
+        upper_question = question.upper()
+        is_dimension_code = question in dimension_codes or upper_question in dimension_codes
+
         # 继承上轮 MQL
         mql = MQLSchema()
         mql.session_id = inherited_mql.session_id
         mql.parent_state_id = inherited_mql.session_id  # 关联父状态
+
+        # 如果问题是维度代码，使用它作为维度
+        if is_dimension_code:
+            dim_code = upper_question if upper_question in dimension_codes else question
+            mql.intent = inherited_mql.intent
+            mql.metric = inherited_mql.metric
+            mql.metrics = inherited_mql.metrics
+            mql.time = inherited_mql.time
+            mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+            mql.order_by = inherited_mql.order_by
+            mql.top_n = inherited_mql.top_n
+            mql.original_question = inherited_mql.original_question or question
+            logger.info(f"[IntentRouter] 检测到维度选择: {dim_code}，替换维度")
+            return {
+                "mql": mql,
+                "needs_clarification": False,
+            }
+
+        # 检测是否是"按XX"格式的维度选择（如"按一级品类"、"按站点"等）
+        # 前端发送 option.label（如"按一级品类"），后端需要转换为维度代码
+        if question.startswith("按") and len(question) >= 3:
+            dim_label = question[1:]  # 去掉"按"字，得到如"一级品类"
+            # 加载维度类型映射（如果尚未加载）
+            if self._dimension_type_mappings is None:
+                self._load_dimension_mappings()
+            if self._dimension_type_mappings:
+                # 建立 中文维度名 -> 维度代码 的映射
+                dim_label_to_code = {}
+                for m in self._dimension_type_mappings:
+                    dim_type = m.get("dimension_type", "") or m.get("dimension_name", "") or ""
+                    column_name = m.get("column_name", "") or ""
+                    if dim_type and column_name:
+                        dim_label_to_code[dim_type] = column_name
+                        dim_label_to_code[f"按{dim_type}"] = column_name  # 也包含完整label格式
+                if dim_label in dim_label_to_code:
+                    dim_code = dim_label_to_code[dim_label]
+                    mql.intent = inherited_mql.intent
+                    mql.metric = inherited_mql.metric
+                    mql.metrics = inherited_mql.metrics
+                    mql.time = inherited_mql.time
+                    mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+                    mql.order_by = inherited_mql.order_by
+                    mql.top_n = inherited_mql.top_n
+                    mql.original_question = inherited_mql.original_question or question
+                    logger.info(f"[IntentRouter] 检测到中文维度选择: {question} -> {dim_code}，替换维度")
+                    return {
+                        "mql": mql,
+                        "needs_clarification": False,
+                    }
+                # 模糊匹配：检查 dim_label 是否包含在某维度名中
+                for dim_type, dim_code in dim_label_to_code.items():
+                    if dim_label in dim_type or dim_type in dim_label:
+                        mql.intent = inherited_mql.intent
+                        mql.metric = inherited_mql.metric
+                        mql.metrics = inherited_mql.metrics
+                        mql.time = inherited_mql.time
+                        mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+                        mql.order_by = inherited_mql.order_by
+                        mql.top_n = inherited_mql.top_n
+                        mql.original_question = inherited_mql.original_question or question
+                        logger.info(f"[IntentRouter] 检测到中文维度选择(模糊): {question} -> {dim_code}，替换维度")
+                        return {
+                            "mql": mql,
+                            "needs_clarification": False,
+                        }
 
         # 根据追问内容更新意图
         if "环比" in question:
@@ -184,6 +380,147 @@ class IntentRouter:
             "mql": mql,
             "needs_clarification": False,
         }
+
+    async def _local_then_llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
+        """
+        本地模型预识别 + LLM 兜底
+
+        流程：
+        1. 本地 Joint BERT 模型先识别
+        2. 匹配成功（置信度 >= 0.85 + 有 METRIC 实体）→ 直接构建 MQLSchema
+        3. 匹配失败 → 走 LLM 意图识别（兜底）
+        """
+        local_model = self._get_local_model()
+
+        if local_model is None:
+            # 本地模型加载失败，直接走 LLM
+            logger.info("[IntentRouter] 本地模型不可用，走 LLM 兜底")
+            return await self._llm_intent_recognition(question, inherited_mql)
+
+        try:
+            # 本地模型预测
+            local_result = local_model.predict(question)
+            logger.info(f"[IntentRouter] 本地模型预测: intent={local_result['intent']}, "
+                       f"confidence={local_result['confidence']:.3f}, "
+                       f"entities={len(local_result['entities'])}, "
+                       f"match_success={local_result['match_success']}")
+
+            # 匹配成功：直接构建 MQLSchema
+            if local_result['match_success']:
+                mql = self._build_mql_from_local(local_result, question)
+                logger.info(f"[IntentRouter] 本地模型精准匹配成功，跳过 LLM: intent={mql.intent.value}")
+                return {
+                    "mql": mql,
+                    "needs_clarification": False,
+                    "source": "local_model",
+                    "local_confidence": local_result['confidence'],
+                }
+
+            # 匹配失败：LLM 兜底
+            logger.info(f"[IntentRouter] 本地模型匹配失败（confidence={local_result['confidence']:.3f} 或缺少 METRIC 实体），"
+                       f"走 LLM 兜底")
+            return await self._llm_intent_recognition(question, inherited_mql)
+
+        except Exception as e:
+            logger.error(f"[IntentRouter] 本地模型预测异常: {e}，走 LLM 兜底")
+            return await self._llm_intent_recognition(question, inherited_mql)
+
+    def _build_mql_from_local(self, local_result: Dict[str, Any], question: str) -> MQLSchema:
+        """
+        从本地模型预测结果构建 MQLSchema
+
+        本地模型输出：
+        {
+            'intent': 'query_value',
+            'confidence': 0.92,
+            'entities': [{'text': '销售额', 'type': 'METRIC'}, ...],
+            'match_success': True
+        }
+        """
+        from ..schema import MQLMetric, ComparisonSpec
+
+        mql = MQLSchema()
+        mql.original_question = question
+        mql.resolved_question = question
+
+        # 意图映射
+        try:
+            mql.intent = MQLIntent(local_result['intent'])
+        except ValueError:
+            mql.intent = MQLIntent.UNKNOWN
+        mql.confidence = local_result['confidence']
+
+        # 解析实体
+        entities = local_result.get('entities', [])
+
+        # 指标实体（必须）
+        metric_entities = [e for e in entities if e['type'] == 'METRIC']
+        if metric_entities:
+            # 简单场景：取第一个 METRIC 实体作为主指标
+            # 复杂场景（如多指标）交给后续 LLM 节点处理
+            metric_text = metric_entities[0]['text']
+            mql.metric = MQLMetric(
+                code="",  # 本地模型不返回 code，让后续节点通过 metric_client 查询
+                name=metric_text,
+                table="",
+                field="",
+                unit="",
+            )
+            logger.info(f"[IntentRouter] 本地模型提取指标: {metric_text}")
+
+        # 时间实体
+        time_entities = [e for e in entities if e['type'] == 'TIME']
+        if time_entities:
+            time_text = time_entities[0]['text']
+            time_original = TIME_EXPRESSION_MAP.get(time_text, time_text)
+            mql.time = TimeRange(
+                type=TimeType.RELATIVE,
+                start="",
+                end="",
+                original=time_original,
+            )
+            logger.info(f"[IntentRouter] 本地模型提取时间: {time_text} -> {time_original}")
+
+        # 维度实体（类型 + 值）
+        dim_entities = [e for e in entities if e['type'] == 'DIM']
+        dim_value_entities = [e for e in entities if e['type'] == 'DIM_VALUE']
+
+        # 简单场景：直接组合维度类型和值
+        if dim_entities and dim_value_entities:
+            for i, dim_entity in enumerate(dim_entities):
+                if i < len(dim_value_entities):
+                    dim_type = dim_entity['text']
+                    dim_value = dim_value_entities[i]['text']
+                    # 简单映射，实际维度代码由后续节点解析
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_type,
+                        column="",
+                        field="",
+                        value=dim_value,
+                    ))
+                    logger.info(f"[IntentRouter] 本地模型提取维度: {dim_type} = {dim_value}")
+
+        # 检查是否有对比意图（环比/同比关键词）
+        if any(kw in question for kw in ['环比', '同比', '增长', '下降', '变化']):
+            mql.comparison = ComparisonSpec(
+                enabled=True,
+                types=["环比"] if "环比" in question else ["同比"],
+                compare_period_start="",
+                compare_period_end="",
+            )
+
+        # 检查是否有排名意图
+        if any(kw in question for kw in ['排名', '前几', '最高', '最低', '最好', '最差']):
+            mql.intent = MQLIntent.QUERY_RANKING
+            # 提取排名数量
+            import re
+            match = re.search(r'前(\d+)', question)
+            if match:
+                mql.top_n = int(match.group(1))
+            else:
+                mql.top_n = 10
+
+        return mql
 
     async def _llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
         """
@@ -244,6 +581,20 @@ class IntentRouter:
                 # 泛指维度：设置追问引导，但仍然继续执行返回数据
                 needs_clarification = True
                 clarification_message = generic_check.get("clarification_message", "")
+
+            # 3. 排名查询没有维度时追问（类似品类追问）
+            if not needs_clarification and mql.intent == MQLIntent.QUERY_RANKING and not mql.dimensions:
+                needs_clarification = True
+                clarification_message = "请问您想按哪个维度排名？"
+                clarification_options = self._get_ranking_dimension_options()
+                return {
+                    "mql": mql,
+                    "needs_clarification": needs_clarification,
+                    "clarification_message": clarification_message,
+                    "clarification_options": clarification_options,
+                    "is_generic": True,
+                    "default_dimension": "PLATFORM",
+                }
 
             return {
                 "mql": mql,
@@ -369,17 +720,33 @@ class IntentRouter:
             ))
 
         # 解析对比周期
-        comparison_period = result.get("comparison_period", "")
-        if comparison_period:
+        # 支持两种格式：1) comparison_period 字符串（旧格式），2) comparison 对象（新格式）
+        comparison_data = result.get("comparison", {})
+        # 安全获取 types：key 存在但值为空列表时也要处理
+        types = comparison_data.get("types") or [""]
+        comparison_period = result.get("comparison_period", "") or types[0] if comparison_data else ""
+
+        if comparison_period or (comparison_data and comparison_data.get("enabled")):
             from ..schema import ComparisonSpec
             mql.comparison = ComparisonSpec(
                 enabled=True,
-                types=[comparison_period],
+                types=[comparison_period] if comparison_period else comparison_data.get("types", []),
+                compare_period_start=comparison_data.get("period_start", "") if isinstance(comparison_data, dict) else "",
+                compare_period_end=comparison_data.get("period_end", "") if isinstance(comparison_data, dict) else "",
             )
 
         # 解析 Top N（从 intent 或 dimension 推断）
         if mql.intent == MQLIntent.QUERY_RANKING:
-            mql.top_n = result.get("top_n", 10)
+            top_n = result.get("top_n")
+            if top_n is None or top_n == 0:
+                # LLM 返回 0 或 None 时，从问题文本中提取数字
+                import re
+                match = re.search(r'前(\d+)', question)
+                if match:
+                    top_n = int(match.group(1))
+                else:
+                    top_n = 10  # 默认 Top 10
+            mql.top_n = top_n
 
         # 解析排序方向（最少/最小 → ASC；最多/最大 → DESC）
         order_by_direction = result.get("order_by", {}).get("direction", "") if isinstance(result.get("order_by"), dict) else ""
@@ -411,7 +778,18 @@ class IntentRouter:
 
 【输出格式】
 只输出JSON，不要有其他内容：
-{{"intent": "意图", "confidence": 0.0-1.0, "metric": {{"code": "", "name": "指标名称"}}, "time": {{"type": "relative", "original": "时间"}}, "dimensions": [{{"type": "维度"}}], "comparison": {{"enabled": false}}, "top_n": 0, "order_by_direction": "ASC或DESC"}}
+{{"intent": "意图", "confidence": 0.0-1.0, "metric": {{"code": "", "name": "指标名称"}}, "time": {{"type": "relative", "original": "时间"}}, "dimensions": [{{"type": "维度"}}], "comparison": {{"enabled": false, "types": [], "period_start": "", "period_end": ""}}, "top_n": 0, "order_by_direction": "ASC或DESC"}}
+
+【对比时间】
+当用户询问同比/环比时（如"3月比2月"、"环比2月"），必须提取对比时间：
+- comparison.enabled = true
+- comparison.types = ["环比"] 或 ["同比"]
+- comparison.period_start = 对比开始日期 (YYYY-MM-DD)
+- comparison.period_end = 对比结束日期 (YYYY-MM-DD)
+
+示例：
+- 用户问"2026年3月环比2月" → period_start="2026-02-01", period_end="2026-02-28"
+- 用户问"2026年Q1同比去年" → period_start="2025-01-01", period_end="2025-03-31"
 
 【排序方向规则】
 - 最多/最大/最高/最好 → DESC

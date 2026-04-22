@@ -56,8 +56,9 @@ class SQLSecurityAuditor:
         if "--" in sql or "/*" in sql:
             return False, "禁止的注释风格"
 
-        # 3. 检查是否以 SELECT 开头
-        if not sql_upper.strip().startswith("SELECT"):
+        # 3. 检查是否以 SELECT 或 WITH (CTE) 开头
+        stripped = sql_upper.strip()
+        if not stripped.startswith("SELECT") and not stripped.startswith("WITH"):
             return False, "只允许 SELECT 查询"
 
         # 4. 检查表名（如果有）

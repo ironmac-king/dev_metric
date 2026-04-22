@@ -1,0 +1,39 @@
+{
+  "session_id": "v3-test-1776185591",
+  "answer": "抱歉，无法理解您的问题，请尝试描述具体一些",
+  "suggest": [
+    "查看销售额的排名",
+    "哪些店铺的销售额增长最快"
+  ],
+  "sql": null,
+  "thinking_steps": [
+    {
+      "step": "意图理解",
+      "status": "completed",
+      "content": "LLM 识别为「排名分析」，置信度 0.95",
+      "timestamp": "2026-04-15T00:53:27.926327",
+      "llm_used": false
+    },
+    {
+      "step": "实体识别",
+      "status": "completed",
+      "content": "时间：上月 | 维度：FSITE",
+      "timestamp": "2026-04-15T00:53:28.607729",
+      "llm_used": false
+    }
+  ],
+  "needs_clarification": true,
+  "clarification_message": "抱歉，无法理解您的问题，请尝试描述具体一些",
+  "clarification_type": "scope_too_broad",
+  "matched_metrics": null,
+  "dimension_value_candidates": null,
+  "dimension_value_matched_text": null,
+  "drill_down_dims": null,
+  "breadcrumbs": [],
+  "result_data": null,
+  "total": null,
+  "page": 1,
+  "page_size": 100,
+  "comparison_results": null,
+  "metric_code": null
+}
