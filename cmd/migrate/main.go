@@ -45,6 +45,101 @@ func main() {
 
 	// 创建默认管理员用户
 	createAdminUser()
+
+	// ========== 013: 统一 dim_value_mapping 表 ==========
+	migrateDimValueMapping()
+}
+
+func migrateDimValueMapping() {
+	db := postgres.Get()
+
+	// 1. 删除旧的新表（如存在）
+	db.Exec(`DROP TABLE IF EXISTS dim_value_mapping_new;`)
+	log.Println("[013] 删除旧 dim_value_mapping_new（如存在）")
+
+	// 2. 创建新表
+	// UNIQUE 约束: (table_name, column_name) — 一个列在同一表只能出现一次
+	// dimension_value 为空时代表类型映射，为非空时代表具体维度值
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS dim_value_mapping_new (
+		id SERIAL PRIMARY KEY,
+		table_name VARCHAR(128) NOT NULL DEFAULT 'ids.IDS_AMZ_COMPREHENSIVE_DI',
+		column_name VARCHAR(64) NOT NULL,
+		dimension_type VARCHAR(64),
+		dimension_value VARCHAR(256) NOT NULL DEFAULT '',
+		frequency BIGINT DEFAULT 0,
+		status SMALLINT DEFAULT 1,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+	if err := db.Exec(createTableSQL).Error; err != nil {
+		log.Printf("[013] 创建 dim_value_mapping_new 表失败: %v", err)
+	} else {
+		log.Println("[013] dim_value_mapping_new 表创建成功")
+	}
+
+	// 2. 创建索引
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_dvm_column ON dim_value_mapping_new(column_name);`,
+		`CREATE INDEX IF NOT EXISTS idx_dvm_type ON dim_value_mapping_new(dimension_type);`,
+		`CREATE INDEX IF NOT EXISTS idx_dvm_table ON dim_value_mapping_new(table_name);`,
+	}
+	for _, idx := range indexes {
+		if err := db.Exec(idx).Error; err != nil {
+			log.Printf("[013] 创建索引失败: %v", err)
+		}
+	}
+	log.Println("[013] 索引创建完成")
+
+	// 3. 从 dimension_type_mappings 迁移数据（dimension_value 为空）
+	// 每个 column 可以对应多个 dimension_type（如 FDATE → 日期/日/时间/时间粒度）
+	migrateSQL := `
+	INSERT INTO dim_value_mapping_new (table_name, column_name, dimension_type, dimension_value, status)
+	SELECT
+		'ids.IDS_AMZ_COMPREHENSIVE_DI' AS table_name,
+		dtm.column_name,
+		dtm.dimension_type,
+		'' AS dimension_value,
+		dtm.status
+	FROM dimension_type_mappings dtm
+	WHERE dtm.status = 1;
+	`
+	if err := db.Exec(migrateSQL).Error; err != nil {
+		log.Printf("[013] 迁移 dimension_type_mappings 数据失败: %v", err)
+	} else {
+		log.Println("[013] dimension_type_mappings 数据迁移成功")
+	}
+
+	// 4. 检查结果
+	var count int
+	db.Raw("SELECT COUNT(*) FROM dim_value_mapping_new").Scan(&count)
+	log.Printf("[013] dim_value_mapping_new 当前行数: %d", count)
+
+	// 5. 表切换：dim_value_mapping_new → dim_value_mapping（幂等，只执行一次）
+	switchToNewTable()
+}
+
+func switchToNewTable() {
+	// 检查 dim_value_mapping 是否已存在（已切换过则跳过）
+	var existingCount int
+	postgres.Get().Raw("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'dim_value_mapping'").Scan(&existingCount)
+	if existingCount > 0 {
+		log.Println("[013] dim_value_mapping 已存在，跳过表切换")
+		return
+	}
+
+	log.Println("[013] 执行表切换：dim_value_mapping_new → dim_value_mapping")
+
+	// 先尝试删除旧表（如果存在）
+	postgres.Get().Exec(`DROP TABLE IF EXISTS dim_value_mapping;`)
+
+	// 将 dim_value_mapping_new 重命名为 dim_value_mapping
+	if err := postgres.Get().Exec(`ALTER TABLE dim_value_mapping_new RENAME TO dim_value_mapping;`).Error; err != nil {
+		log.Printf("[013] 表切换失败: %v", err)
+		return
+	}
+	log.Println("[013] 表切换成功：dim_value_mapping_new → dim_value_mapping")
 }
 
 func createRolesAndMenus() {

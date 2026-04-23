@@ -89,6 +89,19 @@ export const dimensionTypeMappingAPI = {
   delete: (id) => api.delete(`/dimension-type-mappings/${id}`)
 }
 
+// 统一维度值映射 API (dim_value_mapping 表 - 新)
+export const dimensionValueAPI = {
+  list: (params) => api.get('/dimension-values', { params }),
+  get: (id) => api.get(`/dimension-values/${id}`),
+  update: (id, data) => api.put(`/dimension-values/${id}`, data),
+  delete: (id) => api.delete(`/dimension-values/${id}`),
+  batchDelete: (ids) => api.delete('/dimension-values/batch', { data: { ids } }),
+  getColumns: (params) => api.get('/dimension-values/columns', { params }),
+  search: (params) => api.get('/dimension-values/search', { params }),
+  sync: (data) => api.post('/dimension-values/sync', data),
+  syncBySQL: (sql) => api.post('/dimension-values/sync/sql', { sql }),
+}
+
 // 告警 API
 export const alertAPI = {
   list: (params) => api.get('/alerts', { params }),

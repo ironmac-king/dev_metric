@@ -191,7 +191,7 @@
                         v-for="option in msg.clarificationOptions"
                         :key="option.value"
                         class="clarification-tag"
-                        @click="selectClarification(option)"
+                        @click="selectClarification(option, msg.originalQuestion)"
                       >
                         {{ option.label }}
                       </button>
@@ -539,6 +539,10 @@ async function handleSend() {
   let finalSuggest = []
   let finalClarificationOptions = []
   let finalClarificationMessage = ''
+  let finalNeedsClarification = false
+  let finalThinkingClarificationMessage = ''
+  let finalThinkingClarificationOptions = []
+  let finalThinkingOriginalQuestion = ''
   let thinkingStepsMap = new Map()
 
   try {
@@ -612,8 +616,23 @@ async function handleSend() {
               const existing = thinkingStepsMap.get(stepName) || { step: stepName }
               thinkingStepsMap.set(stepName, {
                 ...existing,
-                content: data.content
+                content: data.content,
+                entities: data.entities || [],
+                llm_used: data.llm_used || false,
+                source: data.source || null,
+                mql: data.mql || null,
+                needsClarification: data.needs_clarification || false,
+                clarificationMessage: data.clarification_message || '',
+                clarificationOptions: data.clarification_options || [],
+                originalQuestion: data.original_question || ''
               })
+              // 追问信息优先从 thinking 事件获取（泛指维度时流程在 intent_router 就中断了）
+              if (data.needs_clarification) {
+                finalNeedsClarification = true
+                finalThinkingClarificationMessage = data.clarification_message || ''
+                finalThinkingClarificationOptions = data.clarification_options || []
+                finalThinkingOriginalQuestion = data.original_question || ''
+              }
               currentThinkingSteps.value = Array.from(thinkingStepsMap.values())
               stepsVersion.value++
             } else if (currentEvent === 'sql_ready') {
@@ -649,7 +668,11 @@ async function handleSend() {
       step: s.step,
       status: s.status,
       content: s.content,
-      duration: s.duration
+      duration: s.duration,
+      entities: s.entities || [],
+      llm_used: s.llm_used || false,
+      source: s.source || null,
+      mql: s.mql || null
     }))
 
     // 当有结果数据但没有文字回答时，生成默认回答
@@ -669,7 +692,23 @@ async function handleSend() {
       }
     }
     // 如果有图表数据，不显示文字回答（只通过图表卡片展示）
-    const finalContent = (finalResultData && finalResultData.length > 0) ? '' : (displayAnswer || '抱歉，我没有找到相关数据。')
+    // 追问时优先显示追问消息
+    let finalContent = ''
+    if (finalNeedsClarification && finalThinkingClarificationMessage) {
+      finalContent = finalThinkingClarificationMessage
+    } else if (finalResultData && finalResultData.length > 0) {
+      finalContent = ''
+    } else {
+      finalContent = displayAnswer || '抱歉，我没有找到相关数据。'
+    }
+
+    // 追问选项优先从 thinking 事件获取（泛指维度时流程在 intent_router 就中断了）
+    const effectiveClarificationOptions = finalNeedsClarification && finalThinkingClarificationOptions.length > 0
+      ? finalThinkingClarificationOptions
+      : finalClarificationOptions
+    const effectiveClarificationMessage = finalNeedsClarification && finalThinkingClarificationMessage
+      ? finalThinkingClarificationMessage
+      : finalClarificationMessage
 
     messages.value.push({
       role: 'assistant',
@@ -679,9 +718,10 @@ async function handleSend() {
       resultData: finalResultData,
       metricName: finalMetricName,
       suggest: finalSuggest,
-      needsClarification: finalClarificationOptions.length > 0,
-      clarificationOptions: finalClarificationOptions,
-      clarificationMessage: finalClarificationMessage,
+      needsClarification: finalNeedsClarification || effectiveClarificationOptions.length > 0,
+      clarificationOptions: effectiveClarificationOptions,
+      clarificationMessage: effectiveClarificationMessage,
+      originalQuestion: finalThinkingOriginalQuestion,
       time: getCurrentTime()
     })
 
@@ -709,7 +749,9 @@ async function updateThinkingSteps() {
     step: s.step,
     status: s.status,
     content: s.content,
-    duration: s.duration
+    duration: s.duration,
+    entities: s.entities || [],
+    llm_used: s.llm_used || false
   }))
   currentThinkingSteps.value = newSteps
   await nextTick()
@@ -803,10 +845,16 @@ function rateMessage(msg, rating) {
   }
 }
 
-function selectClarification(option) {
-  // 发送 option.label（如"按一级品类"）而不是 option.value（如"GROUP_1"）
-  // 后端会将短追问与 inherited_mql 组合生成完整 SQL
-  question.value = option.label
+function selectClarification(option, originalQuestion) {
+  // 使用 original_question + replace_key 改写问题
+  // 例如：originalQuestion="本月各品类销售额是多少？", option.replace_key="品类", option.value="一级品类"
+  // 改写为："本月各一级品类销售额是多少？"
+  if (option.replace_key && originalQuestion) {
+    const rewritten = originalQuestion.replace(option.replace_key, option.value)
+    question.value = rewritten
+  } else {
+    question.value = option.label
+  }
   handleSend()
 }
 

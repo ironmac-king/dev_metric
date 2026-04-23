@@ -10,26 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ListDimensionTypeMappings 获取所有维度类型映射
-func ListDimensionTypeMappings(c *gin.Context) {
-	var mappings []model.DimensionTypeMapping
-	postgres.Get().Order("id ASC").Find(&mappings)
-	response.Success(c, mappings)
-}
-
-// GetDimensionTypeMappingsByType 根据类型名获取映射
-func GetDimensionTypeMappingsByType(c *gin.Context) {
-	dimensionType := c.Query("dimension_type")
-	var mappings []model.DimensionTypeMapping
-	query := postgres.Get().Model(&model.DimensionTypeMapping{}).Where("status = ?", 1)
-	if dimensionType != "" {
-		query = query.Where("LOWER(dimension_type) LIKE LOWER(?)", "%"+dimensionType+"%")
-	}
-	query.Find(&mappings)
-	response.Success(c, mappings)
-}
-
-// CreateDimensionTypeMapping 创建维度类型映射
+// CreateDimensionTypeMapping 创建维度类型映射（向后兼容，仍写 dimension_type_mappings 表）
 func CreateDimensionTypeMapping(c *gin.Context) {
 	var mapping model.DimensionTypeMapping
 	if err := c.ShouldBindJSON(&mapping); err != nil {
@@ -45,7 +26,7 @@ func CreateDimensionTypeMapping(c *gin.Context) {
 	response.Success(c, mapping)
 }
 
-// UpdateDimensionTypeMapping 更新维度类型映射
+// UpdateDimensionTypeMapping 更新维度类型映射（向后兼容）
 func UpdateDimensionTypeMapping(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	var mapping model.DimensionTypeMapping
@@ -68,7 +49,7 @@ func UpdateDimensionTypeMapping(c *gin.Context) {
 	response.Success(c, mapping)
 }
 
-// DeleteDimensionTypeMapping 删除维度类型映射
+// DeleteDimensionTypeMapping 删除维度类型映射（向后兼容）
 func DeleteDimensionTypeMapping(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	if err := postgres.Get().Delete(&model.DimensionTypeMapping{}, id).Error; err != nil {

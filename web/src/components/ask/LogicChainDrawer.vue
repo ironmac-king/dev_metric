@@ -29,7 +29,7 @@
         <!-- Steps List -->
         <div class="steps-list" :key="stepsVersion">
           <div
-            v-for="(step, index) in steps"
+            v-for="(step, index) in enrichedSteps"
             :key="index"
             class="step-item"
             :class="[step.status, { active: currentStepIndex === index && step.status === 'pending' }]"
@@ -55,8 +55,78 @@
             <div class="step-content">
               <div class="step-header">
                 <span class="step-name">{{ getStepName(step.step) }}</span>
+                <!-- intent_router: 显示来源标签 (本地模型/LLM/托底) -->
+                <span v-if="step.step === 'intent_router' && step.source" class="source-badge" :class="'source-' + step.source">
+                  {{ sourceLabelMap[step.source] || step.source }}
+                </span>
               </div>
-              <div class="step-description" v-if="step.content">{{ step.content }}</div>
+              <!-- intent_router 步骤的实体标签（调试用，虚线样式） -->
+              <div v-if="step.step === 'intent_router' && step.entities && step.entities.length > 0" class="entity-tags entity-tags-debug">
+                <span
+                  v-for="entity in step.entities"
+                  :key="entity.text"
+                  class="entity-tag"
+                  :class="'entity-' + (entity.type || 'entity').toLowerCase()"
+                >
+                  <span class="entity-type">{{ entityTypeNameMap[entity.type] || entity.type }}</span>
+                  <span class="entity-text">{{ entity.text }}</span>
+                </span>
+              </div>
+              <!-- 实体标签展示（非 intent_router 步骤） -->
+              <div v-if="step.step !== 'intent_router' && step.entities && step.entities.length > 0" class="entity-tags">
+                <span
+                  v-for="entity in step.entities"
+                  :key="entity.text"
+                  class="entity-tag"
+                  :class="'entity-' + (entity.type || 'entity').toLowerCase()"
+                >
+                  <span class="entity-type">{{ entityTypeNameMap[entity.type] || entity.type }}</span>
+                  <span class="entity-text">{{ entity.text }}</span>
+                </span>
+              </div>
+              <!-- MQL 关键信息展示 -->
+              <div v-if="step.step === 'mql_generator' && step.mqlInfo" class="mql-info">
+                <div v-if="step.mqlInfo.metric" class="mql-item">
+                  <span class="mql-label">指标</span>
+                  <span class="mql-value">{{ step.mqlInfo.metric }}</span>
+                </div>
+                <div v-if="step.mqlInfo.time" class="mql-item">
+                  <span class="mql-label">时间</span>
+                  <span class="mql-value">{{ step.mqlInfo.time }}</span>
+                </div>
+                <div v-if="step.mqlInfo.filters && step.mqlInfo.filters.length > 0" class="mql-item">
+                  <span class="mql-label">过滤</span>
+                  <span class="mql-value">{{ step.mqlInfo.filters.join(', ') }}</span>
+                </div>
+                <div v-if="step.mqlInfo.dimensions && step.mqlInfo.dimensions.length > 0" class="mql-item">
+                  <span class="mql-label">维度</span>
+                  <span class="mql-value">{{ step.mqlInfo.dimensions.join(', ') }}</span>
+                </div>
+                <div v-if="step.mqlInfo.patterns && step.mqlInfo.patterns.length > 0" class="mql-item">
+                  <span class="mql-label">模式</span>
+                  <span class="mql-value">{{ step.mqlInfo.patterns.join(', ') }}</span>
+                </div>
+              </div>
+              <!-- MQL JSON 展示 (mql_semantic_validator 步骤) -->
+              <div v-if="step.step === 'mql_semantic_validator' && step.mql" class="mql-json-block">
+                <div class="mql-json-header" @click="toggleMqlJson(step.step)">
+                  <span class="mql-json-toggle-icon">{{ expandedMqlSteps.has(step.step) ? '▼' : '▶' }}</span>
+                  <span class="mql-json-label">MQL JSON</span>
+                </div>
+                <pre v-if="expandedMqlSteps.has(step.step)" class="mql-json-content">{{ formatMqlJson(step.mql) }}</pre>
+              </div>
+              <!-- SQL WHERE 条件展示 (sql_generator) -->
+              <div v-if="step.step === 'sql_generator' && step.sqlWhere" class="sql-where">
+                <span class="sql-where-label">WHERE</span>
+                <span class="sql-where-text">{{ step.sqlWhere }}</span>
+              </div>
+              <!-- 错误详情 (sql_executor 等失败状态) -->
+              <div v-if="(step.status === 'failed' || step.status === 'error') && step.errorDetail" class="error-detail">
+                <span class="error-icon">⚠️</span>
+                <span class="error-text">{{ step.errorDetail }}</span>
+              </div>
+              <!-- 默认 content 描述 -->
+              <div class="step-description" v-if="step.content && !step.errorDetail">{{ step.content }}</div>
               <div class="step-meta">
                 <span v-if="step.llm_used" class="llm-badge">
                   <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
@@ -134,9 +204,54 @@ const currentStepIndex = computed(() => {
 // SQL 展开状态
 const sqlExpanded = ref(false)
 
+// MQL JSON 展开状态
+const expandedMqlSteps = ref(new Set())
+
 // 切换 SQL 显示
 function toggleSql() {
   sqlExpanded.value = !sqlExpanded.value
+}
+
+// 切换 MQL JSON 展开/收起
+function toggleMqlJson(stepName) {
+  if (expandedMqlSteps.value.has(stepName)) {
+    expandedMqlSteps.value.delete(stepName)
+  } else {
+    expandedMqlSteps.value.add(stepName)
+  }
+  // 触发响应式更新
+  expandedMqlSteps.value = new Set(expandedMqlSteps.value)
+}
+
+// 格式化 MQL JSON 用于展示（精简关键字段）
+function formatMqlJson(mql) {
+  if (!mql) return ''
+  try {
+    const精简 = {
+      intent: mql.intent,
+      metric: mql.metric ? {
+        code: mql.metric.code,
+        name: mql.metric.name,
+        field: mql.metric.field,
+        aggregation: mql.metric.aggregation,
+        starrocks_sql: mql.metric.starrocks_sql ? '(已配置)' : null
+      } : null,
+      time: mql.time,
+      dimensions: mql.dimensions,
+      filters: mql.filters,
+      comparison: mql.comparison,
+      calculation_patterns: mql.calculation_patterns,
+      order_by: mql.order_by,
+      pagination: mql.pagination,
+    }
+    // 移除 null 值
+    Object.keys(精简).forEach(k => {
+      if (精简[k] === null || 精简[k] === undefined) delete 精简[k]
+    })
+    return JSON.stringify(精简, null, 2)
+  } catch (e) {
+    return JSON.stringify(mql, null, 2)
+  }
 }
 
 // 复制 SQL
@@ -192,6 +307,117 @@ const stepNameMap = {
 
 function getStepName(stepName) {
   return stepNameMap[stepName] || stepName
+}
+
+// 来源标签映射 (intent_router 步骤显示)
+const sourceLabelMap = {
+  'local_model': '本地模型',
+  'llm': 'LLM',
+  'fallback': '托底',
+  'followup': '追问',
+}
+
+// 实体类型中文映射
+const entityTypeNameMap = {
+  'METRIC': '指标',
+  'TIME': '时间',
+  'FILTER': '过滤',
+  'DIMENSION': '维度',
+  'OPERATOR': '操作',
+  'COMPARISON': '对比',
+  'ENTITY': '实体',
+  'VALUE': '值',
+}
+
+// 实体类型颜色
+const entityTypeColorMap = {
+  'METRIC': '#6366F1',
+  'TIME': '#059669',
+  'FILTER': '#D97706',
+  'DIMENSION': '#7C3AED',
+  'OPERATOR': '#0891B2',
+  'COMPARISON': '#DC2626',
+  'ENTITY': '#6B7280',
+  'VALUE': '#374151',
+}
+
+// 计算 enrichedSteps - 为每个 step 添加额外展示信息
+const enrichedSteps = computed(() => {
+  return props.steps.map(step => {
+    const enriched = { ...step }
+
+    // intent_router: 提取实体信息（已经在 entities 里，前端直接用）
+    // mql_generator: 尝试从 content 解析 MQL 信息
+    if (step.step === 'mql_generator' && step.content) {
+      const mqlInfo = parseMqlInfo(step)
+      enriched.mqlInfo = mqlInfo
+    }
+
+    // sql_generator: 提取 WHERE 条件
+    if (step.step === 'sql_generator' && step.content) {
+      const sqlMatch = step.content.match(/SQL 生成成功[:：]?\s*(.+)/i)
+      if (sqlMatch) {
+        const sql = sqlMatch[1].trim()
+        // 提取 WHERE 之后的部分
+        const whereIdx = sql.toUpperCase().indexOf('WHERE')
+        if (whereIdx !== -1) {
+          enriched.sqlWhere = sql.substring(whereIdx + 5).trim()
+        } else {
+          enriched.sqlWhere = sql
+        }
+      }
+    }
+
+    // 失败步骤: 提取错误详情
+    if ((step.status === 'failed' || step.status === 'error') && step.content) {
+      enriched.errorDetail = step.content
+    }
+
+    return enriched
+  })
+})
+
+// 解析 MQL 信息
+function parseMqlInfo(step) {
+  const info = {}
+  const content = step.content || ''
+  const entities = step.entities || []
+
+  // 从 entities 提取指标
+  const metricEntity = entities.find(e => e.type === 'METRIC')
+  if (metricEntity) {
+    info.metric = metricEntity.text
+  }
+
+  // 从 entities 提取时间
+  const timeEntity = entities.find(e => e.type === 'TIME')
+  if (timeEntity) {
+    info.time = timeEntity.text
+  }
+
+  // 从 entities 提取过滤
+  const filterEntities = entities.filter(e => e.type === 'FILTER')
+  if (filterEntities.length > 0) {
+    info.filters = filterEntities.map(e => e.text)
+  }
+
+  // 从 entities 提取维度
+  const dimEntities = entities.filter(e => e.type === 'DIMENSION')
+  if (dimEntities.length > 0) {
+    info.dimensions = dimEntities.map(e => e.text)
+  }
+
+  // 从 content 解析模式（环比、同比等）
+  if (content.includes('环比') || content.includes('mom') || content.includes('MoM')) {
+    info.patterns = info.patterns || []
+    info.patterns.push('环比(MoM)')
+  }
+  if (content.includes('同比') || content.includes('yoy') || content.includes('YoY')) {
+    info.patterns = info.patterns || []
+    info.patterns.push('同比(YoY)')
+  }
+
+  return info
 }
 
 // SQL Syntax Highlighting
@@ -423,11 +649,236 @@ function highlightSql(sql) {
   color: #EF4444;
 }
 
+/* 来源标签 (本地模型/LLM) */
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.source-local_model {
+  background: rgba(5, 150, 105, 0.1);
+  color: #059669;
+}
+
+.source-llm {
+  background: rgba(99, 102, 241, 0.1);
+  color: #6366F1;
+}
+
+.source-fallback {
+  background: rgba(245, 158, 11, 0.1);
+  color: #D97706;
+}
+
+.source-followup {
+  background: rgba(124, 58, 237, 0.1);
+  color: #7C3AED;
+}
+
 .step-description {
   font-size: 11px;
   color: #6b7280;
   margin-top: 4px;
   line-height: 1.5;
+  word-break: break-all;
+}
+
+/* 实体标签 */
+.entity-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.entity-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.entity-tag .entity-type {
+  opacity: 0.7;
+  font-size: 9px;
+}
+
+.entity-tag .entity-text {
+  font-weight: 600;
+}
+
+.entity-metric {
+  background: rgba(99, 102, 241, 0.1);
+  color: #6366F1;
+}
+
+.entity-time {
+  background: rgba(5, 150, 105, 0.1);
+  color: #059669;
+}
+
+.entity-filter {
+  background: rgba(217, 119, 6, 0.1);
+  color: #D97706;
+}
+
+.entity-dimension {
+  background: rgba(124, 58, 237, 0.1);
+  color: #7C3AED;
+}
+
+.entity-operator {
+  background: rgba(8, 145, 178, 0.1);
+  color: #0891B2;
+}
+
+.entity-comparison {
+  background: rgba(220, 38, 38, 0.1);
+  color: #DC2626;
+}
+
+/* intent_router 步骤的实体标签（调试用，虚线边框） */
+.entity-tags-debug {
+  border: 1px dashed rgba(99, 102, 241, 0.3);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-top: 4px;
+  background: rgba(99, 102, 241, 0.02);
+}
+
+/* MQL 信息展示 */
+.mql-info {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(99, 102, 241, 0.04);
+  border-radius: 6px;
+  border: 1px solid rgba(99, 102, 241, 0.08);
+}
+
+.mql-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.mql-item + .mql-item {
+  margin-top: 4px;
+}
+
+.mql-label {
+  color: #6b7280;
+  flex-shrink: 0;
+  min-width: 28px;
+}
+
+.mql-value {
+  color: #374151;
+  font-weight: 500;
+  word-break: break-all;
+}
+
+/* SQL WHERE 条件 */
+.sql-where {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: #F8FAFC;
+  border-radius: 6px;
+  font-size: 11px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.sql-where-label {
+  color: #6366F1;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.sql-where-text {
+  color: #374151;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* 错误详情 */
+.error-detail {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(239, 68, 68, 0.06);
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  font-size: 11px;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.error-icon {
+  flex-shrink: 0;
+}
+
+.error-text {
+  color: #DC2626;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+/* MQL JSON 块 */
+.mql-json-block {
+  margin-top: 8px;
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mql-json-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(99, 102, 241, 0.06);
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 500;
+  color: #6366F1;
+}
+
+.mql-json-header:hover {
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.mql-json-toggle-icon {
+  font-size: 9px;
+  color: #6366F1;
+}
+
+.mql-json-label {
+  color: #6366F1;
+}
+
+.mql-json-content {
+  margin: 0;
+  padding: 10px;
+  background: #F8FAFC;
+  font-size: 10px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  color: #374151;
+  line-height: 1.6;
+  overflow-x: auto;
+  max-height: 300px;
+  white-space: pre-wrap;
   word-break: break-all;
 }
 

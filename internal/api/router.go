@@ -240,23 +240,23 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			query.POST("/execute", handler.ExecuteQuery)
 		}
 
-		// 维度配置
+		// 维度配置（改造为从 dim_value_mapping 聚合，不再操作 dimension_configs 表）
 		dimension := v1.Group("/dimension-configs")
 		{
-			dimension.GET("", handler.ListDimensionConfigs)
+			dimension.GET("", handler.ListDimensionConfigs) // 从 dim_value_mapping 聚合
 			dimension.GET("/tables", handler.GetDimensionTables)
-			dimension.POST("", handler.CreateDimensionConfig)
+			dimension.POST("", handler.CreateDimensionConfig) // 仍写 dimension_configs（向后兼容）
 			dimension.PUT("/:id", handler.UpdateDimensionConfig)
 			dimension.DELETE("/:id", handler.DeleteDimensionConfig)
 			dimension.DELETE("/tables/:table_name", handler.DeleteDimensionTable)
 		}
 
-		// 维度类型映射（全局）
+		// 维度类型映射（改造为从 dim_value_mapping 聚合，不再操作 dimension_type_mappings 表）
 		dimensionType := v1.Group("/dimension-type-mappings")
 		{
-			dimensionType.GET("", handler.ListDimensionTypeMappings)
+			dimensionType.GET("", handler.ListDimensionTypeMappings) // 从 dim_value_mapping 聚合
 			dimensionType.GET("/search", handler.GetDimensionTypeMappingsByType)
-			dimensionType.POST("", handler.CreateDimensionTypeMapping)
+			dimensionType.POST("", handler.CreateDimensionTypeMapping) // 仍写 dimension_type_mappings（向后兼容）
 			dimensionType.PUT("/:id", handler.UpdateDimensionTypeMapping)
 			dimensionType.DELETE("/:id", handler.DeleteDimensionTypeMapping)
 		}
@@ -279,8 +279,18 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// 维度值搜索（供 AI 服务调用）
 		dimensionValues := v1.Group("/dimension-values")
 		{
-			dimensionValues.GET("/search", handler.SearchDimensionValues)
-			dimensionValues.POST("/frequency", handler.IncrementFrequency)
+			dimensionValues.GET("/search", handler.SearchDimensionValues) // 兼容旧版，查 PostgreSQL
+			dimensionValues.GET("/search-new", handler.SearchDimensionValuesNew)
+			dimensionValues.POST("/frequency", handler.IncrementFrequency) // 兼容旧版
+			dimensionValues.POST("/frequency/id/:id", handler.IncrementFrequencyByID)
+			dimensionValues.POST("/sync", handler.SyncDimensionValues)        // 从 StarRocks 同步（按列名）
+		dimensionValues.POST("/sync/sql", handler.SyncDimensionValuesBySQL) // 从 StarRocks 同步（自定义 SQL）
+			dimensionValues.GET("", handler.ListDimensionValueMappings)
+			dimensionValues.GET("/columns", handler.GetDimensionColumns)
+			dimensionValues.GET("/:id", handler.GetDimensionValueMapping)
+			dimensionValues.PUT("/:id", handler.UpdateDimensionValueMapping)
+			dimensionValues.DELETE("/:id", handler.DeleteDimensionValueMapping)
+			dimensionValues.DELETE("/batch", handler.BatchDeleteDimensionValues)
 		}
 
 		// 认证
