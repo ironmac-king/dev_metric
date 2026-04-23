@@ -650,8 +650,7 @@ class IntentRouter:
         # 指标实体（必须）
         metric_entities = [e for e in entities if e['type'] == 'METRIC']
         if metric_entities:
-            # 简单场景：取第一个 METRIC 实体作为主指标
-            # 复杂场景（如多指标）交给后续 LLM 节点处理
+            # 主指标：取第一个 METRIC 实体
             metric_text = metric_entities[0]['text']
             mql.metric = MQLMetric(
                 code="",  # 本地模型不返回 code，让后续节点通过 metric_client 查询
@@ -660,7 +659,20 @@ class IntentRouter:
                 field="",
                 unit="",
             )
-            logger.info(f"[IntentRouter] 本地模型提取指标: {metric_text}")
+            logger.info(f"[IntentRouter] 本地模型提取主指标: {metric_text}")
+
+            # 多指标：其余 METRIC 实体加入 metrics 列表
+            if len(metric_entities) > 1:
+                for extra_metric in metric_entities[1:]:
+                    extra_name = extra_metric['text']
+                    mql.metrics.append(MQLMetric(
+                        code="",
+                        name=extra_name,
+                        table="",
+                        field="",
+                        unit="",
+                    ))
+                logger.info(f"[IntentRouter] 本地模型提取多指标: {[m.name for m in mql.metrics]}")
 
         # 时间实体
         time_entities = [e for e in entities if e['type'] == 'TIME']

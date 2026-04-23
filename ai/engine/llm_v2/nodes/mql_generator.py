@@ -81,39 +81,46 @@ class MQLGenerator:
             else:
                 # 追问场景跳过缓存
                 cached = None
+            cache_valid = False
             if cached:
                 cached_mql_dict = cached.get("mql")
                 if cached_mql_dict:
                     try:
                         cached_mql = MQLSchema.from_dict(cached_mql_dict)
 
-                        # ========== 修复：检查维度兼容性 ==========
-                        # 动态获取维度关键词（从数据库加载）
-                        dim_keywords = self._get_dimension_keywords_list()
-                        current_has_dim = any(kw in question for kw in dim_keywords)
-                        cached_has_dim = cached_mql.dimensions and len(cached_mql.dimensions) > 0
-
-                        # 如果缓存有维度但当前问题没有维度，清除维度继承
-                        if cached_has_dim and not current_has_dim:
-                            logger.warning("[MQLGenerator] 缓存MQL有维度但当前问题无维度，清除维度继承")
-                            cached_mql.dimensions = []
+                        # ========== 检查指标数量兼容性 ==========
+                        # 估计当前问题需要的指标数量
+                        metric_separators = ['，', '、', '和', '以及', '还有']
+                        estimated_metric_count = 1 + sum(question.count(sep) for sep in metric_separators)
+                        # 计算缓存 MQL 的指标数量
+                        cached_metric_count = 0
+                        if getattr(cached_mql, 'metric', None) and getattr(cached_mql.metric, 'name', None):
+                            cached_metric_count = 1
+                        cached_metrics = getattr(cached_mql, 'metrics', None) or []
+                        cached_metric_count += len(cached_metrics)
+                        # 如果缓存指标数量不足，跳过缓存
+                        if cached_metric_count < estimated_metric_count:
+                            logger.warning(f"[MQLGenerator] 缓存MQL指标数({cached_metric_count}) < 当前问题指标数({estimated_metric_count})，跳过缓存")
+                        else:
+                            cache_valid = True
                         # ===========================================
-
-                        logger.info(f"[MQLGenerator] 历史缓存命中，跳过 LLM 调用: {question[:30]}...")
-                        # 继承上下文
-                        if inherited_mql:
-                            cached_mql.session_id = inherited_mql.session_id
-                            cached_mql.parent_state_id = inherited_mql.session_id
-                            # 继承 starrocks_sql（缓存的 MQL 没有经过 validator，starrocks_sql 为空）
-                            if inherited_mql.metric and inherited_mql.metric.starrocks_sql:
-                                cached_mql.metric.starrocks_sql = inherited_mql.metric.starrocks_sql
-                            if inherited_mql.metric and inherited_mql.metric.table:
-                                cached_mql.metric.table = inherited_mql.metric.table
-                        # 即使命中缓存也要尝试校正指标名中的维度值（如"智能云存储销售额"→"销售额"）
-                        self._correct_dimension_value_in_metric_name(cached_mql)
-                        return cached_mql
                     except Exception as e:
-                        logger.warning(f"[MQLGenerator] 缓存 MQL 解析失败: {e}，继续 LLM 生成")
+                        logger.warning(f"[MQLGenerator] 缓存 MQL 解析失败: {e}")
+
+            if cache_valid:
+                logger.info(f"[MQLGenerator] 历史缓存命中，跳过 LLM 调用: {question[:30]}...")
+                # 继承上下文
+                if inherited_mql:
+                    cached_mql.session_id = inherited_mql.session_id
+                    cached_mql.parent_state_id = inherited_mql.session_id
+                    # 继承 starrocks_sql（缓存的 MQL 没有经过 validator，starrocks_sql 为空）
+                    if inherited_mql.metric and inherited_mql.metric.starrocks_sql:
+                        cached_mql.metric.starrocks_sql = inherited_mql.metric.starrocks_sql
+                    if inherited_mql.metric and inherited_mql.metric.table:
+                        cached_mql.metric.table = inherited_mql.metric.table
+                # 即使命中缓存也要尝试校正指标名中的维度值（如"智能云存储销售额"→"销售额"）
+                self._correct_dimension_value_in_metric_name(cached_mql)
+                return cached_mql
 
             # 1. 构建 prompt
             prompt = self._build_prompt(question, rag_context, inherited_mql)
@@ -748,6 +755,9 @@ class MQLGenerator:
     "table": "留空，不填！由后续系统根据 name 自动查找",
     "field": "留空，不填！由后续系统根据 name 自动查找"
   }},
+  "metrics": [
+    {{"code": "留空", "name": "第二个指标名称，如 销量、订单量", "table": "留空", "field": "留空"}}
+  ],
   "time": {{
     "type": "date_range|relative|absolute_month",
     "start": "开始日期(YYYY-MM-DD)",
@@ -795,6 +805,12 @@ class MQLGenerator:
 - mean: 均值
 - multiplier: 倍数
 - delta: 增量
+
+【多指标查询（metrics）】
+当用户询问多个指标时，如"销售额和销量"、"销售额、毛利率"：
+1. 主指标放在 "metric" 字段
+2. 其余指标放在 "metrics" 数组中
+3. 每个指标只需提供 name（code/table/field 由后续系统自动查找）
 
 【占比计算（percentage）填写说明】
 当用户询问"XX占YY的比重/比例/占比"时：

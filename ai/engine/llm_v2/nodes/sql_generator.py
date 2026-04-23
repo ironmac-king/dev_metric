@@ -799,6 +799,12 @@ WHERE ( {current_cond} )
                 if col:
                     select_parts.append(col)
 
+        # 如果有时间过滤且是月粒度查询，确保 MONTHS 加入 SELECT（让时间在结果中可见）
+        # 使用 MONTH(FDATE) 格式化月份，如 "2月"
+        if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
+            if self.COL_MONTHS not in select_parts:
+                select_parts.append(f"MONTH(FDATE) AS MONTHS")
+
         # 检查占比模式（percentage）：生成 分子 * 100.0 / 分母 SQL
         has_percentage = any(
             (p.value if isinstance(p, Enum) else p) == CalculationPattern.PERCENTAGE.value
@@ -1032,10 +1038,9 @@ WHERE ( {current_cond} )
 
     def _build_group_by(self, mql: MQLSchema) -> str:
         """构建 GROUP BY 子句"""
-        if not mql.dimensions:
-            return ""
-
         group_by_parts = []
+
+        # 添加维度列
         for dim in mql.dimensions:
             # 优先使用 column，如果为空则从类型映射获取
             if dim.column:
@@ -1044,6 +1049,11 @@ WHERE ( {current_cond} )
                 col = self._get_dimension_column(dim.type)
                 if col:
                     group_by_parts.append(col)
+
+        # 如果有时间过滤且是月粒度查询，确保 MONTH(FDATE) 加入 GROUP BY
+        if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
+            if self.COL_MONTHS not in group_by_parts:
+                group_by_parts.append("MONTH(FDATE)")
 
         if group_by_parts:
             return "GROUP BY " + ", ".join(group_by_parts)

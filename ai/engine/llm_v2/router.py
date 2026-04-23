@@ -321,6 +321,7 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "result_data": step_state["result_data"],
                         "total": step_state.get("total", 0),
                         "metric_name": step_state.get("metric_name", ""),
+                        "metric_names": step_state.get("metric_names", []),
                     }).to_sse()
 
                 # 发送回答（一旦就绪）
@@ -399,7 +400,8 @@ async def _stream_graph(graph, state: V2State):
 
                 # 获取 metric_name
                 metric_name = _get_metric_name(state_update.mql) if hasattr(state_update, 'mql') and state_update.mql else ''
-                logger.info(f"[_stream_graph] result_ready metric_name={metric_name}")
+                metric_names = _get_metric_names(state_update.mql) if hasattr(state_update, 'mql') and state_update.mql else []
+                logger.info(f"[_stream_graph] result_ready metric_name={metric_name}, metric_names={metric_names}")
 
                 # 获取 MQL JSON（用于前端展示）
                 mql_json = None
@@ -427,6 +429,8 @@ async def _stream_graph(graph, state: V2State):
                     "original_question": original_question,
                     # 传递指标名供前端 tooltip 使用（占比查询时从 molecule_metric 获取）
                     "metric_name": metric_name,
+                    # 传递多指标名称数组（供表格表头使用）
+                    "metric_names": metric_names,
                     # 传递 MQL JSON（供 mql_semantic_validator 步骤展示）
                     "mql": mql_json,
                 }
@@ -463,6 +467,30 @@ def _get_metric_name(mql) -> str:
             return f"{mol_name}占比"
 
     return ''
+
+
+def _get_metric_names(mql) -> list:
+    """获取所有指标名称（支持多指标）"""
+    if not mql:
+        return []
+
+    names = []
+    # 优先从 mql.metric 获取（单个指标）
+    metric = getattr(mql, 'metric', None)
+    if metric:
+        name = getattr(metric, 'name', '') or ''
+        if name:
+            names.append(name)
+
+    # 多指标：从 mql.metrics 数组获取
+    metrics = getattr(mql, 'metrics', None)
+    if metrics:
+        for m in metrics:
+            name = getattr(m, 'name', '') or ''
+            if name and name not in names:
+                names.append(name)
+
+    return names
 
 
 def _get_step_thinking(state: V2State) -> str:

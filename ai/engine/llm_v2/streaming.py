@@ -125,11 +125,13 @@ class StreamingGenerator:
             "sql": sql,
         })
 
-    def add_result_ready(self, result_data: List[Dict[str, Any]], total: int = 0) -> None:
+    def add_result_ready(self, result_data: List[Dict[str, Any]], total: int = 0, metric_name: str = '', metric_names: list = None) -> None:
         """添加结果就绪事件"""
         self.add_event(SSSEvent.RESULT_READY, {
             "result_data": result_data[:20] if result_data else [],  # 限制返回条数
             "total": total,
+            "metric_name": metric_name,
+            "metric_names": metric_names or [],
         })
 
     def add_answer_ready(self, answer: str, suggestions: List[str] = None) -> None:

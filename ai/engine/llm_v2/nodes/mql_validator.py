@@ -129,6 +129,9 @@ class MQLSemanticValidator:
                 is_valid, error = await self._validate_metric(metric)
                 if not is_valid:
                     logger.warning(f"[MQLValidator] 多指标[{i}] '{metric.name}' 验证失败: {error}")
+            # 无论是否调用API，都打印starrocks_sql状态
+            sql_preview = metric.starrocks_sql[:80] if metric.starrocks_sql else 'EMPTY'
+            logger.info(f"[MQLValidator] 多指标[{i}] '{metric.name}' starrocks_sql={sql_preview}")
 
         if mql.molecule_metric and needs_molecule_api:
             is_valid, error = await self._validate_metric(mql.molecule_metric)

@@ -210,6 +210,7 @@
                       :interpretation="msg.interpretation"
                       :truncation-length="12"
                       :metric-name="msg.metricName || ''"
+                      :metric-names="msg.metricNames || []"
                       class="message-chart"
                     />
 
@@ -536,6 +537,7 @@ async function handleSend() {
   let finalSql = ''
   let finalResultData = []
   let finalMetricName = ''
+  let finalMetricNames = []
   let finalSuggest = []
   let finalClarificationOptions = []
   let finalClarificationMessage = ''
@@ -641,6 +643,7 @@ async function handleSend() {
             } else if (currentEvent === 'result_ready') {
               finalResultData = data.result_data || []
               finalMetricName = data.metric_name || ''
+              finalMetricNames = data.metric_names || []
             } else if (currentEvent === 'answer_ready') {
               finalAnswer = data.answer
               finalSuggest = data.suggestions || []
@@ -717,6 +720,7 @@ async function handleSend() {
       thinkingSteps: finalSteps,
       resultData: finalResultData,
       metricName: finalMetricName,
+      metricNames: finalMetricNames,
       suggest: finalSuggest,
       needsClarification: finalNeedsClarification || effectiveClarificationOptions.length > 0,
       clarificationOptions: effectiveClarificationOptions,

@@ -65,6 +65,22 @@
       </div>
     </div>
 
+    <!-- 多指标表格模式 -->
+    <div v-else-if="chartType === 'table' && props.data && props.data.length > 0" class="metric-table">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th v-for="(header, idx) in tableHeaders" :key="tableKeys[idx]">{{ header }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(row, idx) in props.data" :key="idx">
+            <td v-for="key in tableKeys" :key="key">{{ formatTableCell(key, row[key]) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <div v-else ref="chartContainer" class="chart-container" :style="{ height: height + 'px', width: '100%' }"></div>
 
     <!-- 数据解读 -->
@@ -145,6 +161,10 @@ const props = defineProps({
   metricName: {
     type: String,
     default: ''
+  },
+  metricNames: {
+    type: Array,
+    default: () => []
   }
 })
 
@@ -156,6 +176,70 @@ const showInterpretation = ref(false)
 
 let chartInstance = null
 let fullscreenChartInstance = null
+
+// 多指标表格的列 keys
+const tableKeys = computed(() => {
+  if (!props.data || props.data.length === 0) return []
+  return Object.keys(props.data[0])
+})
+
+// 判断是否是数值列（排除时间维度列 MONTHS/FDATE）
+function isNumericColumn(key, val) {
+  if (key === 'MONTHS' || key === 'FDATE') return false
+  if (val === null || val === '') return false
+  return typeof val === 'number' || !isNaN(parseFloat(val))
+}
+
+// 多指标表格的列 header（中文名）
+const tableHeaders = computed(() => {
+  if (!props.data || props.data.length === 0) return []
+  const keys = Object.keys(props.data[0])
+  // 过滤出数值列（metric 对应的列，排除 MONTHS/FDATE）
+  const numericKeys = keys.filter(k => isNumericColumn(k, props.data[0][k]))
+  console.log('[DEBUG tableHeaders] metricNames:', props.metricNames, 'keys:', keys, 'numericKeys:', numericKeys, 'firstRow:', props.data[0])
+  // 维度列（GROUP_X, MONTHS, FDATE）→ 使用中文维度类型名
+  const dimensionHeaders = keys
+    .filter(k => !numericKeys.includes(k))
+    .map(k => {
+      // GROUP_X → 二级品类
+      if (k === 'GROUP_2') return '二级品类'
+      if (k === 'GROUP_1') return '一级品类'
+      if (k === 'GROUP_3') return '三级品类'
+      if (k === 'GROUP_4') return '四级品类'
+      if (k === 'FDATE') return '日期'
+      if (k === 'MONTHS') return '月份'
+      return k
+    })
+  // 指标列 → 使用 metricNames
+  const metricHeaders = props.metricNames && props.metricNames.length > 0
+    ? props.metricNames.slice(0, numericKeys.length)
+    : numericKeys
+  return [...dimensionHeaders, ...metricHeaders]
+})
+
+// 格式化表格单元格
+function formatTableCell(key, val) {
+  if (val === null || val === undefined) return '-'
+  // 月份列：数字或字符串数字加"月"后缀
+  if (key === 'MONTHS') {
+    const num = typeof val === 'number' ? val : parseFloat(val)
+    if (!isNaN(num)) return num + '月'
+    return val + '月'
+  }
+  if (typeof val === 'number') {
+    const formatted = formatChartValue(val)
+    console.log('[DEBUG formatTableCell] raw:', val, 'formatted:', formatted)
+    return formatted
+  }
+  // 尝试解析字符串数字
+  const parsed = parseFloat(String(val).replace(/,/g, ''))
+  if (!isNaN(parsed)) {
+    const formatted = formatChartValue(parsed)
+    console.log('[DEBUG formatTableCell] string raw:', val, 'parsed:', parsed, 'formatted:', formatted)
+    return formatted
+  }
+  return val
+}
 
 // Determine chart type based on data structure
 const chartType = computed(() => {
@@ -181,9 +265,13 @@ const chartType = computed(() => {
       const isNum = typeof val === 'number' || !isNaN(parseFloat(val))
       return isNum
     })
-    // 如果只有一个数值字段，显示为数字卡片
-    if (numericKeys.length >= 1) {
+    console.log('[DEBUG chartType] single row, numericKeys length:', numericKeys.length)
+    // 如果只有一个数值字段，显示为数字卡片；多个数值字段显示为表格
+    if (numericKeys.length === 1) {
       return 'card'
+    } else if (numericKeys.length > 1) {
+      console.log('[DEBUG chartType] returning table because numericKeys length > 1')
+      return 'table'
     }
   }
 
@@ -220,7 +308,7 @@ const chartType = computed(() => {
     }
     return isTimeSeries ? 'line' : 'bar'
   } else if (numericKeys.length > 1) {
-    return 'bar'
+    return 'table'  // 多指标用表格展示
   }
 
   return 'table'
@@ -544,8 +632,8 @@ function formatChartValue(val) {
   if (val === null || val === undefined) return '-'
   const num = typeof val === 'number' ? val : parseFloat(String(val).replace(/,/g, ''))
   if (isNaN(num)) return val
-  if (num >= 100000000) return Math.round(num / 100000000) + '亿'
-  if (num >= 10000) return Math.round(num / 10000) + '万'
+  if (num >= 100000000) return (num / 100000000).toFixed(2) + '亿'
+  if (num >= 10000) return (num / 10000).toFixed(2) + '万'
   if (num >= 1000) return num.toLocaleString()
   return num % 1 === 0 ? num : num.toFixed(2)
 }
@@ -900,5 +988,36 @@ onBeforeUnmount(() => {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* 多指标表格 */
+.metric-table {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table th {
+  background: #F9FAFB;
+  color: #374151;
+  font-weight: 600;
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 2px solid #E5E7EB;
+}
+
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #F3F4F6;
+  color: #374151;
+}
+
+.data-table tr:hover td {
+  background: #F9FAFB;
 }
 </style>
