@@ -117,6 +117,19 @@ class MQLSemanticValidator:
             if not is_valid:
                 return False, f"指标验证失败: {error}"
 
+        # 多指标验证：验证 mql.metrics 中的每个指标
+        for i, metric in enumerate(mql.metrics):
+            if not metric or not metric.name:
+                continue
+            # 跳过与主指标相同的项
+            if mql.metric and metric.name == mql.metric.name:
+                continue
+            needs_api = not bool(metric.starrocks_sql)
+            if needs_api:
+                is_valid, error = await self._validate_metric(metric)
+                if not is_valid:
+                    logger.warning(f"[MQLValidator] 多指标[{i}] '{metric.name}' 验证失败: {error}")
+
         if mql.molecule_metric and needs_molecule_api:
             is_valid, error = await self._validate_metric(mql.molecule_metric)
             if not is_valid:
@@ -357,10 +370,15 @@ class MQLSemanticValidator:
         valid_columns = self._get_valid_filter_columns()
         valid_columns_upper = {c.upper() for c in valid_columns}
 
-        # 维度关键词（filter 值必须紧跟这些词后面，才认为用户明确指定了过滤）
-        dimension_keywords = ["渠道", "店铺", "品牌", "平台", "国家", "地区", "区域", "站点", "品类", "类目", "产品", "商品"]
+        # 维度关键词（filter 值必须紧跟这些词后面，才认为用户明确指定了过滤，使用 DimensionService 消除硬编码）
+        try:
+            from ai.services.dimension_service import DimensionService
+            dimension_keywords = DimensionService().get_keywords()
+        except Exception:
+            dimension_keywords = ["渠道", "店铺", "品牌", "平台", "国家", "地区", "区域", "站点", "品类", "类目", "产品", "商品"]
 
         original_count = len(mql.filters)
+        logger.warning(f"[_validate_filters] ENTRY: {len(mql.filters)} filters, question={original_question[:50]}")
         valid_filters = []
         for f in mql.filters:
             if not f.field:
@@ -375,24 +393,28 @@ class MQLSemanticValidator:
             if f.value:
                 value_str = str(f.value).strip()
                 if value_str:
-                    # 检查是否紧跟维度关键词（说明用户明确指定了过滤）
-                    # 例如："自然渠道" → 值"自然"前面有"渠道" → 有效
-                    # 例如："自然订单量" → 值"自然"前面没有维度关键词 → 无效（是指标名的一部分）
-                    is_valid_filter = False
-                    for kw in dimension_keywords:
-                        # 检查 value_str 是否紧跟在 kw 后面（中间无其他字符）
-                        pattern = kw + value_str
-                        if pattern in original_question:
-                            is_valid_filter = True
-                            break
+                    # 如果 filter 是从指标名中校正得到的（source="corrected"），跳过"紧跟维度关键词"检查
+                    # 如果 filter 来自 intent_router 本地模型（source="user"），也跳过检查，因为本地模型已验证过
+                    if f.source not in ("corrected", "user"):
+                        # 检查是否紧跟维度关键词（说明用户明确指定了过滤）
+                        # 例如："自然渠道" → 值"自然"前面有"渠道" → 有效
+                        # 例如："自然订单量" → 值"自然"前面没有维度关键词 → 无效（是指标名的一部分）
+                        is_valid_filter = False
+                        for kw in dimension_keywords:
+                            # 检查 value_str 是否紧跟在 kw 后面（中间无其他字符）
+                            pattern = kw + value_str
+                            if pattern in original_question:
+                                is_valid_filter = True
+                                break
 
-                    if not is_valid_filter:
-                        logger.warning(f"[_validate_filters] filter值不是紧跟维度关键词，可能是指标名的一部分，已丢弃: field={f.field}, value={f.value}, question={original_question}")
-                        continue
+                        if not is_valid_filter:
+                            logger.warning(f"[_validate_filters] filter值不是紧跟维度关键词，可能是指标名的一部分，已丢弃: field={f.field}, value={f.value}, question={original_question}")
+                            continue
 
             valid_filters.append(f)
 
         mql.filters = valid_filters
+        logger.warning(f"[_validate_filters] EXIT: {original_count} -> {len(valid_filters)} filters")
         if len(mql.filters) < original_count:
             logger.info(f"[_validate_filters] 过滤条件清理完成: {original_count} -> {len(mql.filters)}")
 

@@ -12,7 +12,7 @@ from typing import Dict, Any, List, Optional
 from ai.config.logging_config import get_logger
 from ai.engine.prompt_manager import get_prompt_manager
 from ai.engine.llm import get_llm_engine
-from ..schema import MQLSchema, MQLIntent, MQLMetric, MQLDimension, TimeRange, TimeType
+from ..schema import MQLSchema, MQLIntent, MQLMetric, MQLDimension, MQLFilter, TimeRange, TimeType, OperatorType
 from ..cache import get_history_reuse_cache
 
 logger = get_logger("ai.llm_v2.mql_generator")
@@ -78,11 +78,31 @@ class MQLGenerator:
                 if cached_mql_dict:
                     try:
                         cached_mql = MQLSchema.from_dict(cached_mql_dict)
+
+                        # ========== 修复：检查维度兼容性 ==========
+                        # 动态获取维度关键词（从数据库加载）
+                        dim_keywords = self._get_dimension_keywords_list()
+                        current_has_dim = any(kw in question for kw in dim_keywords)
+                        cached_has_dim = cached_mql.dimensions and len(cached_mql.dimensions) > 0
+
+                        # 如果缓存有维度但当前问题没有维度，清除维度继承
+                        if cached_has_dim and not current_has_dim:
+                            logger.warning("[MQLGenerator] 缓存MQL有维度但当前问题无维度，清除维度继承")
+                            cached_mql.dimensions = []
+                        # ===========================================
+
                         logger.info(f"[MQLGenerator] 历史缓存命中，跳过 LLM 调用: {question[:30]}...")
                         # 继承上下文
                         if inherited_mql:
                             cached_mql.session_id = inherited_mql.session_id
                             cached_mql.parent_state_id = inherited_mql.session_id
+                            # 继承 starrocks_sql（缓存的 MQL 没有经过 validator，starrocks_sql 为空）
+                            if inherited_mql.metric and inherited_mql.metric.starrocks_sql:
+                                cached_mql.metric.starrocks_sql = inherited_mql.metric.starrocks_sql
+                            if inherited_mql.metric and inherited_mql.metric.table:
+                                cached_mql.metric.table = inherited_mql.metric.table
+                        # 即使命中缓存也要尝试校正指标名中的维度值（如"智能云存储销售额"→"销售额"）
+                        self._correct_dimension_value_in_metric_name(cached_mql)
                         return cached_mql
                     except Exception as e:
                         logger.warning(f"[MQLGenerator] 缓存 MQL 解析失败: {e}，继续 LLM 生成")
@@ -217,6 +237,9 @@ class MQLGenerator:
             context_parts.append(f"  时间: {inherited_mql.time.original if inherited_mql.time else '无'}")
             dims = [d.type for d in inherited_mql.dimensions] if inherited_mql.dimensions else []
             context_parts.append(f"  维度: {', '.join(dims) if dims else '无'}")
+            # ========== 修复：增加维度清除指令 ==========
+            context_parts.append("  注意: 如果当前问题没有提到任何维度（如'品类'、'渠道'等），请将维度设为空，不要继承上轮维度！")
+            # ===========================================
 
         # 维度值上下文（从 dim_value_mapping 查询）
         dim_values_context = self._get_dimension_values_context()
@@ -257,22 +280,11 @@ class MQLGenerator:
         return template
 
     def _get_dimension_values_context(self) -> str:
-        """从 dim_value_mapping 获取维度值上下文"""
+        """从 dim_value_mapping 获取维度值上下文（使用 DimensionService 消除硬编码）"""
         try:
-            from ai.client.dim_value_client import DimValueClient
-            client = DimValueClient()
-
-            # 查询关键维度字段的值
-            dimension_fields = ["PLATFORM", "FCHANNEL", "FADTYPE", "FSITE"]
-            context_lines = []
-
-            for field in dimension_fields:
-                values = client.search_dimension_values(query="", dimension_field=field, limit=20)
-                if values:
-                    value_list = [v.get("dimension_value", "") for v in values]
-                    context_lines.append(f"  {field}: {', '.join(value_list)}")
-
-            return "\n".join(context_lines) if context_lines else ""
+            from ai.services.dimension_service import DimensionService
+            svc = DimensionService()
+            return svc.get_dimension_values_context()
         except Exception as e:
             logger.warning(f"[_get_dimension_values_context] 获取维度值失败: {e}")
             return ""
@@ -286,13 +298,17 @@ class MQLGenerator:
         if not question or not dim_type:
             return dim_type
 
-        # 检查用户是否提到了具体级别
-        level_keywords = {
-            "一级品类": "GROUP_1",
-            "二级品类": "GROUP_2",
-            "三级品类": "GROUP_3",
-            "四级品类": "GROUP_4",
-        }
+        # 检查用户是否提到了具体级别（使用 DimensionService 消除硬编码）
+        try:
+            from ai.services.dimension_service import DimensionService
+            level_keywords = DimensionService().get_level_keywords()
+        except Exception:
+            level_keywords = {
+                "一级品类": "GROUP_1",
+                "二级品类": "GROUP_2",
+                "三级品类": "GROUP_3",
+                "四级品类": "GROUP_4",
+            }
 
         for keyword, correct_type in level_keywords.items():
             if keyword in question:
@@ -346,6 +362,23 @@ class MQLGenerator:
                 starrocks_sql="",  # 不从 LLM 提取，避免幻觉
             )
 
+        # 多指标支持（如"销售额及销量"）
+        metrics_data = result.get("metrics", [])
+        if metrics_data:
+            for metric_item in metrics_data:
+                metric_name = metric_item.get("name", "")
+                if metric_name and (not mql.metric or mql.metric.name != metric_name):
+                    # 跳过与主指标相同的项，避免重复
+                    mql.metrics.append(MQLMetric(
+                        code="",
+                        name=metric_name,
+                        table="",
+                        field="",
+                        unit=metric_item.get("unit", ""),
+                        starrocks_sql="",
+                    ))
+            logger.info(f"[_parse_mql] 解析到多指标: {[m.name for m in mql.metrics]}")
+
         # 占比分子/分母指标
         from ..schema import AggregationType
         molecule_data = result.get("molecule_metric", {})
@@ -395,33 +428,37 @@ class MQLGenerator:
         if self._dimension_name_to_column:
             dim_type_map.update(self._dimension_name_to_column)
 
-        # 硬编码映射作为回退（处理 dimension_configs 中没有的情况）
-        fallback_map = {
-            "店铺": "SHOP",
-            "站点": "SITE",
-            "平台": "PLATFORM",
-            "渠道": "CHANNEL",
-            "品类": "CATEGORY",
-            "商品": "PRODUCT",
-            "产品": "PRODUCT",
-            "SKU": "SKU",
-            "ASIN": "ASIN",
-            "国家": "COUNTRY",
-            "地区": "REGION",
-            "区域": "REGION",
-            "部门": "DEPARTMENT",
-            "产品线": "PRODUCT_LINE",
-            "广告类型": "AD_TYPE",
-            "广告": "AD_TYPE",
-            "日": "DAY",
-            "月": "MONTH",
-            "年": "YEAR",
-            "周": "WEEK",
-            "一级品类": "GROUP_1",
-            "二级品类": "GROUP_2",
-            "三级品类": "GROUP_3",
-            "四级品类": "GROUP_4",
-        }
+        # 硬编码映射作为回退（处理 dimension_configs 中没有的情况，使用 DimensionService 动态获取）
+        try:
+            from ai.services.dimension_service import DimensionService
+            fallback_map = DimensionService().get_fallback_map()
+        except Exception:
+            fallback_map = {
+                "店铺": "SHOP",
+                "站点": "SITE",
+                "平台": "PLATFORM",
+                "渠道": "CHANNEL",
+                "品类": "CATEGORY",
+                "商品": "PRODUCT",
+                "产品": "PRODUCT",
+                "SKU": "SKU",
+                "ASIN": "ASIN",
+                "国家": "COUNTRY",
+                "地区": "REGION",
+                "区域": "REGION",
+                "部门": "DEPARTMENT",
+                "产品线": "PRODUCT_LINE",
+                "广告类型": "AD_TYPE",
+                "广告": "AD_TYPE",
+                "日": "DAY",
+                "月": "MONTH",
+                "年": "YEAR",
+                "周": "WEEK",
+                "一级品类": "GROUP_1",
+                "二级品类": "GROUP_2",
+                "三级品类": "GROUP_3",
+                "四级品类": "GROUP_4",
+            }
         for k, v in fallback_map.items():
             if k not in dim_type_map:
                 dim_type_map[k] = v
@@ -530,6 +567,11 @@ class MQLGenerator:
         # 指标继承
         if not mql.metric and inherited_mql and inherited_mql.metric:
             mql.metric = inherited_mql.metric
+        # 如果新 MQL 的 metric 存在但 starrocks_sql 为空，从 inherited_mql 继承
+        elif mql.metric and inherited_mql and inherited_mql.metric and inherited_mql.metric.starrocks_sql:
+            if not mql.metric.starrocks_sql:
+                mql.metric.starrocks_sql = inherited_mql.metric.starrocks_sql
+                logger.info(f"[_fill_defaults] 从 inherited_mql 继承 starrocks_sql")
 
         # Top N 继承（用于排名查询的追问回复）
         if inherited_mql and inherited_mql.top_n and inherited_mql.top_n > 0:
@@ -548,6 +590,117 @@ class MQLGenerator:
                 mql.dimensions.append(MQLDimension(type=dim_type))
             else:
                 logger.info(f"[MQLGenerator] 未检测到时序粒度，原始问题: {question}")
+
+        # ========== 后处理：修正指标名中的维度值 ==========
+        # 如果指标名包含"XXX销售额"且XXX是维度值（如"智能云存储"），
+        # 从指标名中剔除XXX，生成对应 filter
+        self._correct_dimension_value_in_metric_name(mql)
+
+    def _correct_dimension_value_in_metric_name(self, mql: MQLSchema):
+        """从问题文本中识别维度值并生成 filter
+
+        策略：解析维度值上下文，建立 (dimension_value → column) 映射。
+        然后在原始问题中搜索这些维度值。
+        如果某维度值紧贴在指标名左侧（如"智能云存储销售额"），
+        则认为它是维度值而非指标名的一部分，剥离并生成 filter。
+        """
+        if not mql or not mql.metric or not mql.metric.name:
+            return
+
+        metric_name = mql.metric.name
+        question = mql.original_question or ""
+
+        # 如果 original_question 为空，说明该 MQL 来自缓存且已被校正过，跳过
+        if not question:
+            logger.warning(f"[_correct_dimension_value_in_metric_name] original_question 为空（来自缓存），跳过校正")
+            return
+
+        # 指标名后缀（用于判断维度值和指标的边界）
+        metric_suffixes = ["销售额", "订单量", "转化率", "用户数", "访问量", "成交量", "点击量", "展示量"]
+
+        # 获取维度值上下文
+        dim_values_context = self._get_dimension_values_context()
+        if not dim_values_context:
+            logger.warning(f"[_correct_dimension_value_in_metric_name] 维度上下文为空，跳过")
+            return
+
+        logger.warning(f"[_correct_dimension_value_in_metric_name] 检查: metric_name='{metric_name}', question='{question}', 上下文长度={len(dim_values_context)}")
+
+        import re
+        # 解析维度值上下文，建立 (dimension_value → column_name) 映射
+        # 格式: "GROUP_1(一级品类): 充电创意, 智能影音..."
+        dim_value_to_column = {}
+        for line in dim_values_context.split("\n"):
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            m = re.match(r"^(\w+)(?:\([^)]+\))?:(.+)$", line)
+            if m:
+                col = m.group(1)
+                values_part = m.group(2)
+                for val in values_part.split(","):
+                    val = val.strip().strip("'\"")
+                    if val and len(val) >= 2:
+                        dim_value_to_column[val] = col
+
+        if not dim_value_to_column:
+            logger.warning(f"[_correct_dimension_value_in_metric_name] 无法解析维度值上下文，跳过")
+            return
+
+        # 从问题中搜索维度值（优先匹配长词）
+        found_dim_values = []  # [(dim_value, column), ...]
+        for dim_val, col in dim_value_to_column.items():
+            if dim_val in question:
+                # 检查是否紧贴在指标名左侧（维度值 + 指标后缀 的模式）
+                for suffix in metric_suffixes:
+                    combined = dim_val + suffix
+                    if combined in question:
+                        found_dim_values.append((dim_val, col))
+                        break
+                    # 也检查 "X的Y销售额" 模式
+                    pattern = rf"{re.escape(dim_val)}的{suffix}"
+                    if re.search(pattern, question):
+                        found_dim_values.append((dim_val, col))
+                        break
+
+        logger.warning(f"[_correct_dimension_value_in_metric_name] 从问题中找到维度值: {found_dim_values}")
+
+        for dim_val, dim_field in found_dim_values:
+            # 如果已有 user filter 的同字段，说明 intent_router 已处理，不再加 corrected filter
+            has_user_filter = any(
+                (hasattr(f, 'field') and f.field == dim_field and hasattr(f, 'source') and f.source == "user")
+                for f in mql.filters
+            )
+            if has_user_filter:
+                logger.info(f"[_correct_dimension_value_in_metric_name] field={dim_field} 已有 user filter，跳过添加 corrected filter")
+                continue
+
+            # 检查是否已经在 filters 或 dimensions 中（field OR value 任一匹配即跳过）
+            already_filtered = any(
+                (hasattr(f, 'field') and f.field == dim_field) or
+                (hasattr(f, 'value') and f.value == dim_val)
+                for f in mql.filters
+            )
+            if already_filtered:
+                continue
+
+            already_dim_value = any(d.value == dim_val for d in mql.dimensions)
+            if already_dim_value:
+                continue
+
+            # 从指标名中剔除维度值，生成 filter
+            new_metric_name = metric_name.replace(dim_val, "").strip()
+            if new_metric_name and new_metric_name != metric_name:
+                logger.warning(f"[_correct_dimension_value_in_metric_name] "
+                             f"从指标名'{metric_name}'中剔除维度值'{dim_val}', "
+                             f"新指标名'{new_metric_name}', 生成 filter {dim_field}='{dim_val}'")
+                mql.metric.name = new_metric_name
+                mql.filters.append(MQLFilter(
+                    field=dim_field,
+                    operator=OperatorType.EQ,
+                    value=dim_val,
+                    source="corrected",
+                ))
 
     def _detect_time_granularity(self, question: str) -> Optional[str]:
         """检测问题中的时序粒度关键词

@@ -163,12 +163,14 @@ class MQLFilter:
     field: str = ""                   # 字段名
     operator: OperatorType = OperatorType.EQ  # 操作符
     value: Any = None                 # 值
+    source: str = ""                  # 来源：user=用户明确指定, corrected=从指标名中校正得到
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "field": self.field,
             "operator": self.operator.value if isinstance(self.operator, Enum) else self.operator,
             "value": self.value,
+            "source": self.source,
         }
 
 
@@ -400,6 +402,10 @@ class MQLSchema:
         for dim_data in data.get("dimensions", []):
             schema.dimensions.append(MQLDimension(**dim_data))
 
+        # Filters
+        for filter_data in data.get("filters", []):
+            schema.filters.append(MQLFilter(**filter_data))
+
         return schema
 
     def is_valid(self) -> tuple:
@@ -426,6 +432,12 @@ class ThinkingStep:
     timestamp: Optional[str] = None    # 时间戳
     llm_used: bool = False            # 是否使用 LLM
     duration_ms: int = 0               # 耗时（毫秒）
+    source: Optional[str] = None       # 来源：local_model / llm / None
+    entities: List[Dict[str, Any]] = field(default_factory=list)  # 抽取的实体列表
+    needs_clarification: bool = False  # 是否需要追问
+    clarification_message: Optional[str] = ""  # 追问消息
+    clarification_options: List[Dict[str, str]] = field(default_factory=list)  # 追问选项
+    original_question: Optional[str] = ""  # 原始问题（用于追问改写）
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -435,6 +447,12 @@ class ThinkingStep:
             "timestamp": self.timestamp,
             "llm_used": self.llm_used,
             "duration_ms": self.duration_ms,
+            "source": self.source,
+            "entities": self.entities,
+            "needs_clarification": self.needs_clarification,
+            "clarification_message": self.clarification_message,
+            "clarification_options": self.clarification_options,
+            "original_question": self.original_question,
         }
 
 
@@ -528,8 +546,17 @@ class V2State:
 
     def add_thinking_step(self, step: str, status: str = "completed",
                           content: str = None, llm_used: bool = False,
-                          duration_ms: int = 0):
+                          duration_ms: int = 0, source: str = None,
+                          entities: List[Dict[str, Any]] = None,
+                          needs_clarification: bool = False,
+                          clarification_message: str = "",
+                          clarification_options: List[Dict[str, Any]] = None,
+                          original_question: str = ""):
         """添加思考步骤"""
+        if entities is None:
+            entities = []
+        if clarification_options is None:
+            clarification_options = []
         self.thinking_steps.append(ThinkingStep(
             step=step,
             status=status,
@@ -537,6 +564,12 @@ class V2State:
             timestamp=datetime.now().isoformat(),
             llm_used=llm_used,
             duration_ms=duration_ms,
+            source=source,
+            entities=entities,
+            needs_clarification=needs_clarification,
+            clarification_message=clarification_message,
+            clarification_options=clarification_options,
+            original_question=original_question,
         ))
 
     def push_history(self, mql_json: str):
@@ -574,8 +607,17 @@ class V2State:
 
 def add_thinking_step(state: V2State, step: str, status: str = "completed",
                        content: str = None, llm_used: bool = False,
-                       duration_ms: int = 0) -> None:
+                       duration_ms: int = 0, source: str = None,
+                       entities: List[Dict[str, Any]] = None,
+                       needs_clarification: bool = False,
+                       clarification_message: str = "",
+                       clarification_options: List[Dict[str, Any]] = None,
+                       original_question: str = "") -> None:
     """添加思考步骤到状态"""
+    if entities is None:
+        entities = []
+    if clarification_options is None:
+        clarification_options = []
     state["thinking_steps"].append(ThinkingStep(
         step=step,
         status=status,
@@ -583,6 +625,12 @@ def add_thinking_step(state: V2State, step: str, status: str = "completed",
         timestamp=datetime.now().isoformat(),
         llm_used=llm_used,
         duration_ms=duration_ms,
+        source=source,
+        entities=entities,
+        needs_clarification=needs_clarification,
+        clarification_message=clarification_message,
+        clarification_options=clarification_options,
+        original_question=original_question,
     ))
 
 

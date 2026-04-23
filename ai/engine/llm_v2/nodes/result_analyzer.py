@@ -145,18 +145,39 @@ class ResultAnalyzer:
             # 单值查询
             row = data[0]
             metric_name = mql.metric.name if mql.metric else "指标值"
-            value = list(row.values())[0] if row else 0
 
-            # 格式化数值
-            formatted_value = self._format_value(value)
+            # 检查是否有多指标（mql.metrics）
+            has_multiple_metrics = mql.metrics and len(mql.metrics) > 0
 
-            return {
-                "answer": f"{metric_name}为 {formatted_value}",
-                "suggestions": [
-                    f"查看{metric_name}趋势变化",
-                    f"对比上月{metric_name}",
-                ],
-            }
+            if has_multiple_metrics and len(row) > 1:
+                # 多指标查询：显示所有指标值
+                parts = []
+                for col_name, value in row.items():
+                    formatted_value = self._format_value(value)
+                    parts.append(f"{col_name}: {formatted_value}")
+                answer = " | ".join(parts)
+                # 收集所有指标名用于建议
+                metric_names = [mql.metric.name] if mql.metric else []
+                metric_names.extend([m.name for m in mql.metrics if m.name])
+                return {
+                    "answer": answer,
+                    "suggestions": [
+                        f"查看{metric_names[0]}趋势变化" if metric_names else "查看趋势变化",
+                        f"对比上月{metric_names[0]}" if metric_names else "对比上月",
+                    ],
+                }
+            else:
+                # 单指标查询
+                value = list(row.values())[0] if row else 0
+                formatted_value = self._format_value(value)
+
+                return {
+                    "answer": f"{metric_name}为 {formatted_value}",
+                    "suggestions": [
+                        f"查看{metric_name}趋势变化",
+                        f"对比上月{metric_name}",
+                    ],
+                }
 
         # 多行数据
         metric_name = mql.metric.name if mql.metric else "指标值"

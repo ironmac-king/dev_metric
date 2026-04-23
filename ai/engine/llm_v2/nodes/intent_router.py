@@ -62,6 +62,19 @@ class IntentRouter:
         self._llm_engine = get_llm_engine()
         self._dimension_type_mappings = None
         self._local_model = None  # 本地模型延迟加载
+        self._dimension_service = None  # 维度服务延迟加载
+
+    def _get_dimension_service(self):
+        """延迟加载维度服务"""
+        if self._dimension_service is None:
+            try:
+                from ai.services.dimension_service import DimensionService
+                self._dimension_service = DimensionService()
+                logger.info("[IntentRouter] DimensionService 加载成功")
+            except Exception as e:
+                logger.warning(f"[IntentRouter] DimensionService 加载失败: {e}")
+                self._dimension_service = None
+        return self._dimension_service
 
     def _get_local_model(self):
         """延迟加载本地模型"""
@@ -178,15 +191,20 @@ class IntentRouter:
         if question.upper() in dimension_codes or question in dimension_codes:
             return True
 
-        return len(question) < 10
+        # 仅用关键词判断追问，不依赖长度（中文字长但可能是完整问题）
+        return False
 
     def _is_greeting(self, question: str) -> bool:
         """判断是否为寒暄"""
         greeting_keywords = ["你好", "您好", "嗨", "hi", "hello", "早上好", "下午好", "晚上好", "hi", "hey"]
         return any(kw in question.lower() for kw in greeting_keywords)
 
-    def _check_generic_dimensions(self, mql: MQLSchema) -> Dict[str, Any]:
+    def _check_generic_dimensions(self, mql: MQLSchema, question: str = "") -> Dict[str, Any]:
         """检查是否有泛指维度需要追问
+
+        Args:
+            mql: MQLSchema
+            question: 原始问题（用于检测问题中的泛指关键词）
 
         Returns:
             {
@@ -194,11 +212,23 @@ class IntentRouter:
                 "generic_types": List[str],  # 泛指类型列表
                 "default_dimension": str,     # 默认使用的维度
                 "clarification_message": str, # 追问引导
-                "clarification_options": List[Dict]  # 选项列表
+                "clarification_options": List[Dict],  # 选项列表，每项含 replace_key
+                "replace_key": str,  # 问题中需要替换的泛指关键词
             }
         """
         generic_types = {"CATEGORY", "品类", "类目", "商品类", "产品类"}
         brand_types = {"BRAND", "品牌"}
+        # 品类问法映射：关键词 -> replace_key（问题中实际出现的词）
+        category_keyword_map = {
+            "品类": "品类", "各品类": "各品类",
+            "类目": "类目", "各品类": "各品类",
+            "商品类": "商品类", "产品类": "产品类",
+        }
+        brand_keyword_map = {
+            "品牌": "品牌", "各品牌": "各品牌",
+            "店铺": "店铺", "各店铺": "各店铺",
+            "平台": "平台", "各平台": "各平台",
+        }
 
         generic_dims = []
         for dim in mql.dimensions:
@@ -215,30 +245,47 @@ class IntentRouter:
         # 查找第一个泛指维度的配置
         first_generic = generic_dims[0]
 
+        # 检测问题中实际出现的泛指关键词（用于前端替换）
+        detected_keyword = ""
+        if question:
+            if first_generic in generic_types:
+                # 优先匹配更长的关键词
+                for kw in ["各品类", "品类", "类目", "商品类", "产品类"]:
+                    if kw in question:
+                        detected_keyword = kw
+                        break
+            elif first_generic in brand_types:
+                for kw in ["各品牌", "品牌", "各店铺", "店铺", "各平台", "平台"]:
+                    if kw in question:
+                        detected_keyword = kw
+                        break
+
         # 根据泛指类型返回对应的选项
         if first_generic in generic_types:
             return {
                 "is_generic": True,
                 "generic_types": generic_dims,
                 "default_dimension": "三级品类",
-                "clarification_message": "您选择的是三级品类，要切换吗？",
+                "clarification_message": "请问您想按哪个品类级别分析？",
                 "clarification_options": [
-                    {"label": "一级品类", "value": "一级品类"},
-                    {"label": "二级品类", "value": "二级品类"},
-                    {"label": "三级品类", "value": "三级品类"},
-                ]
+                    {"label": "一级品类", "value": "一级品类", "replace_key": detected_keyword or "品类"},
+                    {"label": "二级品类", "value": "二级品类", "replace_key": detected_keyword or "品类"},
+                    {"label": "三级品类", "value": "三级品类", "replace_key": detected_keyword or "品类"},
+                ],
+                "replace_key": detected_keyword or "品类",
             }
         elif first_generic in brand_types:
             return {
                 "is_generic": True,
                 "generic_types": generic_dims,
                 "default_dimension": "品牌",
-                "clarification_message": "您选择的是品牌维度，要切换吗？",
+                "clarification_message": "请问您想按什么维度分析？",
                 "clarification_options": [
-                    {"label": "按品牌", "value": "品牌"},
-                    {"label": "按店铺", "value": "店铺"},
-                    {"label": "按平台", "value": "平台"},
-                ]
+                    {"label": "按品牌", "value": "品牌", "replace_key": detected_keyword or "品牌"},
+                    {"label": "按店铺", "value": "店铺", "replace_key": detected_keyword or "店铺"},
+                    {"label": "按平台", "value": "平台", "replace_key": detected_keyword or "平台"},
+                ],
+                "replace_key": detected_keyword or "品牌",
             }
         else:
             return {
@@ -246,7 +293,8 @@ class IntentRouter:
                 "generic_types": generic_dims,
                 "default_dimension": generic_dims[0],
                 "clarification_message": f"请问您想按哪个维度分析？（{', '.join(generic_dims)}）",
-                "clarification_options": [{"label": d, "value": d} for d in generic_dims]
+                "clarification_options": [{"label": d, "value": d, "replace_key": d} for d in generic_dims],
+                "replace_key": generic_dims[0] if generic_dims else "",
             }
 
     async def _handle_followup(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
@@ -258,6 +306,7 @@ class IntentRouter:
                 "mql": None,
                 "needs_clarification": True,
                 "clarification_message": "请问您想查询什么指标？",
+                "source": "followup",
             }
 
         # 检测是否是单个维度类型代码（如 FSITECODE、FSITE、PLATFORM 等）
@@ -291,6 +340,7 @@ class IntentRouter:
             return {
                 "mql": mql,
                 "needs_clarification": False,
+                "source": "followup",
             }
 
         # 检测是否是"按XX"格式的维度选择（如"按一级品类"、"按站点"等）
@@ -323,6 +373,7 @@ class IntentRouter:
                     return {
                         "mql": mql,
                         "needs_clarification": False,
+                        "source": "followup",
                     }
                 # 模糊匹配：检查 dim_label 是否包含在某维度名中
                 for dim_type, dim_code in dim_label_to_code.items():
@@ -339,6 +390,7 @@ class IntentRouter:
                         return {
                             "mql": mql,
                             "needs_clarification": False,
+                            "source": "followup",
                         }
 
         # 根据追问内容更新意图
@@ -368,6 +420,7 @@ class IntentRouter:
         return {
             "mql": mql,
             "needs_clarification": False,
+            "source": "followup",
         }
 
     def _handle_greeting(self) -> Dict[str, Any]:
@@ -379,6 +432,7 @@ class IntentRouter:
         return {
             "mql": mql,
             "needs_clarification": False,
+            "source": "followup",
         }
 
     async def _local_then_llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
@@ -409,6 +463,19 @@ class IntentRouter:
             if local_result['match_success']:
                 mql = self._build_mql_from_local(local_result, question)
                 logger.info(f"[IntentRouter] 本地模型精准匹配成功，跳过 LLM: intent={mql.intent.value}")
+
+                # 检查是否有泛指维度 → 触发追问
+                clarification = self._check_generic_dimensions(mql, question)
+                if clarification.get("is_generic"):
+                    return {
+                        "mql": mql,
+                        "needs_clarification": True,
+                        "clarification_message": clarification.get("clarification_message", ""),
+                        "clarification_options": clarification.get("clarification_options", []),
+                        "source": "local_model",
+                        "original_question": question,
+                    }
+
                 return {
                     "mql": mql,
                     "needs_clarification": False,
@@ -419,11 +486,11 @@ class IntentRouter:
             # 匹配失败：LLM 兜底
             logger.info(f"[IntentRouter] 本地模型匹配失败（confidence={local_result['confidence']:.3f} 或缺少 METRIC 实体），"
                        f"走 LLM 兜底")
-            return await self._llm_intent_recognition(question, inherited_mql)
+            return await self._llm_intent_recognition(question, inherited_mql, source_override="fallback")
 
         except Exception as e:
             logger.error(f"[IntentRouter] 本地模型预测异常: {e}，走 LLM 兜底")
-            return await self._llm_intent_recognition(question, inherited_mql)
+            return await self._llm_intent_recognition(question, inherited_mql, source_override="fallback")
 
     def _build_mql_from_local(self, local_result: Dict[str, Any], question: str) -> MQLSchema:
         """
@@ -500,6 +567,53 @@ class IntentRouter:
                     ))
                     logger.info(f"[IntentRouter] 本地模型提取维度: {dim_type} = {dim_value}")
 
+        # 单独 DIM_VALUE（无对应 DIM 类型）：通过 dimension_service 反查 column_name
+        if dim_value_entities and not dim_entities:
+            dim_service = self._get_dimension_service()
+            # 确保维度映射已加载
+            if dim_service and not self._dimension_type_mappings:
+                self._load_dimension_mappings()
+            # 建立 column_name → dimension_name 的反向映射
+            column_to_dim_name = {}
+            if self._dimension_type_mappings:
+                for m in self._dimension_type_mappings:
+                    col = m.get("column_name", "") or ""
+                    dim_name = m.get("dimension_name", "") or m.get("dimension_type", "") or ""
+                    if col and dim_name:
+                        column_to_dim_name[col.upper()] = dim_name
+
+            for dv_entity in dim_value_entities:
+                dim_value = dv_entity['text']
+                if not dim_service:
+                    logger.warning(f"[IntentRouter] 无法处理 DIM_VALUE '{dim_value}'：DimensionService 不可用")
+                    continue
+                # 调用 Go API 搜索维度值，返回完整信息
+                dim_info = dim_service.find_dimension_info(dim_value)
+                if dim_info is None:
+                    logger.warning(f"[IntentRouter] DimensionService 无法找到 '{dim_value}' 对应的维度信息")
+                    continue
+
+                if dim_info["is_generic"]:
+                    # 泛指类型 → 注入维度（value=None）触发追问
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_info["dimension_type"],  # 如"品类"
+                        column=dim_info.get("column_name", ""),
+                        field="",
+                        value=None,  # 泛指，没有具体值
+                    ))
+                    logger.info(f"[IntentRouter] 检测到泛指维度: {dim_info['dimension_type']}")
+                else:
+                    # 具体值 → 正常处理
+                    column_name = dim_info["column_name"]
+                    dim_type = column_to_dim_name.get(column_name.upper(), dim_info["dimension_type"])
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_type,
+                        column=column_name,
+                        field="",
+                        value=dim_value,
+                    ))
+                    logger.info(f"[IntentRouter] 本地模型提取维度值(DIM_VALUE 反查): {dim_type}({column_name}) = {dim_value}")
+
         # 检查是否有对比意图（环比/同比关键词）
         if any(kw in question for kw in ['环比', '同比', '增长', '下降', '变化']):
             mql.comparison = ComparisonSpec(
@@ -520,13 +634,42 @@ class IntentRouter:
             else:
                 mql.top_n = 10
 
+        # 纯文本检测：BERT 没有输出 DIM 实体，但问题包含泛指维度关键词
+        # 例如"本月各品类销售额" → BERT 没有识别到 DIM/DIM_VALUE，但文本里有"品类"
+        if not mql.dimensions:
+            generic_type_map = {
+                "品类": "品类",
+                "类目": "品类",
+                "品牌": "品牌",
+                "渠道": "渠道",
+                "平台": "平台",
+                "店铺": "店铺",
+                "站点": "站点",
+                "区域": "区域",
+                "国家": "国家",
+            }
+            for kw, dim_type in generic_type_map.items():
+                if kw in question:
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_type,
+                        column="",
+                        field="",
+                        value=None,  # 泛指，没有具体值
+                    ))
+                    logger.info(f"[IntentRouter] 文本检测到泛指维度关键词: {kw} → {dim_type}")
+                    break
+
         return mql
 
-    async def _llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
+    async def _llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema],
+                                       source_override: str = None) -> Dict[str, Any]:
         """
         LLM 意图识别
 
         使用 DeepSeek 识别用户意图。
+
+        Args:
+            source_override: 强制指定 source（fallback 时传 "fallback"）
         """
         try:
             # 使用 V2 专用的 intent prompt
@@ -576,7 +719,7 @@ class IntentRouter:
                 clarification_message = "抱歉，我没有理解您的问题，请换一种方式描述？"
 
             # 2. 检查是否有泛指维度需要追问（返回兜底数据 + 引导细化）
-            generic_check = self._check_generic_dimensions(mql)
+            generic_check = self._check_generic_dimensions(mql, question)
             if generic_check.get("is_generic"):
                 # 泛指维度：设置追问引导，但仍然继续执行返回数据
                 needs_clarification = True
@@ -594,6 +737,8 @@ class IntentRouter:
                     "clarification_options": clarification_options,
                     "is_generic": True,
                     "default_dimension": "PLATFORM",
+                    "source": source_override or "llm",
+                    "original_question": question,
                 }
 
             return {
@@ -603,6 +748,8 @@ class IntentRouter:
                 "is_generic": generic_check.get("is_generic", False),
                 "clarification_options": generic_check.get("clarification_options", []),
                 "default_dimension": generic_check.get("default_dimension", ""),
+                "source": source_override or "llm",
+                "original_question": question,
             }
 
         except json.JSONDecodeError as e:
@@ -611,6 +758,7 @@ class IntentRouter:
                 "mql": None,
                 "needs_clarification": True,
                 "clarification_message": "抱歉，我没有理解您的问题，请换一种方式描述？",
+                "source": source_override or "llm",
             }
         except Exception as e:
             logger.error(f"[IntentRouter] 错误: {e}")
@@ -618,6 +766,7 @@ class IntentRouter:
                 "mql": None,
                 "needs_clarification": True,
                 "clarification_message": f"处理出错: {str(e)}",
+                "source": source_override or "llm",
             }
 
     def _parse_mql_from_result(self, result: Dict[str, Any], question: str) -> MQLSchema:

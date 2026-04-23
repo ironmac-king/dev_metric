@@ -25,6 +25,27 @@ from ai.client.metric_client import MetricClient
 logger = get_logger("ai.llm_v2.graph")
 
 
+def _extract_entities_from_mql(mql) -> list:
+    """从 MQLSchema 提取实体列表，供 thinking_steps 展示"""
+    entities = []
+    if not mql:
+        return entities
+    # 指标实体
+    if mql.metric and mql.metric.name:
+        entities.append({"type": "METRIC", "text": mql.metric.name})
+    # 时间实体
+    if mql.time and mql.time.original:
+        entities.append({"type": "TIME", "text": mql.time.original})
+    # 维度实体
+    for dim in (mql.dimensions or []):
+        if dim.type:
+            entities.append({"type": "DIMENSION", "text": dim.type})
+    # 过滤器实体
+    for f in (mql.filters or []):
+        entities.append({"type": "FILTER", "text": f"{f.field} {f.operator} {f.value}"})
+    return entities
+
+
 async def _preload_metric_info(state: V2State) -> None:
     """
     预加载指标信息到 context_cache（优化：提前调用 MetricClient）
@@ -88,39 +109,33 @@ async def intent_router(state: V2State):
 
             # 处理泛指维度 vs 真正追问的区分
             if result.get("needs_clarification"):
+                # 泛指维度 or 真正追问：都中断流程，返回追问让用户选择
+                state.error = "needs_clarification"
+                state.context_cache["clarification_message"] = result.get("clarification_message", "")
+                state.context_cache["clarification_options"] = result.get("clarification_options", [])
+                state.context_cache["original_question"] = result.get("original_question", "")
+
+                # 泛指维度：设置 is_generic_result 标记
                 if result.get("is_generic"):
-                    # 泛指维度：继续执行，返回默认数据 + 追问引导
                     state.is_generic_result = True
-                    state.context_cache["clarification_message"] = result.get("clarification_message", "")
-                    state.context_cache["clarification_options"] = result.get("clarification_options", [])
-
-                    # 当有 default_dimension 时，将其应用到 state.mql.dimensions
-                    default_dim = result.get("default_dimension", "")
-                    if default_dim and state.mql and not state.mql.dimensions:
-                        dim = MQLDimension(type=default_dim, value=None)
-                        state.mql.dimensions = [dim]
-                        logger.info(f"[intent_router] 应用 default_dimension: {default_dim} -> mql.dimensions")
-
-                    logger.info(f"[intent_router] 设置 is_generic_result=True, clarification_options={result.get('clarification_options', [])}")
-                    state.add_thinking_step(
-                        "intent_router",
-                        status="generic_dimension",
-                        content=f"泛指维度，使用默认值继续执行: {result.get('default_dimension', '')}",
-                        llm_used=True,
-                        duration_ms=int((time.time() - start_time) * 1000),
-                    )
-                    span.set_attribute("result.type", "generic_dimension")
+                    logger.info(f"[intent_router] 泛指维度触发追问: is_generic=True, clarification_options={result.get('clarification_options', [])}")
                 else:
-                    # 真正需要用户输入的追问，中断流程
-                    state.error = "needs_clarification"
-                    state.add_thinking_step(
-                        "intent_router",
-                        status="requires_clarification",
-                        content=result.get("clarification_message", ""),
-                        llm_used=True,
-                        duration_ms=int((time.time() - start_time) * 1000),
-                    )
-                    span.set_attribute("result.type", "clarification_needed")
+                    logger.info(f"[intent_router] 追问触发: clarification_options={result.get('clarification_options', [])}")
+
+                state.add_thinking_step(
+                    "intent_router",
+                    status="requires_clarification",
+                    content=result.get("clarification_message", ""),
+                    llm_used=True,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    source="llm",
+                    entities=_extract_entities_from_mql(state.mql),
+                    needs_clarification=True,
+                    clarification_message=result.get("clarification_message", ""),
+                    clarification_options=result.get("clarification_options", []),
+                    original_question=result.get("original_question", ""),
+                )
+                span.set_attribute("result.type", "clarification_needed")
             else:
                 state.add_thinking_step(
                     "intent_router",
@@ -128,6 +143,8 @@ async def intent_router(state: V2State):
                     content=f"意图: {state.mql.intent.value if state.mql else 'unknown'}",
                     llm_used=True,
                     duration_ms=int((time.time() - start_time) * 1000),
+                    source=result.get("source"),
+                    entities=_extract_entities_from_mql(state.mql),
                 )
                 span.set_attribute("result.type", "completed")
 
@@ -140,8 +157,8 @@ async def intent_router(state: V2State):
                 status="failed",
                 content=f"错误: {str(e)}",
                 llm_used=False,
-            duration_ms=int((time.time() - start_time) * 1000),
-        )
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
 
     yield state
 
@@ -233,13 +250,53 @@ async def mql_generator(state: V2State) -> V2State:
             inherited_order_by = state.mql.order_by if state.mql else None
             # 保留 intent_router 设置的 dimensions（mql_generator 的 LLM 可能丢失维度信息）
             inherited_dimensions = state.mql.dimensions if state.mql and state.mql.dimensions else []
+            # 保留 intent_router 设置的 filters（mql_generator 的 LLM 可能丢失 filters）
+            inherited_filters = state.mql.filters if state.mql and state.mql.filters else []
             state.mql = mql
             if inherited_order_by and not mql.order_by:
                 mql.order_by = inherited_order_by
                 logger.info(f"[mql_generator] 保留 intent_router 设置的 order_by: {inherited_order_by.direction}")
+            # ========== 修复：只有当前问题包含维度关键词时才继承上轮维度 ==========
+            # 如果当前问题没有提到任何维度关键词，即使新 MQL 无维度也不继承
+            try:
+                from ai.services.dimension_service import DimensionService
+                dim_keywords = DimensionService().get_keywords()
+            except Exception:
+                dim_keywords = ["品类", "渠道", "店铺", "国家", "平台", "区域", "城市", "品牌", "商品",
+                                "区域", "国家", "站点", "店铺", "广告", "活动", "客户"]
+            current_has_dim_keyword = any(kw in state.question for kw in dim_keywords)
+            # 检查继承的 dimension value 是否出现在当前问题中
+            inherited_dim_value_in_question = any(
+                dim.value and dim.value in state.question
+                for dim in inherited_dimensions
+            )
+            if not mql.dimensions and inherited_dimensions and not current_has_dim_keyword and not inherited_dim_value_in_question:
+                logger.warning(f"[mql_generator] 当前问题无维度关键词，清除继承的 dimensions: {[d.type for d in inherited_dimensions]}")
+                inherited_dimensions = []
+            # =========================================================================
             if not mql.dimensions and inherited_dimensions:
                 mql.dimensions = inherited_dimensions
                 logger.info(f"[mql_generator] 保留 intent_router 设置的 dimensions: {[d.type for d in inherited_dimensions]}")
+            # 保留 intent_router 设置的 filters（去重）
+            # 规则：field AND value 同时匹配才算重复
+            # 如果 corrected 和 user 重复，移除 corrected（优先保留 user）
+            for f in inherited_filters:
+                # 如果 corrected 和 user 重复，移除 corrected filter
+                if hasattr(f, 'source') and f.source == "user":
+                    # 移除已存在的 corrected filter（同 field）
+                    mql.filters = [
+                        ex for ex in mql.filters
+                        if not (hasattr(ex, 'field') and ex.field == f.field and
+                                hasattr(ex, 'source') and ex.source == "corrected")
+                    ]
+                    logger.info(f"[mql_generator] 移除与 user filter 重复的 corrected filter: {f.field}")
+                already_exists = any(
+                    (hasattr(ex, 'field') and ex.field == f.field and hasattr(ex, 'value') and ex.value == f.value)
+                    for ex in (mql.filters or [])
+                )
+                if not already_exists:
+                    mql.filters.append(f)
+                    logger.info(f"[mql_generator] 保留 intent_router 设置的 filter: {f.field}={f.value}")
             push_history(state, json.dumps(mql.to_dict(), ensure_ascii=False))
 
         state.add_thinking_step(
@@ -248,6 +305,8 @@ async def mql_generator(state: V2State) -> V2State:
             content=f"MQL 生成成功: intent={mql.intent.value if mql else 'unknown'}",
             llm_used=True,
             duration_ms=int((time.time() - start_time) * 1000),
+            source="llm",
+            entities=_extract_entities_from_mql(mql),
         )
 
     except Exception as e:

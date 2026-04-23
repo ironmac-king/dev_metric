@@ -29,7 +29,7 @@ LOCAL_TO_MQL_INTENT = {
     "query_ranking": "query_ranking",
     "query_ratio": "query_ratio",
     "query_aggregate": "query_aggregate",
-    "query_filter": "query_filter",
+    "query_filter": "query_value",  # query_filter → query_value（带维度过滤的查值）
     "query_forecast": "query_forecast",
     "query_drilldown": "query_drilldown",
     "query_anomaly": "query_anomaly",
@@ -213,8 +213,8 @@ class LocalJointIntentModel:
                 local_intent = self.id2intent.get(intent_pred_idx, self.intents[intent_pred_idx])
                 mapped_intent = LOCAL_TO_MQL_INTENT.get(local_intent, local_intent)
 
-                # 判断是否匹配成功
-                match_success = self._check_match_success(intent_confidence, entities)
+                # 判断是否匹配成功（intent=unknown 时必须走 LLM）
+                match_success = self._check_match_success(intent_confidence, entities, mapped_intent)
 
                 result = {
                     'intent': mapped_intent,
@@ -358,14 +358,19 @@ class LocalJointIntentModel:
 
         return ''.join(result).strip()
 
-    def _check_match_success(self, confidence: float, entities: List[Dict[str, Any]]) -> bool:
+    def _check_match_success(self, confidence: float, entities: List[Dict[str, Any]], intent: str = None) -> bool:
         """
         判断本地模型匹配是否成功
 
         条件：
         1. 置信度 >= 0.85
         2. 识别到 METRIC 实体（指标必须识别到）
+        3. 意图不能是 unknown（unknown 必须走 LLM）
         """
+        # 条件0：意图不能是 unknown
+        if intent == "unknown":
+            return False
+
         # 条件1：置信度阈值
         if confidence < self.CONFIDENCE_THRESHOLD:
             return False

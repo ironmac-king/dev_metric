@@ -53,6 +53,11 @@ class ThinkingStepResponse(BaseModel):
     timestamp: Optional[str] = None
     llm_used: bool = False
     duration_ms: int = 0
+    source: Optional[str] = None
+    entities: list = []
+    needs_clarification: bool = False
+    clarification_message: Optional[str] = ""
+    clarification_options: List[Dict[str, Any]] = []
 
 
 class AskResponseV2(BaseModel):
@@ -124,7 +129,8 @@ async def ask_question_v2(req: AskRequestV2):
 
         if result_state.error == "needs_clarification":
             needs_clarification = True
-            clarification_message = result_state.answer
+            # 优先从 context_cache 读取追问消息（intent_router 设置的）
+            clarification_message = result_state.context_cache.get("clarification_message") or result_state.answer
         elif result_state.is_generic_result:
             # 泛指维度：流程已继续执行，但需要显示追问标签让用户切换级别
             needs_clarification = True
@@ -150,12 +156,17 @@ async def ask_question_v2(req: AskRequestV2):
                     timestamp=s.timestamp,
                     llm_used=s.llm_used,
                     duration_ms=s.duration_ms,
+                    source=s.source,
+                    entities=s.entities,
+                    needs_clarification=s.needs_clarification,
+                    clarification_message=s.clarification_message,
+                    clarification_options=s.clarification_options,
                 )
                 for s in result_state.thinking_steps
             ],
             needs_clarification=needs_clarification,
             clarification_message=clarification_message,
-            clarification_options=result_state.context_cache.get("clarification_options") if result_state.is_generic_result else None,
+            clarification_options=result_state.context_cache.get("clarification_options") if needs_clarification else None,
             error=result_state.error if not result_state.answer else None,
             result_data=result_state.sql_result.data if result_state.sql_result else None,
             total=result_state.sql_result.total if result_state.sql_result else 0,
@@ -283,6 +294,14 @@ async def ask_question_v2_stream(req: AskRequestV2):
                     yield StreamEvent(SSSEvent.THINKING, {
                         "step": step_name,
                         "content": step_state["thinking"],
+                        "entities": step_state.get("entities", []),
+                        "llm_used": step_state.get("llm_used", False),
+                        "source": step_state.get("source"),
+                        "mql": step_state.get("mql"),
+                        "needs_clarification": step_state.get("needs_clarification", False),
+                        "clarification_message": step_state.get("clarification_message", ""),
+                        "clarification_options": step_state.get("clarification_options", []),
+                        "original_question": step_state.get("original_question", ""),
                     }).to_sse()
                     await asyncio.sleep(0.05)  # 让浏览器有时间渲染当前步骤
 
@@ -369,15 +388,28 @@ async def _stream_graph(graph, state: V2State):
 
                 # 检查是否泛指维度需要追问
                 is_generic = getattr(state_update, 'is_generic_result', False)
-                clarification_message = state_update.context_cache.get("clarification_message", "") if hasattr(state_update, 'context_cache') else ""
-                clarification_options = state_update.context_cache.get("clarification_options", []) if hasattr(state_update, 'context_cache') else []
+                # 从 last_thinking（ThinkingStep 对象）获取追问信息
+                clarification_message = getattr(last_thinking, 'clarification_message', '') if last_thinking else ""
+                clarification_options = getattr(last_thinking, 'clarification_options', []) if last_thinking else []
+                original_question = getattr(last_thinking, 'original_question', '') if last_thinking else ""
 
                 # 获取 metric_name
                 metric_name = _get_metric_name(state_update.mql) if hasattr(state_update, 'mql') and state_update.mql else ''
                 logger.info(f"[_stream_graph] result_ready metric_name={metric_name}")
 
+                # 获取 MQL JSON（用于前端展示）
+                mql_json = None
+                if hasattr(state_update, 'mql') and state_update.mql:
+                    try:
+                        mql_json = state_update.mql.to_dict()
+                    except Exception:
+                        mql_json = None
+
                 yield step_name, {
                     "thinking": last_thinking.content if last_thinking and hasattr(last_thinking, 'content') else '',
+                    "entities": last_thinking.entities if last_thinking and hasattr(last_thinking, 'entities') else [],
+                    "llm_used": last_thinking.llm_used if last_thinking and hasattr(last_thinking, 'llm_used') else False,
+                    "source": last_thinking.source if last_thinking and hasattr(last_thinking, 'source') else None,
                     "sql": getattr(state_update, 'sql', '') or '',
                     "result_data": result_data,
                     "total": total,
@@ -385,11 +417,14 @@ async def _stream_graph(graph, state: V2State):
                     "answer": answer,
                     "suggestions": suggestions,
                     # 传递追问信息
-                    "needs_clarification": is_generic,
+                    "needs_clarification": getattr(last_thinking, 'needs_clarification', is_generic),
                     "clarification_message": clarification_message,
-                    "clarification_options": clarification_options if is_generic else [],
+                    "clarification_options": clarification_options,
+                    "original_question": original_question,
                     # 传递指标名供前端 tooltip 使用（占比查询时从 molecule_metric 获取）
                     "metric_name": metric_name,
+                    # 传递 MQL JSON（供 mql_semantic_validator 步骤展示）
+                    "mql": mql_json,
                 }
         logger.info(f"[_stream_graph] 流式执行完成")
     except Exception as e:
