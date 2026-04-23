@@ -107,6 +107,10 @@ async def intent_router(state: V2State):
                 state.mql = result["mql"]
                 span.set_attribute("mql.intent", result["mql"].intent.value)
 
+            # 保存 source（followup / llm / local_model）用于后续节点判断
+            if result.get("source"):
+                state.source = result["source"]
+
             # 处理泛指维度 vs 真正追问的区分
             if result.get("needs_clarification"):
                 # 泛指维度 or 真正追问：都中断流程，返回追问让用户选择
@@ -252,12 +256,18 @@ async def mql_generator(state: V2State) -> V2State:
             inherited_dimensions = state.mql.dimensions if state.mql and state.mql.dimensions else []
             # 保留 intent_router 设置的 filters（mql_generator 的 LLM 可能丢失 filters）
             inherited_filters = state.mql.filters if state.mql and state.mql.filters else []
+            # 保留 intent_router 设置的 comparison（追问场景：环比/同比）
+            inherited_comparison = state.mql.comparison if state.mql and state.mql.comparison else None
+            # 保留 intent_router 设置的 calculation_patterns
+            inherited_calculation_patterns = state.mql.calculation_patterns if state.mql and state.mql.calculation_patterns else []
+            logger.info(f"[mql_generator] 保存继承状态: inherited_comparison={inherited_comparison}, inherited_dimensions={[(d.type, d.value) for d in inherited_dimensions] if inherited_dimensions else []}, is_followup={getattr(state, 'source', '')}")
             state.mql = mql
             if inherited_order_by and not mql.order_by:
                 mql.order_by = inherited_order_by
                 logger.info(f"[mql_generator] 保留 intent_router 设置的 order_by: {inherited_order_by.direction}")
             # ========== 修复：只有当前问题包含维度关键词时才继承上轮维度 ==========
             # 如果当前问题没有提到任何维度关键词，即使新 MQL 无维度也不继承
+            # 但是：如果是追问（source=followup），必须继承维度
             try:
                 from ai.services.dimension_service import DimensionService
                 dim_keywords = DimensionService().get_keywords()
@@ -270,7 +280,9 @@ async def mql_generator(state: V2State) -> V2State:
                 dim.value and dim.value in state.question
                 for dim in inherited_dimensions
             )
-            if not mql.dimensions and inherited_dimensions and not current_has_dim_keyword and not inherited_dim_value_in_question:
+            # 追问场景（source=followup）：始终保留维度，不走下面的清除逻辑
+            is_followup = getattr(state, 'source', '') == 'followup'
+            if not mql.dimensions and inherited_dimensions and not current_has_dim_keyword and not inherited_dim_value_in_question and not is_followup:
                 logger.warning(f"[mql_generator] 当前问题无维度关键词，清除继承的 dimensions: {[d.type for d in inherited_dimensions]}")
                 inherited_dimensions = []
             # =========================================================================
@@ -297,6 +309,28 @@ async def mql_generator(state: V2State) -> V2State:
                 if not already_exists:
                     mql.filters.append(f)
                     logger.info(f"[mql_generator] 保留 intent_router 设置的 filter: {f.field}={f.value}")
+            # 保留 intent_router 设置的 comparison（追问场景）
+            # 如果是追问(source=followup)，强制恢复 comparison（因为 LLM 对短文本可能不返回 comparison）
+            is_followup = getattr(state, 'source', '') == 'followup'
+            logger.info(f"[mql_generator] 恢复 comparison: inherited_comparison={inherited_comparison}, mql.comparison={mql.comparison}, is_followup={is_followup}")
+            if is_followup and inherited_comparison:
+                # 追问场景：强制恢复
+                mql.comparison = inherited_comparison
+                logger.info(f"[mql_generator] 追问场景恢复 comparison from intent_router: types={inherited_comparison.types}, enabled={inherited_comparison.enabled}")
+            elif inherited_comparison and not mql.comparison:
+                # 非追问场景：只有新 MQL 没有 comparison 时才恢复
+                mql.comparison = inherited_comparison
+                logger.info(f"[mql_generator] 恢复 comparison from intent_router: types={inherited_comparison.types}, enabled={inherited_comparison.enabled}")
+            # 如果有 comparison 但没有 calculation_patterns，根据 comparison.types 转换
+            if mql.comparison and mql.comparison.enabled and not mql.calculation_patterns:
+                from ..schema import CalculationPattern
+                for ctype in (mql.comparison.types or []):
+                    if ctype in ["同比", "yoy"]:
+                        mql.calculation_patterns.append(CalculationPattern.YOY)
+                        logger.info(f"[mql_generator] 从 comparison.types 转换 YOY: calculation_patterns={mql.calculation_patterns}")
+                    elif ctype in ["环比", "mom"]:
+                        mql.calculation_patterns.append(CalculationPattern.MOM)
+                        logger.info(f"[mql_generator] 从 comparison.types 转换 MOM: calculation_patterns={mql.calculation_patterns}")
             push_history(state, json.dumps(mql.to_dict(), ensure_ascii=False))
 
         state.add_thinking_step(

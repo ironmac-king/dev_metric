@@ -71,8 +71,16 @@ class MQLGenerator:
 
         try:
             # 0. 查历史缓存（优化：相似问题直接复用，跳过 LLM 调用）
+            # 注意：对于追问（source=followup），跳过缓存以保留从 intent_router 继承的 comparison 和 dimensions
             history_cache = get_history_reuse_cache()
-            cached = history_cache.find_similar(question, threshold=0.75)
+            # 检查是否是追问场景（通过 inherited_mql 判断）
+            is_followup = inherited_mql is not None
+            if not is_followup:
+                # 非追问场景才查缓存
+                cached = history_cache.find_similar(question, threshold=0.75)
+            else:
+                # 追问场景跳过缓存
+                cached = None
             if cached:
                 cached_mql_dict = cached.get("mql")
                 if cached_mql_dict:

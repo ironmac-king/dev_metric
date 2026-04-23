@@ -297,9 +297,132 @@ class IntentRouter:
                 "replace_key": generic_dims[0] if generic_dims else "",
             }
 
+    def _validate_generic_dimensions(self, mql: MQLSchema, question: str) -> MQLSchema:
+        """
+        校验 MQL 中的维度值是否为具体维度值。
+
+        核心逻辑：
+        1. 从问题中提取候选维度值（时间词前、品类词前后）
+        2. 查 dim_value_mapping 确认候选是否为具体维度值
+        3. 精确匹配到唯一结果 → 纠正 dimension type
+        4. 候选词模糊（< 3字符）且匹配到多个结果 → 不纠正，让追问处理
+
+        注意：此方法处理所有维度类型，不仅限于泛指类型。
+        当 LLM 返回泛指类型（如 PRODUCT_LINE）但实际是具体值（如"智能云存储"）时，
+        需要通过此方法纠正。
+        """
+        generic_types = {"CATEGORY", "品类", "类目", "商品类", "产品类"}
+
+        dim_service = self._get_dimension_service()
+        if not dim_service:
+            return mql
+
+        # 从问题中提取所有候选维度值
+        candidates = self._extract_dimension_candidates(question, "")
+        if not candidates:
+            return mql
+
+        logger.info(f"[_validate_generic_dimensions] 提取到的候选维度值: {candidates}")
+
+        for candidate in candidates:
+            # 查 dim_value_mapping（limit=10 返回多个结果用于判断模糊度）
+            search_results = dim_service.search_by_value(candidate, limit=10)
+            if not search_results:
+                logger.info(f"[_validate_generic_dimensions] 候选 '{candidate}' 在 dim_value_mapping 中无结果")
+                continue
+
+            logger.info(f"[_validate_generic_dimensions] 候选 '{candidate}' 匹配到 {len(search_results)} 个结果: {search_results}")
+
+            # 精确匹配到唯一结果 → 纠正为具体值
+            exact_matches = [r for r in search_results
+                            if r.get("dimension_value") == candidate]
+            if len(exact_matches) == 1:
+                dim_info = exact_matches[0]
+                correct_type = dim_info.get("dimension_type")  # 如 "二级品类"
+                correct_value = dim_info.get("dimension_value")  # 如 "智能云存储"
+                correct_column = dim_info.get("column_name")  # 如 "GROUP_2"
+
+                # 更新所有匹配到的维度
+                for dim in mql.dimensions:
+                    dim_type_upper = dim.type.upper() if dim.type else ""
+                    # 如果当前维度类型是泛指类型，或者类型与正确类型不匹配，则纠正
+                    if dim_type_upper in generic_types or (dim.type and dim.type != correct_type and dim.type != correct_column):
+                        dim.type = correct_type
+                        dim.column = correct_column
+                        dim.value = correct_value
+                        logger.info(f"[_validate_generic_dimensions] 纠正维度: {dim_type_upper} -> {correct_type}({correct_column}), value={correct_value}")
+                break
+
+            # 候选词太模糊（< 3字符）且匹配到多个结果 → 不纠正，走追问
+            if len(candidate) < 3 and len(search_results) > 1:
+                logger.info(f"[_validate_generic_dimensions] 候选词 '{candidate}' 太模糊，匹配到 {len(search_results)} 个结果，跳过纠正")
+                continue
+
+            # 匹配到明确的具体值（非模糊）
+            if len(search_results) == 1:
+                dim_info = search_results[0]
+                correct_type = dim_info.get("dimension_type")
+                correct_value = dim_info.get("dimension_value")
+                correct_column = dim_info.get("column_name")
+
+                for dim in mql.dimensions:
+                    dim_type_upper = dim.type.upper() if dim.type else ""
+                    # 纠正所有维度，不管当前类型是什么
+                    if dim_type_upper in generic_types or dim.value is None:
+                        dim.type = correct_type
+                        dim.column = correct_column
+                        dim.value = correct_value
+                        logger.info(f"[_validate_generic_dimensions] 纠正维度(单匹配): {dim_type_upper} -> {correct_type}({correct_column}), value={correct_value}")
+                break
+
+        return mql
+
+    def _extract_dimension_candidates(self, question: str, dim_type: str) -> List[str]:
+        """
+        从问题中提取候选维度值。
+        例如："智能云存储今年业绩" + dim_type="品类"
+        → 提取 "智能云存储"（去掉 "品类" 相关词）
+        """
+        import re
+        candidates = []
+
+        # 1. 检查 "X的品类/Y" 模式：X 是维度值
+        category_words = ['品类', '类目', '商品类', '产品类']
+        for cat_word in category_words:
+            pattern = rf"(.+?)的{re.escape(cat_word)}"
+            match = re.search(pattern, question)
+            if match:
+                val = match.group(1).strip()
+                if len(val) >= 2:
+                    candidates.append(val)
+
+        # 2. 检查 "智能云存储品类" 模式：X 在品类词前面
+        for cat_word in category_words:
+            pattern = rf"(.+?){re.escape(cat_word)}"
+            for m in re.finditer(pattern, question):
+                val = m.group(1).strip()
+                if len(val) >= 2 and val not in candidates:
+                    candidates.append(val)
+
+        # 3. 检查时间词前面的词作为候选（去掉时间词后）
+        time_words = ['今天', '昨天', '今年', '去年', '本周', '上周', '本月', '上月']
+        for t in time_words:
+            if t in question:
+                idx = question.find(t)
+                before = question[:idx].strip()
+                if len(before) >= 2 and before not in candidates:
+                    candidates.append(before)
+
+        return candidates
+
     async def _handle_followup(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
         """处理短追问"""
-        logger.info("[IntentRouter] 处理短追问")
+        if inherited_mql:
+            _metric_name = inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None
+            _dims = [(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else []
+            logger.info(f"[IntentRouter] 处理短追问: inherited_mql.metric={_metric_name}, inherited_mql.dimensions={_dims}")
+        else:
+            logger.info("[IntentRouter] 处理短追问: inherited_mql is None")
 
         if not inherited_mql:
             return {
@@ -394,14 +517,15 @@ class IntentRouter:
                         }
 
         # 根据追问内容更新意图
+        from ..schema import ComparisonSpec
         if "环比" in question:
             mql.intent = MQLIntent.QUERY_COMPARISON
-            mql.comparison = inherited_mql.comparison or type(inherited_mql.comparison).__call__()
+            mql.comparison = inherited_mql.comparison if inherited_mql.comparison else ComparisonSpec()
             mql.comparison.types = ["环比"]
             mql.comparison.enabled = True
         elif "同比" in question:
             mql.intent = MQLIntent.QUERY_COMPARISON
-            mql.comparison = inherited_mql.comparison or type(inherited_mql.comparison).__call__()
+            mql.comparison = inherited_mql.comparison if inherited_mql.comparison else ComparisonSpec()
             mql.comparison.types = ["同比"]
             mql.comparison.enabled = True
         elif "趋势" in question:
@@ -415,7 +539,8 @@ class IntentRouter:
         mql.metrics = inherited_mql.metrics
         mql.time = inherited_mql.time
         mql.dimensions = inherited_mql.dimensions
-        mql.original_question = question
+        _debug_info = f"[DEBUG: inherited_metric={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}, inherited_dims={[(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else []}]"
+        mql.resolved_question = f"{_debug_info} | question={question}"
 
         return {
             "mql": mql,
@@ -465,6 +590,8 @@ class IntentRouter:
                 logger.info(f"[IntentRouter] 本地模型精准匹配成功，跳过 LLM: intent={mql.intent.value}")
 
                 # 检查是否有泛指维度 → 触发追问
+                # ===== 新增：校验泛指维度是否为具体维度值 =====
+                mql = self._validate_generic_dimensions(mql, question)
                 clarification = self._check_generic_dimensions(mql, question)
                 if clarification.get("is_generic"):
                     return {
@@ -659,6 +786,37 @@ class IntentRouter:
                     logger.info(f"[IntentRouter] 文本检测到泛指维度关键词: {kw} → {dim_type}")
                     break
 
+        # 兜底：扫描纯数字片段（如 SKU "15719"），查 API 确认是否是维度值
+        if not mql.dimensions and mql.metric:
+            import re
+            # 匹配 4 位以上的纯数字（不用 \b，因为中文文本没有 ASCII 单词边界）
+            for match in re.finditer(r'(\d{4,})', question):
+                num_value = match.group(1)
+                dim_service = self._get_dimension_service()
+                if dim_service:
+                    dim_info = dim_service.find_dimension_info(num_value)
+                    if dim_info and not dim_info.get("is_generic"):
+                        column_name = dim_info.get("column_name", "")
+                        dim_type = dim_info.get("dimension_type", "")
+                        # 建立 column_name → dimension_name 映射
+                        if not self._dimension_type_mappings:
+                            self._load_dimension_mappings()
+                        column_to_dim_name = {}
+                        if self._dimension_type_mappings:
+                            for m in self._dimension_type_mappings:
+                                col = m.get("column_name", "") or ""
+                                dn = m.get("dimension_name", "") or m.get("dimension_type", "") or ""
+                                if col and dn:
+                                    column_to_dim_name[col.upper()] = dn
+                        mql.dimensions.append(MQLDimension(
+                            type=column_to_dim_name.get(column_name.upper(), dim_type),
+                            column=column_name,
+                            field="",
+                            value=num_value,
+                        ))
+                        logger.info(f"[IntentRouter] 数字兜底查到维度: {num_value} -> {dim_type}({column_name})")
+                        break  # 只取第一个匹配
+
         return mql
 
     async def _llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema],
@@ -719,6 +877,8 @@ class IntentRouter:
                 clarification_message = "抱歉，我没有理解您的问题，请换一种方式描述？"
 
             # 2. 检查是否有泛指维度需要追问（返回兜底数据 + 引导细化）
+            # ===== 新增：校验泛指维度是否为具体维度值 =====
+            mql = self._validate_generic_dimensions(mql, question)
             generic_check = self._check_generic_dimensions(mql, question)
             if generic_check.get("is_generic"):
                 # 泛指维度：设置追问引导，但仍然继续执行返回数据

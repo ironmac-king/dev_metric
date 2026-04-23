@@ -369,14 +369,32 @@ LIMIT 20
         """
         logger.info(f"[_build_mom_sql] Building MoM/YOY SQL")
 
+        # 0. 去除 mql.dimensions 中的重复项（相同 type + value 只保留一个）
+        seen_dims = set()
+        unique_dimensions = []
+        for dim in mql.dimensions:
+            dim_key = (dim.type, dim.value)
+            if dim_key not in seen_dims:
+                seen_dims.add(dim_key)
+                unique_dimensions.append(dim)
+        mql.dimensions = unique_dimensions
+        logger.info(f"[_build_mom_sql] 去重后维度: {[(d.type, d.value) for d in mql.dimensions]}")
+
         # 1. 获取业务维度列（不包括 YEARS, MONTHS）
+        # 注意：只有当维度没有具体值时才加入 GROUP BY
+        # 如果维度有具体值（如 GROUP_2 = '智能云存储'），已经通过 WHERE 过滤，不需要 GROUP BY
         dim_columns = []
         for dim in mql.dimensions:
             col = dim.column
             if not col:
                 col = self._get_dimension_column(dim.type)
             if col:
-                dim_columns.append(col)
+                # 只有当维度没有具体值时才加入 GROUP BY
+                if not dim.value:
+                    dim_columns.append(col)
+                    logger.info(f"[_build_mom_sql] 维度 {col} 无具体值，加入 GROUP BY")
+                else:
+                    logger.info(f"[_build_mom_sql] 维度 {col} = '{dim.value}' 有具体值，不加入 GROUP BY")
 
         # 2. 获取当前周期时间条件
         current_where = self._build_where(mql)
@@ -488,8 +506,20 @@ LIMIT 20
         #      让两个月的数据直接聚合在一起计算 change_rate
         current_cond = current_where[6:].strip() if current_where.upper().startswith('WHERE') else current_where
 
+        # ========== 提取纯时间条件（用于 WHERE 的 OR 部分） ==========
+        # current_cond 包含 time + filters + dimensions，需要分离
+        # 时间条件格式: FDATE >= '...' AND FDATE <= '...'
+        import re
+        time_pattern = r"(FDATE >= '(\d{4}-\d{2}-\d{2})' AND FDATE <= '(\d{4}-\d{2}-\d{2})')"
+        time_match = re.search(time_pattern, current_cond)
+        if time_match:
+            current_time_cond = time_match.group(1)  # e.g., "FDATE >= '2026-04-01' AND FDATE <= '2026-04-23'"
+        else:
+            current_time_cond = current_cond  # fallback
+        # =====================================================================
+
         # 6. 构建对比周期条件（只有当对比周期有效时才添加）
-        # 注意：compare_where 必须包含与 current_where 相同的 filters，否则对比基数不一致
+        # 注意：compare_where 必须包含与 current_where 相同的 filters 和 dimensions，否则对比基数不一致
         has_valid_compare = bool(compare_start and compare_end)
         if has_valid_compare:
             # 从 mql.filters 构建过滤条件（使用安全方法防止 SQL 注入）
@@ -513,15 +543,50 @@ LIMIT 20
                         if isinstance(f.value, list) and len(f.value) == 2:
                             filter_parts.append(f"{safe_field} BETWEEN '{self._sanitize_value(f.value[0])}' AND '{self._sanitize_value(f.value[1])}'")
 
+            # 维度过滤（用于确保 compare 周期也有维度过滤）
+            dim_filter_parts = []
+            for dim in mql.dimensions:
+                if dim.value:
+                    col = dim.column
+                    if not col:
+                        col = self._get_dimension_column(dim.type)
+                    if col:
+                        safe_col = self._validate_field_name(col)
+                        dim_filter_parts.append(f"{safe_col} = '{self._sanitize_value(dim.value)}'")
+
             time_cond = f"(FDATE >= '{compare_start}' AND FDATE <= '{compare_end}')"
-            if filter_parts:
-                filter_cond = " AND ".join(filter_parts)
+            # 合并 filter 和 dimension
+            all_filter_parts = filter_parts + dim_filter_parts
+            if all_filter_parts:
+                filter_cond = " AND ".join(all_filter_parts)
                 compare_where = f"({time_cond} AND {filter_cond})"
             else:
                 compare_where = time_cond
         else:
             # 没有有效对比周期时，compare_where 为空字符串，后续 SQL 构建会处理
             compare_where = ""
+
+        # ========== 构建 WHERE 条件 ==========
+        # 重要：WHERE 必须只包含时间条件，不能加维度！
+        # 因为我们需要扫描所有维度值的数据，然后通过 GROUP BY 聚合到特定维度
+        # 如果 WHERE 加了维度，就会漏掉其他维度值的数据
+        #
+        # CASE WHEN 条件需要同时包含时间+维度，因为每个 SUM 要分别计算正确
+        # current_cond 本身已经包含时间+维度（来自 _build_where），所以 CASE WHEN 直接用它即可
+
+        # 提取纯时间条件（用于 WHERE）
+        import re
+        time_pattern = r"(FDATE >= '(\d{4}-\d{2}-\d{2})' AND FDATE <= '(\d{4}-\d{2}-\d{2})')"
+        time_match = re.search(time_pattern, current_cond)
+        if time_match:
+            current_time_only = time_match.group(1)
+        else:
+            current_time_only = current_cond
+
+        # WHERE 只用纯时间条件
+        where_current = current_time_only
+        where_compare = f"(FDATE >= '{compare_start}' AND FDATE <= '{compare_end}')" if has_valid_compare else ""
+        # ========================================================
 
         if dim_columns:
             # 有业务维度，按业务维度 + MONTHS 分组

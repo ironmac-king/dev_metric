@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, List
 from transformers import AutoTokenizer, AutoModel
 
 from ai.config.logging_config import get_logger
+from ai.services.dimension_service import DimensionService
 
 logger = get_logger("ai.llm_v2.local_intent_model")
 
@@ -105,6 +106,7 @@ class LocalJointIntentModel:
 
         self.model_path = model_path
         self._load_model()
+        self._build_rule_dict()  # 构建规则词典
 
     def _load_model(self):
         """加载模型、tokenizer、标签映射"""
@@ -206,8 +208,8 @@ class LocalJointIntentModel:
                 ner_probs = torch.softmax(outputs['ner_logits'], dim=2)
                 ner_preds = torch.argmax(ner_probs, dim=2)[0].cpu().numpy()
 
-                # 解码 NER
-                entities = self._decode_ner(inputs, ner_preds)
+                # 解码 NER（传入原始 question 用于规则纠偏）
+                entities = self._decode_ner(inputs, ner_preds, question)
 
                 # 意图映射
                 local_intent = self.id2intent.get(intent_pred_idx, self.intents[intent_pred_idx])
@@ -240,7 +242,7 @@ class LocalJointIntentModel:
                 'error': str(e)
             }
 
-    def _decode_ner(self, inputs, ner_preds) -> List[Dict[str, Any]]:
+    def _decode_ner(self, inputs, ner_preds, original_text: str = None) -> List[Dict[str, Any]]:
         """解码 NER 预测结果"""
         entities = []
 
@@ -334,6 +336,10 @@ class LocalJointIntentModel:
                 seen.add(key)
                 unique_entities.append(e)
 
+        # 规则纠偏：用词典匹配修正实体边界（使用原始文本）
+        text = original_text if original_text else self.tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)
+        unique_entities = self._rule_based_correct(text, unique_entities)
+
         return unique_entities
 
     def _convert_tokens_to_string(self, tokens: List[str]) -> str:
@@ -381,6 +387,138 @@ class LocalJointIntentModel:
             return False
 
         return True
+
+    def _build_rule_dict(self):
+        """构建规则匹配的词典（从业务术语表加载同义词等）"""
+        self.rule_entities = {'TIME': set(TIME_EXPRESSIONS), 'METRIC': set(), 'DIM_VALUE': set(), 'PLATFORM': set(), 'FULFILL': set()}
+
+        # 常见指标作为兜底
+        common_metrics = ['销售额', 'GMV', '销量', '收入', '利润', '成本', 'ACOS', 'ROAS', 'CPC', 'CTR', '曝光量', '点击量', '会话量', '订单量', '转化率', '客单价', '毛利率', '净利率', '业绩', '利润额']
+        for m in common_metrics:
+            self.rule_entities['METRIC'].add(m)
+
+        # 尝试从 Go API 加载业务术语同义词
+        try:
+            import httpx
+            response = httpx.get('http://localhost:8080/api/v1/metadata/terms', timeout=5)
+            if response.status_code == 200:
+                terms = response.json().get('data', [])
+                for term_info in terms:
+                    term = term_info.get('term', '')
+                    synonyms = term_info.get('synonyms', '')
+                    if term:
+                        if term not in self.rule_entities['METRIC']:
+                            self.rule_entities['METRIC'].add(term)
+                    # 解析同义词（可能是字符串或列表）
+                    if synonyms:
+                        if isinstance(synonyms, list):
+                            for syn in synonyms:
+                                if syn and len(syn) >= 2:
+                                    self.rule_entities['METRIC'].add(syn)
+                        elif isinstance(synonyms, str):
+                            for syn in synonyms.split(','):
+                                syn = syn.strip()
+                                if syn and len(syn) >= 2:
+                                    self.rule_entities['METRIC'].add(syn)
+                logger.info(f"[LocalJointIntentModel] 从 API 加载了 {len(terms)} 个业务术语")
+        except Exception as e:
+            logger.warning(f"[LocalJointIntentModel] 加载业务术语失败: {e}")
+
+        # 尝试从 Go API 加载维度值（遍历所有 column_name）
+        try:
+            dim_service = DimensionService()
+            # 先获取所有 column_name + dimension_type 对
+            all_types = dim_service.get_all_types(use_cache=True)
+            total_values = 0
+            for type_info in all_types:
+                column_name = type_info.get('column_name', '')
+                if not column_name:
+                    continue
+                # 跳过空 dimension_value 的记录
+                values = dim_service.get_by_column_name(column_name, use_cache=True)
+                for item in values:
+                    val = item.get('dimension_value', '')
+                    if val and len(val) >= 2:
+                        self.rule_entities['DIM_VALUE'].add(val)
+                total_values += len(values)
+            logger.info(f"[LocalJointIntentModel] 从 {len(all_types)} 个列加载了 {total_values} 个维度值")
+        except Exception as e:
+            logger.warning(f"[LocalJointIntentModel] 加载维度值失败: {e}")
+
+        # 平台和履约类型
+        platform_fulfill = {
+            'PLATFORM': ['Amazon', '亚马逊', 'eBay', 'EBay', 'AliExpress', '速卖通', 'Wish', 'Shopee', '虾皮', 'Lazada', 'MercadoLibre'],
+            'FULFILL': ['FBA', 'FBM', 'MFN', 'SFP']
+        }
+        for etype, values in platform_fulfill.items():
+            for v in values:
+                self.rule_entities[etype].add(v)
+
+        logger.info(f"[LocalJointIntentModel] 规则词典: METRIC={len(self.rule_entities['METRIC'])}, DIM_VALUE={len(self.rule_entities['DIM_VALUE'])}, TIME={len(self.rule_entities['TIME'])}")
+
+    def _rule_based_correct(self, text: str, model_entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        用规则词典修正实体边界
+        1. 主动在文本中查找所有词典条目
+        2. 与模型预测合并，优先使用词典匹配
+        """
+        model_set = set()
+        for e in model_entities:
+            model_set.add((e['text'], e['type'], e['start'], e['end']))
+
+        # 主动匹配：遍历词典，在文本中查找
+        rule_matches = []
+        for etype, dict_values in self.rule_entities.items():
+            for val in dict_values:
+                start = 0
+                while True:
+                    pos = text.find(val, start)
+                    if pos < 0:
+                        break
+                    rule_matches.append({
+                        'text': val,
+                        'type': etype,
+                        'start': pos,
+                        'end': pos + len(val)
+                    })
+                    start = pos + 1
+
+        # 合并：词典匹配优先，模型预测补充
+        all_entities = []
+        covered_ranges = []
+
+        # 先加入词典匹配（更长更准确）
+        for rm in sorted(rule_matches, key=lambda x: -len(x['text'])):
+            all_entities.append(rm)
+            covered_ranges.append((rm['start'], rm['end']))
+
+        # 补充模型预测中与词典不重叠的实体
+        for e in model_entities:
+            overlaps = False
+            for c_start, c_end in covered_ranges:
+                if not (e['end'] <= c_start or e['start'] >= c_end):
+                    overlaps = True
+                    break
+            if not overlaps:
+                all_entities.append(e)
+                covered_ranges.append((e['start'], e['end']))
+
+        # 去重（同类型、同文本）
+        seen = set()
+        final = []
+        for e in all_entities:
+            key = (e['text'], e['type'])
+            if key not in seen:
+                seen.add(key)
+                final.append(e)
+
+        # 按 start 排序
+        final.sort(key=lambda x: x['start'])
+
+        # 过滤太短的实体（长度 < 2）
+        final = [e for e in final if len(e['text']) >= 2]
+
+        return final
 
 
 # ============== 单例模式 ==============

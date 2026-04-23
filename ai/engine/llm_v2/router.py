@@ -106,7 +106,9 @@ async def ask_question_v2(req: AskRequestV2):
         inherited_mql = v2_session_mql.get(session_id)
         if inherited_mql:
             state.inherited_mql = inherited_mql
-            logger.info(f"[V2] 恢复上轮 MQL: session_id={session_id}, intent={inherited_mql.intent.value if inherited_mql else 'N/A'}")
+            logger.info(f"[V2] 恢复上轮 MQL: session_id={session_id}, intent={inherited_mql.intent.value if inherited_mql else 'N/A'}, metric={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}, dims={[(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else None}")
+        else:
+            logger.info(f"[V2] 未找到上轮 MQL: session_id={session_id}, v2_session_mql keys={list(v2_session_mql.keys())}")
 
         # 2. 获取 V2 Graph
         v2_graph = get_v2_graph()
@@ -193,9 +195,11 @@ async def ask_question_v2(req: AskRequestV2):
         logger.info(f"[V2] 回答完成: {response.answer[:50]}..., 耗时 {duration_ms}ms")
 
         # 保存当前 MQL 到 session store（用于多轮对话上下文继承）
+        _saved_session_info = f"session_id={session_id}, keys={list(v2_session_mql.keys())}"
         if result_state and result_state.mql:
             v2_session_mql[session_id] = result_state.mql
-            logger.info(f"[V2] 保存 MQL 到 session: session_id={session_id}, intent={result_state.mql.intent.value if result_state.mql.intent else 'N/A'}, dimensions={[d.type for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}")
+            _saved_session_info = f"session_id={session_id}, saved_metric={result_state.mql.metric.name if result_state.mql.metric else None}, saved_dims={[(d.type, d.value) for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}"
+            logger.info(f"[V2] 保存 MQL 到 session: {_saved_session_info}")
 
         return response
 

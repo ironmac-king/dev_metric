@@ -539,6 +539,7 @@ class V2State:
     current_step: str = ""             # 当前步骤
     retry_count: int = 0              # 重试次数
     max_retries: int = 3              # 最大重试次数
+    source: str = ""                  # 数据来源：followup=追问，llm=LLM生成，local_model=本地模型
 
     # ===== 泛指维度处理 =====
     is_generic_result: bool = False   # 是否为泛指默认结果
