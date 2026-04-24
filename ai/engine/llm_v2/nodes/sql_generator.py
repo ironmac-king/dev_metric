@@ -67,7 +67,7 @@ class SQLGeneratorNode:
         "商品类": "GROUP_3",
         "产品类": "GROUP_3",
         "店铺": "FSITE",
-        "站点": "FSITECODE",
+        "站点": "FSITE",
         "平台": "PLATFORM",
         "渠道": "FCHANNEL",
         "商品": "SKU",
@@ -113,9 +113,9 @@ class SQLGeneratorNode:
                 if m.get("status") == 1 and m.get("dimension_type") and m.get("column_name"):
                     dim_type = m["dimension_type"]
                     col_name = m["column_name"]
-                    if dim_type not in self.DIMENSION_COLUMN_MAP:
-                        self.DIMENSION_COLUMN_MAP[dim_type] = col_name
-                        logger.info(f"[SQLGenerator] 加载维度映射: {dim_type} -> {col_name}")
+                    # API 返回的映射应覆盖硬编码（API 是最新配置）
+                    self.DIMENSION_COLUMN_MAP[dim_type] = col_name
+                    logger.info(f"[SQLGenerator] 加载维度映射: {dim_type} -> {col_name}")
             logger.info(f"[SQLGenerator] 共加载 {len(mappings)} 个维度类型映射")
         except Exception as e:
             logger.warning(f"[SQLGenerator] 加载维度类型映射失败，使用硬编码映射: {e}")
@@ -804,6 +804,10 @@ WHERE ( {current_cond} )
         if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
             if self.COL_MONTHS not in select_parts:
                 select_parts.append(f"MONTH(FDATE) AS MONTHS")
+            # 同时添加日期范围（方便前端显示）
+            if "MONTH(FDATE)" in " ".join(select_parts) and "FDATE_START" not in " ".join(select_parts):
+                select_parts.append(f"MIN(FDATE) AS FDATE_START")
+                select_parts.append(f"MAX(FDATE) AS FDATE_END")
 
         # 检查占比模式（percentage）：生成 分子 * 100.0 / 分母 SQL
         has_percentage = any(
@@ -832,12 +836,88 @@ WHERE ( {current_cond} )
                     return alias
                 return default_field
 
-            mol_field = _extract_field_from_sql(mol.starrocks_sql, mol.field or "REFUND_QTY")
-            den_field = _extract_field_from_sql(den.starrocks_sql, den.field or "ORDERED_PRODUCTSALES")
-            mol_agg = mol.aggregation.value if hasattr(mol.aggregation, 'value') else (mol.aggregation or "SUM")
-            den_agg = den.aggregation.value if hasattr(den.aggregation, 'value') else (den.aggregation or "SUM")
+            # 从 starrocks_sql 解析完整表达式（用于占比计算）
+            # 关键：对于复合指标（如 SUM(IFNULL(...)) 或 a/b），需要提取完整的原始表达，
+            # 而不是再次包装聚合函数，�l剔会导致 SUM(SUM(...)) 括号嵌埋问题
+            def _extract_raw_expression(starrocks_sql, default_field):
+                if not starrocks_sql:
+                    return default_field
+                sql_upper = starrocks_sql.strip().upper()
+                # 情况1: 以 SELECT 开头 - 尝试提取完整表达式
+                if sql_upper.startswith('SELECT'):
+                    # 检查是否是复合指标（包含 /, *, IFNULL, ISNULL, COALESCE）
+                    if any(kw in sql_upper for kw in ['/', '*', 'IFNULL', 'ISNULL', 'COALESCE']):
+                        # 复合指标：从 SELECT expr AS alias FROM ... 提取 expr
+                        match = re.search(r'SELECT\s+(.+?)\s+AS\s+[`\[]?[\w\u4e00-\u9fff]+[`\]]?\s+FROM', sql_upper, re.IGNORECASE | re.DOTALL)
+                        if match:
+                            expr = match.group(1).strip()
+                            logger.info(f'[_build_select] 占比复合指标 expr: {expr}')
+                            return expr
+                        # 回退：按 FROM 分割
+                        parts = re.split(r'\s+FROM\s+', sql_upper, flags=re.IGNORECASE)
+                        if len(parts) >= 2:
+                            select_part = ' FROM '.join(parts[:-1])
+                            if select_part.upper().startswith('SELECT'):
+                                select_part = select_part[6:].strip()
+                            alias_match = re.search(r'\s+AS\s+[\w\u4e00-\u9fff]+\s*$', select_part, re.IGNORECASE)
+                            if alias_match:
+                                select_part = select_part[:alias_match.start()].strip()
+                            return select_part
+                    # 非复合 SELECT：提取聚合函数内的字段
+                    match = re.search(r'(?:SUM|AVG|COUNT|MAX|MIN)\s*\(\s*(\w+)\s*\)', sql_upper)
+                    if match:
+                        return match.group(1)
+                    return default_field
+                # 情况2: 裸字段名（如 "REFUND_QTY"）- 直接返回
+                # 这种情况下 _ensure_sum 会负责包装 SUM
+                if not any(kw in sql_upper for kw in ['(', 'SELECT', 'FROM', 'WHERE', 'CASE']):
+                    return starrocks_sql.strip()
+                # 情况3: 其他情况（如 "SUM(REFUND_QTY)" 不带 SELECT/FROM）
+                match = re.search(r'(?:SUM|AVG|COUNT|MAX|MIN)\s*\(\s*(\w+)\s*\)', sql_upper)
+                if match:
+                    return match.group(1)
+                return default_field
+
+            # 当 molecule_metric 的 starrocks_sql 为空时，从主指标的 starrocks_sql 解析分子/分母表达式
+            # 这是核心修复：避免 LLM 生成的 name 不匹配数据库时，用了错误的默认字段
+            def _extract_from_main_metric(main_sql, target="molecule"):
+                """从主指标的 starrocks_sql 解析分子或分母表达式"""
+                if not main_sql:
+                    return None
+                sql_upper = main_sql.strip().upper()
+                if not sql_upper.startswith('SELECT'):
+                    return None
+                # 匹配 "分子: SUM(xxx)" 或 "分母: / SUM(yyy)" 模式
+                if target == "分子":
+                    # 找 / 前面的聚合表达式（分子）
+                    match = re.search(r'(?:^|[+\-*/\s])(\(?\s*(?:SUM|AVG|COUNT|MAX|MIN)\s*\([^)]+\))', sql_upper, re.IGNORECASE)
+                    if match:
+                        expr = match.group(1).strip()
+                        logger.info(f"[_build_select] 从主指标SQL解析分子: {expr}")
+                        return expr
+                elif target == "分母":
+                    # 找 / 后面的聚合表达式（分母）
+                    match = re.search(r'/\s*(\(?\s*(?:SUM|AVG|COUNT|MAX|MIN)\s*\([^)]+\))', sql_upper, re.IGNORECASE)
+                    if match:
+                        expr = match.group(1).strip()
+                        logger.info(f"[_build_select] 从主指标SQL解析分母: {expr}")
+                        return expr
+                return None
+                return None
+
+            # 优先使用各自 metric 的 starrocks_sql（validator 已填充），否则从主指标 SQL 解析
+            mol_sql = mol.starrocks_sql or _extract_from_main_metric(mql.metric.starrocks_sql if mql.metric else None, "分子")
+            den_sql = den.starrocks_sql or _extract_from_main_metric(mql.metric.starrocks_sql if mql.metric else None, "分母")
+            mol_expr = _extract_raw_expression(mol_sql, mol.field or "REFUND_QTY")
+            den_expr = _extract_raw_expression(den_sql, den.field or "ORDERED_PRODUCTSALES")
             # 生成占比表达式（使用 ABS 取绝对值，因为退款数据可能是负数）
-            ratio_expr = f"ABS({mol_agg}({mol_field}) * 100.0 / {den_agg}({den_field}))"
+            # 如果是简单字段（非聚合表达式），需要包装 SUM()
+            def _ensure_sum(expr):
+                stripped = expr.strip().upper()
+                if any(stripped.startswith(agg) for agg in ['SUM(', 'AVG(', 'COUNT(', 'MAX(', 'MIN(']):
+                    return expr
+                return f"SUM({expr})"
+            ratio_expr = f"ABS({_ensure_sum(mol_expr)} * 100.0 / {_ensure_sum(den_expr)})"
             # 构造占比名称：分子 + "占" + 分母 + "比重"
             if mol.name and den.name:
                 ratio_name = f"{mol.name}占{den.name}比重"
@@ -846,7 +926,7 @@ WHERE ( {current_cond} )
             else:
                 ratio_name = "占比"
             select_parts.append(f"{ratio_expr} AS {ratio_name}")
-            logger.info(f"[_build_select] 占比模式: {mol_agg}({mol_field}) * 100.0 / {den_agg}({den_field})")
+            logger.info(f"[_build_select] 占比模式: {mol_expr} * 100.0 / {den_expr}")
         # 添加指标列
         elif mql.metric:
             logger.info(f"[_build_select] metric.starrocks_sql={repr(mql.metric.starrocks_sql[:80] if mql.metric.starrocks_sql else '')}, metric.field={repr(mql.metric.field)}")
@@ -948,9 +1028,15 @@ WHERE ( {current_cond} )
                 if mql.time.end:
                     where_parts.append(f"FDATE <= '{mql.time.end}'")
             elif mql.time.type == TimeType.RELATIVE:
-                # 解析相对时间
-                if mql.time.original:
-                    where_parts.append(self._parse_relative_time(mql.time.original))
+                # 优先使用已计算的 start/end（来自 MQL generator 的 TimeParser.parse）
+                # 避免重新解析导致日期被 datetime.now() 覆盖
+                if mql.time.start and mql.time.end:
+                    where_parts.append(f"FDATE >= '{mql.time.start}'")
+                    where_parts.append(f"FDATE <= '{mql.time.end}'")
+                elif mql.time.original:
+                    # 只有在没有 start/end 时才重新解析
+                    date_range = self._parse_relative_time(mql.time.original, mql)
+                    where_parts.append(date_range)
 
         # 筛选条件
         for filter_obj in mql.filters:
@@ -988,53 +1074,353 @@ WHERE ( {current_cond} )
             return "WHERE " + " AND ".join(where_parts)
         return ""
 
-    def _parse_relative_time(self, original: str) -> str:
-        """解析相对时间表达式"""
+    def _parse_relative_time(self, original: str, mql=None) -> str:
+        """解析相对时间表达式，同时设置 mql.time.start/end 供前端显示"""
+        import re
         from datetime import datetime, timedelta
+        from calendar import monthrange
+
+        logger.info(f"[_parse_relative_time] 收到时间表达式: '{original}'")
 
         today = datetime.now()
 
+        # 用于设置 mql.time.start/end
+        computed_start = None
+        computed_end = None
+
+        def set_date_range(start_date, end_date):
+            """设置 mql.time.start/end（如果提供了 mql）"""
+            nonlocal computed_start, computed_end
+            computed_start = start_date.strftime("%Y-%m-%d") if isinstance(start_date, datetime) else str(start_date)
+            computed_end = end_date.strftime("%Y-%m-%d") if isinstance(end_date, datetime) else str(end_date)
+            logger.info(f"[set_date_range] Setting time: start={computed_start}, end={computed_end}, mql has time: {mql and hasattr(mql, 'time')}")
+            if mql and hasattr(mql, 'time'):
+                mql.time.start = computed_start
+                mql.time.end = computed_end
+                logger.info(f"[set_date_range] After setting, mql.time.start={mql.time.start}, mql.time.end={mql.time.end}")
+
+        def get_date_range_sql(start_date, end_date):
+            """返回 SQL 字符串并设置 computed_start/end"""
+            set_date_range(start_date, end_date)
+            return f"{self.COL_DATE} >= '{computed_start}' AND {self.COL_DATE} <= '{computed_end}'"
+
+        # ===== 辅助函数 =====
+        def get_month_start(year, month):
+            return datetime(year, month, 1)
+
+        def get_month_end(year, month):
+            _, last_day = monthrange(year, month)
+            return datetime(year, month, last_day)
+
+        def get_quarter_start(year, quarter):
+            month = (quarter - 1) * 3 + 1
+            return datetime(year, month, 1)
+
+        def get_quarter_end(year, quarter):
+            month = quarter * 3
+            _, last_day = monthrange(year, month)
+            return datetime(year, month, last_day)
+
+        # ===== 本周/上周/下周的基准计算 =====
+        days_since_monday = today.weekday()
+        this_monday = today - timedelta(days=days_since_monday)
+        this_sunday = this_monday + timedelta(days=6)
+
+        # ===== 今日/昨天/明天系列 =====
+        # 今日/今天
+        if "今日" in original or "今天" in original:
+            return get_date_range_sql(today, today)
+
+        # 昨日/昨天
+        if "昨日" in original or "昨天" in original:
+            yesterday = today - timedelta(days=1)
+            return get_date_range_sql(yesterday, yesterday)
+
+        # 前日/前天
+        if "前日" in original or "前天" in original:
+            day_before_yesterday = today - timedelta(days=2)
+            return get_date_range_sql(day_before_yesterday, day_before_yesterday)
+
+        # 大前日/大前天
+        if "大前日" in original or "大前天" in original:
+            day = today - timedelta(days=3)
+            return get_date_range_sql(day, day)
+
+        # 明日/明天
+        if "明日" in original or "明天" in original:
+            tomorrow = today + timedelta(days=1)
+            return get_date_range_sql(tomorrow, tomorrow)
+
+        # 后日/后天
+        if "后日" in original or "后天" in original:
+            day = today + timedelta(days=2)
+            return get_date_range_sql(day, day)
+
+        # 大后日/大后天
+        if "大后日" in original or "大后天" in original:
+            day = today + timedelta(days=3)
+            return get_date_range_sql(day, day)
+
+        # ===== 近N天 =====
+        # 近一年 -> 近12个月（提前转换）
+        if "近一年" in original:
+            original = original.replace("近一年", "近12个月")
+        # 近半年 -> 近6个月
+        if "近半年" in original:
+            original = original.replace("近半年", "近6个月")
+        # 半年（不是"近半年"）-> 近6个月
+        elif "半年" in original:
+            original = original.replace("半年", "近6个月")
+
+        match = re.search(r'近(\d+)天', original)
+        if match:
+            days = int(match.group(1))
+            start = today - timedelta(days=days-1)
+            return get_date_range_sql(start, today)
+
+        # ===== 近N个月 =====
+        match = re.search(r'近(\d+)个月', original)
+        if match:
+            months = int(match.group(1))
+            # 计算开始月份：往回推 N-1 个月（因为包含本月）
+            target_month = today.month - months + 1
+            target_year = today.year
+            while target_month <= 0:
+                target_month += 12
+                target_year -= 1
+            start = get_month_start(target_year, target_month)
+            return get_date_range_sql(start, today)
+
+        # ===== 本周/上周/下周 =====
+        # 本周
+        if "本周" in original or "本周初" in original:
+            return get_date_range_sql(this_monday, today)
+
+        # 上周
+        if "上周" in original:
+            last_monday = this_monday - timedelta(days=7)
+            last_sunday = last_monday + timedelta(days=6)
+            return get_date_range_sql(last_monday, last_sunday)
+
+        # 上上周（上上周 = 上周的上周）
+        if "上上周" in original:
+            last_monday = this_monday - timedelta(days=14)
+            last_sunday = last_monday + timedelta(days=6)
+            return get_date_range_sql(last_monday, last_sunday)
+
+        # 下周
+        if "下周" in original:
+            next_monday = this_monday + timedelta(days=7)
+            next_sunday = next_monday + timedelta(days=6)
+            return get_date_range_sql(next_monday, next_sunday)
+
+        # 下下周（下下周 = 下周的下周）
+        if "下下周" in original:
+            next_monday = this_monday + timedelta(days=14)
+            next_sunday = next_monday + timedelta(days=6)
+            return get_date_range_sql(next_monday, next_sunday)
+
+        # 周末
+        if "周末" in original:
+            # 本周末（如果今天已经是周末则返回今天，否则返回本周日）
+            return get_date_range_sql(this_sunday, this_sunday)
+
+        # ===== 本月/上月/下月 =====
+        # 本月
         if "本月" in original:
-            start = today.replace(day=1).strftime("%Y-%m-%d")
-            end = today.strftime("%Y-%m-%d")
-            return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
-        elif "上月" in original:
-            first_day_this_month = today.replace(day=1)
-            last_day_last_month = first_day_this_month - timedelta(days=1)
-            start = last_day_last_month.replace(day=1).strftime("%Y-%m-%d")
-            end = last_day_last_month.strftime("%Y-%m-%d")
-            return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
-        elif "近7天" in original:
-            start = (today - timedelta(days=6)).strftime("%Y-%m-%d")
-            end = today.strftime("%Y-%m-%d")
-            return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
-        elif "近30天" in original:
-            start = (today - timedelta(days=29)).strftime("%Y-%m-%d")
-            end = today.strftime("%Y-%m-%d")
-            return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
-        elif "本季度" in original or "本季" in original:
-            # 计算当前季度：Q1(1-3月), Q2(4-6月), Q3(7-9月), Q4(10-12月)
-            quarter = (today.month - 1) // 3
-            quarter_start_month = quarter * 3 + 1
-            # 季度末：下季度第一天减一天
-            next_quarter_month = quarter_start_month + 3
-            next_quarter_year = today.year
-            if next_quarter_month > 12:
-                next_quarter_month -= 12
-                next_quarter_year += 1
-            quarter_end = datetime(next_quarter_year, next_quarter_month, 1) - timedelta(days=1)
-            start = today.replace(month=quarter_start_month, day=1).strftime("%Y-%m-%d")
-            end = quarter_end.strftime("%Y-%m-%d")
-            return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
-        elif "本年" in original or "今年" in original:
-            start = today.replace(month=1, day=1).strftime("%Y-%m-%d")
-            end = today.strftime("%Y-%m-%d")
-            return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
-        else:
-            # 默认本月
-            start = today.replace(day=1).strftime("%Y-%m-%d")
-            end = today.strftime("%Y-%m-%d")
-            return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
+            return get_date_range_sql(get_month_start(today.year, today.month), today)
+
+        # 上上个月（必须优先于"上月"检查，避免"上上个月"被误判为"上月"）
+        if "上上个月" in original or "上上月" in original:
+            # 上上月 = 上上个月 = 上月的上个月 = 上月再往前一个月
+            if today.month <= 2:
+                month = 12 + today.month - 2
+                year = today.year - 1
+            else:
+                month = today.month - 2
+                year = today.year
+            start = get_month_start(year, month)
+            end = get_month_end(year, month)
+            return get_date_range_sql(start, end)
+
+        # 上月
+        if "上月" in original:
+            if today.month == 1:
+                start = get_month_start(today.year - 1, 12)
+                end = get_month_end(today.year - 1, 12)
+            else:
+                start = get_month_start(today.year, today.month - 1)
+                end = get_month_end(today.year, today.month - 1)
+            return get_date_range_sql(start, end)
+
+        # 下月
+        if "下月" in original:
+            if today.month == 12:
+                start = get_month_start(today.year + 1, 1)
+                end = get_month_end(today.year + 1, 1)
+            else:
+                start = get_month_start(today.year, today.month + 1)
+                end = get_month_end(today.year, today.month + 1)
+            return get_date_range_sql(start, end)
+
+        # 下下月
+        if "下下月" in original:
+            if today.month == 11:
+                start = get_month_start(today.year + 1, 1)
+                end = get_month_end(today.year + 1, 2)
+            elif today.month == 12:
+                start = get_month_start(today.year + 1, 2)
+                end = get_month_end(today.year + 1, 3)
+            else:
+                start = get_month_start(today.year, today.month + 2)
+                end = get_month_end(today.year, today.month + 2)
+            return get_date_range_sql(start, end)
+
+        # 月初/月中/月末（相对于本月）
+        if "月初" in original:
+            start = get_month_start(today.year, today.month)
+            return get_date_range_sql(start, today)
+        if "月中" in original:
+            # 每月15日
+            day = min(15, today.day)
+            start = datetime(today.year, today.month, day)
+            return get_date_range_sql(start, today)
+        if "月末" in original or "月末" in original:
+            end = get_month_end(today.year, today.month)
+            return get_date_range_sql(today.replace(day=1), end)
+
+        # ===== 本季度/上季度/下季度 =====
+        current_quarter = (today.month - 1) // 3 + 1
+
+        # 本季度
+        if "本季度" in original or "本季" in original:
+            start = get_quarter_start(today.year, current_quarter)
+            return get_date_range_sql(start, today)
+
+        # 上季度
+        if "上季度" in original:
+            if current_quarter == 1:
+                start = get_quarter_start(today.year - 1, 4)
+                end = get_quarter_end(today.year - 1, 4)
+            else:
+                start = get_quarter_start(today.year, current_quarter - 1)
+                end = get_quarter_end(today.year, current_quarter - 1)
+            return get_date_range_sql(start, end)
+
+        # 下季度
+        if "下季度" in original:
+            if current_quarter == 4:
+                start = get_quarter_start(today.year + 1, 1)
+                end = get_quarter_end(today.year + 1, 1)
+            else:
+                start = get_quarter_start(today.year, current_quarter + 1)
+                end = get_quarter_end(today.year, current_quarter + 1)
+            return get_date_range_sql(start, end)
+
+        # 季初/季末
+        if "季初" in original:
+            start = get_quarter_start(today.year, current_quarter)
+            return get_date_range_sql(start, today)
+        if "季末" in original:
+            end = get_quarter_end(today.year, current_quarter)
+            start = get_quarter_start(today.year, current_quarter)
+            return get_date_range_sql(start, end)
+
+        # ===== Q1/Q2/Q3/Q4、1季度~4季度 =====
+        # Q1-Q4 格式
+        quarter_map = {'Q1': 1, 'Q2': 2, 'Q3': 3, 'Q4': 4}
+        for q_name, q_num in quarter_map.items():
+            if q_name in original:
+                start = get_quarter_start(today.year, q_num)
+                end = get_quarter_end(today.year, q_num)
+                return get_date_range_sql(start, end)
+
+        # 1季度-4季度 格式
+        match = re.search(r'(\d)季度', original)
+        if match:
+            q_num = int(match.group(1))
+            if 1 <= q_num <= 4:
+                start = get_quarter_start(today.year, q_num)
+                end = get_quarter_end(today.year, q_num)
+                return get_date_range_sql(start, end)
+
+        # ===== 本年/去年/明年 =====
+        # 本年/今年
+        if "本年" in original or "今年" in original:
+            start = get_month_start(today.year, 1)
+            return get_date_range_sql(start, today)
+
+        # 去年/上年
+        if "去年" in original or "上年" in original:
+            start = get_month_start(today.year - 1, 1)
+            end = get_month_end(today.year - 1, 12)
+            return get_date_range_sql(start, end)
+
+        # 明年
+        if "明年" in original:
+            start = get_month_start(today.year + 1, 1)
+            end = get_month_end(today.year + 1, 12)
+            return get_date_range_sql(start, end)
+
+        # 前年
+        if "前年" in original:
+            start = get_month_start(today.year - 2, 1)
+            end = get_month_end(today.year - 2, 12)
+            return get_date_range_sql(start, end)
+
+        # 后年
+        if "后年" in original:
+            start = get_month_start(today.year + 2, 1)
+            end = get_month_end(today.year + 2, 12)
+            return get_date_range_sql(start, end)
+
+        # 年初
+        if "年初" in original:
+            start = get_month_start(today.year, 1)
+            return get_date_range_sql(start, today)
+
+        # 年末/年终
+        if "年末" in original or "年终" in original:
+            end = get_month_end(today.year, 12)
+            return get_date_range_sql(today.replace(month=1, day=1), end)
+
+        # ===== 上半年/下半年 =====
+        if "上半年" in original:
+            start = get_month_start(today.year, 1)
+            end = get_month_end(today.year, 6)
+            return get_date_range_sql(start, end)
+
+        if "下半年" in original:
+            start = get_month_start(today.year, 7)
+            end = get_month_end(today.year, 12)
+            return get_date_range_sql(start, end)
+
+        # 去年同期上半年/下半年（去年）
+        if "去年同期上半年" in original:
+            start = get_month_start(today.year - 1, 1)
+            end = get_month_end(today.year - 1, 6)
+            return get_date_range_sql(start, end)
+
+        if "去年同期下半年" in original:
+            start = get_month_start(today.year - 1, 7)
+            end = get_month_end(today.year - 1, 12)
+            return get_date_range_sql(start, end)
+
+        # ===== 具体年份 2023年/2024年等 =====
+        match = re.search(r'(\d{4})年', original)
+        if match:
+            year = int(match.group(1))
+            start = get_month_start(year, 1)
+            end = get_month_end(year, 12)
+            return get_date_range_sql(start, end)
+
+        # ===== 同比/环比/同期/去年同期 =====
+        # 这些是计算模式，不是简单的时间范围
+        # 在 MQL 层处理，这里不转换
+
+        # ===== 默认：本月 =====
+        start = get_month_start(today.year, today.month)
+        return get_date_range_sql(start, today)
 
     def _build_group_by(self, mql: MQLSchema) -> str:
         """构建 GROUP BY 子句"""
@@ -1068,6 +1454,25 @@ WHERE ( {current_cond} )
         # 排名查询必须有 ORDER BY（即使没有维度）
         is_ranking = mql.intent and "ranking" in mql.intent.value.lower()
 
+        # ========== 占比模式：按占比别名排序 ==========
+        has_percentage = any(
+            (p.value if isinstance(p, Enum) else p) == CalculationPattern.PERCENTAGE.value
+            for p in mql.calculation_patterns
+        )
+        if has_percentage and mql.molecule_metric and mql.denominator_metric:
+            # 构建占比别名
+            mol = mql.molecule_metric
+            den = mql.denominator_metric
+            if mol.name and den.name:
+                ratio_name = f"{mol.name}占{den.name}比重"
+            elif mol.name:
+                ratio_name = f"{mol.name}占比"
+            else:
+                ratio_name = "占比"
+            logger.info(f"[_build_order_by] 占比模式，按占比别名排序: {ratio_name}")
+            return f"ORDER BY {ratio_name} DESC"
+        # ===========================================
+
         # 默认按指标降序（有 GROUP BY 时必须用聚合函数）
         if mql.metric and (mql.dimensions or is_ranking):
             direction = "DESC"
@@ -1081,7 +1486,14 @@ WHERE ( {current_cond} )
                 # 提取别名
                 match = re.search(r'AS\s+([\w\u4e00-\u9fff]+)', starrocks_sql, re.IGNORECASE)
                 if match:
-                    metric_alias = match.group(1)
+                    raw_alias = match.group(1)
+                    # 安全验证：拒绝包含 SQL 关键字或括号等危险字符的别名
+                    # 这些说明正则匹配到了错误的内容（如 SELECT ... AS SUM(...) FROM）
+                    if not any(kw in raw_alias.upper() for kw in ['SUM', 'FROM', 'WHERE', 'GROUP', 'ORDER', 'SELECT', '(', ')', '/', '*', '-', '+', '=']):
+                        metric_alias = raw_alias
+                    else:
+                        logger.warning(f"[_build_order_by] 别名 \"{raw_alias}\" 包含危险字符，使用默认值")
+                        metric_alias = "ORDERED_PRODUCTSALES"
 
                 # 如果 starrocks_sql 包含复合表达式（包含 /, *, -, IFNULL, ISNULL, COALESCE 等），
                 # 则 SELECT 使用完整表达式 AS alias，ORDER BY 也应使用该别名而非提取单列
@@ -1117,6 +1529,11 @@ WHERE ( {current_cond} )
 
             # 有 GROUP BY 时，ORDER BY 必须用聚合函数
             return f"ORDER BY SUM({metric_alias}) {direction}"
+
+        # 时间维度查询按时间排序（近7天、近12个月等）
+        if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
+            # 按时间升序（从早到晚）
+            return "ORDER BY MONTH(FDATE) ASC"
 
         return ""
 
