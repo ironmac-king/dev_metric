@@ -11,6 +11,8 @@ V2 使用 LangGraph 11 步闭环架构：
 import time
 import uuid
 import asyncio
+import json
+import httpx
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException, Request
@@ -34,6 +36,71 @@ router = APIRouter(prefix="/api/v1/llm-ask", tags=["LLM.V2"])
 
 # V2 Session 存储：保存每个 session_id 对应的上轮 MQL（用于多轮对话上下文继承）
 v2_session_mql: Dict[str, MQLSchema] = {}
+
+# Go 后端日志 API 地址
+GO_ASK_ANALYSIS_LOG_URL = "http://localhost:8080/api/v1/internal/ask-analysis/logs/v2"
+
+
+async def _send_log_to_go(
+    user_id: str,
+    session_id: str,
+    question: str,
+    answer: str,
+    intent: str,
+    success: bool,
+    fail_stage: str,
+    fail_reason: str,
+    thinking_steps: List[Any],
+    sql: str,
+    mql_json: str,
+) -> bool:
+    """发送日志到 Go 后端 AskAnalysisLog 表"""
+    try:
+        logger.info(f"[V2 Log] 开始发送日志: question={question[:30] if question else 'empty'}..., answer={answer[:30] if answer else 'empty'}...")
+        # 序列化 thinking_steps
+        steps_json = json.dumps([
+            {
+                "step": s.step,
+                "status": s.status,
+                "content": s.content or "",
+                "timestamp": s.timestamp or "",
+                "llm_used": s.llm_used,
+                "duration_ms": s.duration_ms,
+                "source": s.source,
+                "entities": s.entities,
+                "needs_clarification": s.needs_clarification,
+                "clarification_message": s.clarification_message or "",
+                "clarification_options": s.clarification_options or [],
+            }
+            for s in thinking_steps
+        ], ensure_ascii=False)
+
+        payload = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "question": question,
+            "answer": answer,
+            "intent": intent,
+            "success": success,
+            "fail_stage": fail_stage,
+            "fail_reason": fail_reason,
+            "suggestion": "",
+            "thinking_steps": steps_json,
+            "sql": sql,
+            "mql_json": mql_json,
+        }
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(GO_ASK_ANALYSIS_LOG_URL, json=payload)
+            if response.status_code == 200:
+                logger.info(f"[V2 Log] 成功发送到 Go API: session_id={session_id}")
+                return True
+            else:
+                logger.warning(f"[V2 Log] Go API 返回错误: {response.status_code} {response.text}")
+                return False
+    except Exception as e:
+        logger.warning(f"[V2 Log] 发送失败: {e}")
+        return False
 
 
 class AskRequestV2(BaseModel):
@@ -201,6 +268,42 @@ async def ask_question_v2(req: AskRequestV2):
             _saved_session_info = f"session_id={session_id}, saved_metric={result_state.mql.metric.name if result_state.mql.metric else None}, saved_dims={[(d.type, d.value) for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}"
             logger.info(f"[V2] 保存 MQL 到 session: {_saved_session_info}")
 
+        # 发送日志到 Go 后端
+        try:
+            intent_val = ""
+            if result_state and result_state.mql and hasattr(result_state.mql, 'intent') and result_state.mql.intent:
+                intent_val = result_state.mql.intent.value if hasattr(result_state.mql.intent, 'value') else str(result_state.mql.intent)
+
+            mql_json_str = ""
+            if result_state and result_state.mql:
+                try:
+                    mql_json_str = json.dumps(result_state.mql.to_dict() if hasattr(result_state.mql, 'to_dict') else {}, ensure_ascii=False)
+                except Exception:
+                    mql_json_str = ""
+
+            success = bool(result_state and result_state.answer)
+            fail_stage = ""
+            fail_reason = ""
+            if not success:
+                fail_stage = result_state.error if (result_state and result_state.error) else "no_answer"
+                fail_reason = fail_stage
+
+            await _send_log_to_go(
+                user_id=req.user_id,
+                session_id=session_id,
+                question=req.question,
+                answer=result_state.answer if result_state else "",
+                intent=intent_val,
+                success=success,
+                fail_stage=fail_stage,
+                fail_reason=fail_reason,
+                thinking_steps=result_state.thinking_steps if result_state else [],
+                sql=result_state.sql if result_state else "",
+                mql_json=mql_json_str,
+            )
+        except Exception as log_err:
+            logger.warning(f"[V2] 发送日志失败: {log_err}")
+
         return response
 
     except Exception as e:
@@ -218,6 +321,24 @@ async def ask_question_v2(req: AskRequestV2):
             success=False,
             error=str(e),
         )
+
+        # 发送错误日志到 Go 后端
+        try:
+            await _send_log_to_go(
+                user_id=req.user_id,
+                session_id=session_id,
+                question=req.question,
+                answer=f"处理出错: {str(e)}",
+                intent="",
+                success=False,
+                fail_stage="exception",
+                fail_reason=str(e),
+                thinking_steps=[],
+                sql="",
+                mql_json="",
+            )
+        except Exception as log_err:
+            logger.warning(f"[V2] 发送异常日志失败: {log_err}")
 
         return AskResponseV2(
             session_id=session_id,
@@ -294,7 +415,9 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 await asyncio.sleep(0.05)  # 让浏览器有时间渲染当前步骤
 
                 # 发送思考内容
+                logger.info(f"[V2 Stream] 检查 THINKING 事件: step={step_name}, thinking='{step_state.get('thinking')}'")
                 if step_state.get("thinking"):
+                    logger.info(f"[V2 Stream] 发送 THINKING 事件: step={step_name}, thinking='{step_state.get('thinking')}'")
                     yield StreamEvent(SSSEvent.THINKING, {
                         "step": step_name,
                         "content": step_state["thinking"],
@@ -349,6 +472,51 @@ async def ask_question_v2_stream(req: AskRequestV2):
             if state and state.mql:
                 v2_session_mql[session_id] = state.mql
                 logger.info(f"[V2 Stream] 保存 MQL 到 session: session_id={session_id}, intent={state.mql.intent.value if state.mql else 'N/A'}, dimensions={[d.type for d in state.mql.dimensions] if state.mql.dimensions else []}")
+
+            # 发送日志到 Go 后端
+            if state:
+                try:
+                    # 获取最终状态
+                    answer = getattr(state, 'answer', '') or ''
+                    sql = getattr(state, 'sql', '') or ''
+                    mql = getattr(state, 'mql', None)
+                    thinking_steps = getattr(state, 'thinking_steps', []) or []
+                    intent = ""
+                    if mql and hasattr(mql, 'intent') and mql.intent:
+                        intent = mql.intent.value if hasattr(mql.intent, 'value') else str(mql.intent)
+
+                    # 序列化和获取 MQL JSON
+                    mql_json_str = ""
+                    if mql:
+                        try:
+                            mql_json_str = json.dumps(mql.to_dict() if hasattr(mql, 'to_dict') else {}, ensure_ascii=False)
+                        except Exception:
+                            mql_json_str = ""
+
+                    # 判断成功失败
+                    error_val = getattr(state, 'error', None)
+                    has_answer = bool(answer and answer.strip())
+                    success = has_answer and not error_val
+
+                    logger.info(f"[V2 Stream] 准备发送日志: session_id={session_id}, success={success}, has_answer={has_answer}, answer_len={len(answer)}, thinking_steps={len(thinking_steps)}")
+
+                    # 发送日志
+                    await _send_log_to_go(
+                        user_id=req.user_id,
+                        session_id=session_id,
+                        question=req.question,
+                        answer=answer,
+                        intent=intent,
+                        success=success,
+                        fail_stage="stream_completed" if has_answer else (error_val or "no_answer"),
+                        fail_reason=error_val if not has_answer else "",
+                        thinking_steps=thinking_steps,
+                        sql=sql,
+                        mql_json=mql_json_str,
+                    )
+                except Exception as log_err:
+                    logger.warning(f"[V2 Stream] 发送日志失败: {log_err}")
+
             # 清理流式生成器
             clear_streaming_generator(session_id)
 
@@ -410,6 +578,11 @@ async def _stream_graph(graph, state: V2State):
                         mql_json = state_update.mql.to_dict()
                     except Exception:
                         mql_json = None
+
+                # 调试日志：检查 thinking 内容
+                logger.info(f"[_stream_graph] step={step_name}, thinking_steps count={len(thinking_steps)}, last_thinking={last_thinking}")
+                if last_thinking:
+                    logger.info(f"[_stream_graph] last_thinking.content='{last_thinking.content}'")
 
                 yield step_name, {
                     "thinking": last_thinking.content if last_thinking and hasattr(last_thinking, 'content') else '',
@@ -575,6 +748,67 @@ async def clear_cache():
     cache._l1.clear()
     cache._l2.clear()
     return {"message": "缓存已清除"}
+
+
+# ==================== 波动分析接口 ====================
+
+class VolatilityRequest(BaseModel):
+    """波动分析请求"""
+    metric_name: str                          # 指标名称
+    data: List[Dict[str, Any]]              # 数据列表，格式：[{date: "2024-01-01", value: 1000, dimension: "京东"}, ...]
+    time_range: Optional[Dict[str, str]] = None  # 时间范围
+    dimension_key: str = "dimension"         # 维度字段名
+
+
+@router.post("/v2/volatility/stream")
+async def volatility_analysis_stream(req: VolatilityRequest):
+    """
+    波动分析流式接口
+
+    使用 SSE 流式输出分析结果：
+    1. volatility_overview - 基础统计
+    2. volatility_chart - 图表数据
+    3. volatility_dims - 维度贡献
+    4. volatility_llm_reasoning - LLM 推理过程
+    5. volatility_root - 根因归类
+    6. volatility_done - 完成
+    """
+    from .nodes.volatility_analyzer import VolatilityAnalyzer
+
+    logger.info(f"[Volatility Stream] 收到分析请求: metric={req.metric_name}, data_count={len(req.data)}")
+
+    analyzer = VolatilityAnalyzer()
+
+    async def generate_sse():
+        """生成 SSE 流"""
+        try:
+            async for event in analyzer.analyze_stream(
+                metric_name=req.metric_name,
+                data=req.data,
+                time_range=req.time_range,
+                dimension_key=req.dimension_key
+            ):
+                yield event.to_sse()
+                await asyncio.sleep(0.05)  # 让浏览器有时间渲染
+
+            # 发送空数据表示流结束
+            yield b"event: volatility_done\ndata: {}\n\n"
+
+        except Exception as e:
+            logger.error(f"[Volatility Stream] 分析失败: {e}")
+            yield StreamEvent(SSSEvent.ERROR, {
+                "error": f"分析失败: {str(e)}"
+            }).to_sse()
+
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 def _generate_default_suggestions(state: V2State) -> List[str]:

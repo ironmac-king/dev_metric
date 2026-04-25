@@ -294,16 +294,16 @@
                       </button>
                     </div>
 
-                    <!-- 一键归因按钮 -->
+                    <!-- 波动分析按钮 -->
                     <button
-                      v-if="msg.resultData && msg.resultData.length > 0"
+                      v-if="msg.resultData && msg.resultData.length > 0 && canDoVolatilityAnalysis(msg.resultData)"
                       class="attribution-btn"
                       @click="openAttribution(msg)"
                     >
                       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                         <path d="M3 14L7 9L10 12L17 5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
                       </svg>
-                      一键归因分析
+                      波动分析
                     </button>
 
                     <!-- 生成报告按钮 -->
@@ -381,13 +381,12 @@
       />
     </div>
 
-    <!-- 归因分析面板 -->
-    <AttributionPanel
+    <!-- 波动分析面板 -->
+    <VolatilityPanel
+      ref="volatilityPanelRef"
       v-model="attributionVisible"
-      :positive-factors="positiveFactors"
-      :negative-factors="negativeFactors"
-      :trend-data="trendData"
-      @trace="handleTrace"
+      :metric-name="currentMetricName"
+      :api-url="volatilityApiUrl"
     />
 
     <!-- 报告预览 -->
@@ -413,7 +412,7 @@ import LogicChainDrawer from '../components/ask/LogicChainDrawer.vue'
 import ClarificationCard from '../components/ask/ClarificationCard.vue'
 import PlanConfirmCard from '../components/ask/PlanConfirmCard.vue'
 import ChartCard from '../components/ask/ChartCard.vue'
-import AttributionPanel from '../components/ask/AttributionPanel.vue'
+import VolatilityPanel from '../components/ask/VolatilityPanel.vue'
 import ReportPreview from '../components/ask/ReportPreview.vue'
 import SessionHistory from '../components/ask/SessionHistory.vue'
 import lottie from 'lottie-web'
@@ -537,6 +536,11 @@ const currentSql = ref('')
 const positiveFactors = ref([])
 const negativeFactors = ref([])
 const trendData = ref([])
+
+// Volatility analysis
+const volatilityPanelRef = ref(null)
+const currentMetricName = ref('')
+const volatilityApiUrl = '/api/v1/llm-ask/v2/volatility/stream'
 
 // Report data
 const reportTitle = ref('')
@@ -971,6 +975,32 @@ async function updateThinkingSteps() {
   await nextTick()
 }
 
+/**
+ * 判断数据是否适合做波动分析
+ * 适合：多行数据（时间序列或多品类）或包含维度列
+ * 不适合：单行汇总数据（如"本月销售额"只有一行）
+ */
+function canDoVolatilityAnalysis(resultData) {
+  if (!resultData || resultData.length === 0) return false
+
+  // 单行数据不适合
+  if (resultData.length === 1) return false
+
+  const firstRow = resultData[0]
+  if (!firstRow) return false
+
+  const keys = Object.keys(firstRow)
+
+  // 检查是否有维度列（GROUP_X 或其他维度列）
+  const hasDimensionColumn = keys.some(k =>
+    /^GROUP_\d$/i.test(k) ||
+    /^(dimension|channel|site|品类|品牌|平台|category)$/i.test(k)
+  )
+
+  // 多行数据或有维度列的数据适合做波动分析
+  return resultData.length > 1 || hasDimensionColumn
+}
+
 function prepareAttributionData(data) {
   const resultData = data?.result_data || []
   if (resultData.length === 0) return
@@ -997,8 +1027,22 @@ function prepareAttributionData(data) {
 }
 
 function openAttribution(msg) {
-  prepareAttributionData({ result_data: msg.resultData })
+  // Deep copy to avoid reactive proxy issues
+  const resultDataCopy = JSON.parse(JSON.stringify(msg.resultData || []))
+
+  // 设置当前指标名称
+  currentMetricName.value = msg.metricName || '指标'
+  // 准备数据并打开面板
+  prepareAttributionData({ result_data: resultDataCopy })
   attributionVisible.value = true
+  // 启动波动分析流
+  if (volatilityPanelRef.value && resultDataCopy.length > 0) {
+    volatilityPanelRef.value.startStream({
+      metric_name: msg.metricName || '指标',
+      data: resultDataCopy,
+      dimension_key: 'dimension'
+    })
+  }
 }
 
 function generateReport(msg) {
