@@ -43,6 +43,12 @@
             <rect x="14" y="4" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/>
           </svg>
         </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/ask-analysis' }" title="问数分析" @click="router.push('/ask-analysis')">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M3 10L7 6L11 9L17 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M3 14L7 10L11 13L17 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+          </svg>
+        </div>
         <div class="sidebar-icon" :class="{ active: $route.path === '/analysis' }" title="决策分析" @click="router.push('/analysis')">
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M3 14L7 9L10 12L17 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -108,8 +114,44 @@
 
     <!-- Main Content Area -->
     <main class="main-wrapper">
-      <router-view />
+      <router-view :key="$route.fullPath" />
     </main>
+
+    <!-- Mobile Hamburger -->
+    <button class="hamburger" @click="toggleMobileMenu">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+        <path d="M3 6H21M3 12H21M3 18H21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
+
+    <!-- Mobile Menu Overlay -->
+    <div class="mobile-overlay" v-if="mobileMenuVisible" @click="toggleMobileMenu"></div>
+
+    <!-- Mobile Menu Drawer -->
+    <transition name="slide">
+      <nav v-if="mobileMenuVisible" class="mobile-nav">
+        <div class="mobile-nav-header">
+          <span class="mobile-nav-title">导航菜单</span>
+          <button class="close-btn" @click="toggleMobileMenu">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M15 5L5 15M5 5L15 15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        <div class="mobile-nav-items">
+          <router-link
+            v-for="item in navItems"
+            :key="item.path"
+            :to="item.path"
+            class="mobile-nav-item"
+            :class="{ active: $route.path === item.path }"
+            @click="toggleMobileMenu"
+          >
+            {{ item.label }}
+          </router-link>
+        </div>
+      </nav>
+    </transition>
 
     <!-- Avatar Settings Dialog -->
     <el-dialog v-model="showSettings" title="头像设置" width="500px" class="avatar-dialog">
@@ -170,6 +212,24 @@ import { ElMessage } from 'element-plus'
 const router = useRouter()
 const $route = useRoute()
 const showSettings = ref(false)
+
+// 移动端菜单
+const mobileMenuVisible = ref(false)
+const toggleMobileMenu = () => {
+  mobileMenuVisible.value = !mobileMenuVisible.value
+}
+
+// 导航配置
+const navItems = [
+  { label: '工作台', path: '/dashboard' },
+  { label: '指标库', path: '/metrics' },
+  { label: 'AI 问数', path: '/ai-assistant' },
+  { label: 'LLM.V2', path: '/llm-ask-v2' },
+  { label: '决策分析', path: '/analysis' },
+  { label: '告警配置', path: '/alerts' },
+  { label: 'LLM 配置', path: '/llm-config' },
+  { label: '意图配置', path: '/nlp-config' },
+]
 
 const username = computed(() => {
   const userInfo = localStorage.getItem('user_info')
@@ -350,42 +410,48 @@ onMounted(() => {
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
-/* Left Sidebar */
+/* Left Sidebar - Feishu Style */
 .sidebar {
-  width: 64px;
+  width: 52px;
   background: #fff;
-  border-right: 1px solid rgba(99, 102, 241, 0.08);
+  border-right: 1px solid #E8E8E8;
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 20px 0;
-  box-shadow: 4px 0 20px rgba(99, 102, 241, 0.04);
+  padding: 12px 0;
   position: fixed;
   left: 0;
   top: 0;
   bottom: 0;
   z-index: 100;
-  transition: width 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: width 200ms ease;
   overflow: hidden;
 }
 
 .sidebar:hover {
-  width: 160px;
+  width: 140px;
 }
 
 .sidebar-logo {
-  margin-bottom: 28px;
+  margin-bottom: 16px;
   flex-shrink: 0;
   display: flex;
   justify-content: center;
   align-items: center;
   width: 100%;
+  padding: 0 10px;
+}
+
+.sidebar-logo svg {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
 }
 
 .sidebar-nav {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
@@ -394,70 +460,82 @@ onMounted(() => {
 }
 
 .sidebar-icon {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  color: #9ca3af;
+  color: #646A71;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
   position: relative;
-  margin: 0 auto;
   flex-shrink: 0;
 }
 
 .sidebar-icon::before {
   content: attr(title);
   position: absolute;
-  left: 56px;
-  background: #1f1f1f;
-  color: #fff;
-  padding: 6px 12px;
+  left: 50px;
+  background: #fff;
+  color: #1F1F1F;
+  padding: 6px 10px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s;
+  transition: opacity 0.15s;
   z-index: 1000;
+  font-weight: 450;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
 }
 
-.sidebar-icon:hover::before {
+.sidebar:hover .sidebar-icon::before {
   opacity: 1;
 }
 
 .sidebar-icon:hover {
-  background: rgba(99, 102, 241, 0.08);
-  color: #6366F1;
+  background: #F5F6F7;
+  color: #165DFF;
 }
 
 .sidebar-icon.active {
-  background: rgba(99, 102, 241, 0.08);
-  color: #6366F1;
-  border-left: 3px solid #6366F1;
+  background: #E8F0FF;
+  color: #165DFF;
+}
+
+.sidebar-icon.active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: #165DFF;
+  border-radius: 0 2px 2px 0;
 }
 
 .sidebar-bottom {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
   margin-top: auto;
   flex-shrink: 0;
+  padding-top: 8px;
+  border-top: 1px solid #F0F0F0;
+  width: 100%;
 }
 
 .sidebar-divider {
-  width: 32px;
-  height: 1px;
-  background: rgba(99, 102, 241, 0.15);
-  margin: 8px auto;
+  display: none;
 }
 
 /* Main Content - With Left Sidebar only */
 .main-wrapper {
   flex: 1;
-  margin-left: 64px;
+  margin-left: 52px;
   min-height: 100vh;
   transition: margin-left 300ms cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -467,7 +545,7 @@ onMounted(() => {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+  background: linear-gradient(135deg, #1677FF 0%, #0958D9 100%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -480,7 +558,7 @@ onMounted(() => {
 
 .user-avatar:hover {
   transform: scale(1.05);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+  box-shadow: 0 4px 12px rgba(22, 119, 255, 0.3);
 }
 
 /* Avatar Settings Dialog */
@@ -654,32 +732,137 @@ onMounted(() => {
 
 @media (max-width: 768px) {
   .sidebar {
-    width: 48px;
-  }
-  .sidebar:hover {
-    width: 48px;
-  }
-  .sidebar-logo {
     display: none;
   }
-  .sidebar-icon {
-    width: 32px;
-    height: 32px;
-  }
-  .sidebar-icon svg {
-    width: 16px;
-    height: 16px;
-  }
-  .sidebar-divider {
-    width: 28px;
-  }
-  .user-avatar {
-    width: 28px;
-    height: 28px;
-    font-size: 11px;
-  }
   .main-wrapper {
-    margin-left: 48px;
+    margin-left: 0;
   }
+  .hamburger {
+    display: flex;
+  }
+}
+
+/* Hamburger Button */
+.hamburger {
+  display: none;
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  border-radius: 10px;
+  cursor: pointer;
+  color: #6366F1;
+  z-index: 1001;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.15);
+  transition: all 0.2s ease;
+}
+
+.hamburger:hover {
+  background: rgba(99, 102, 241, 0.08);
+  transform: scale(1.05);
+}
+
+/* Mobile Overlay */
+.mobile-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1002;
+}
+
+/* Mobile Navigation Drawer */
+.mobile-nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 280px;
+  height: 100vh;
+  background: #fff;
+  z-index: 1003;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 4px 0 20px rgba(0, 0, 0, 0.15);
+}
+
+.mobile-nav-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.1);
+}
+
+.mobile-nav-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1f1f1f;
+}
+
+.close-btn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #6b7280;
+  transition: all 0.2s;
+}
+
+.close-btn:hover {
+  background: rgba(99, 102, 241, 0.08);
+  color: #6366F1;
+}
+
+.mobile-nav-items {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.mobile-nav-item {
+  display: block;
+  padding: 14px 16px;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 500;
+  color: #374151;
+  text-decoration: none;
+  transition: all 0.2s;
+  margin-bottom: 4px;
+}
+
+.mobile-nav-item:hover {
+  background: rgba(99, 102, 241, 0.06);
+  color: #6366F1;
+}
+
+.mobile-nav-item.active {
+  background: rgba(99, 102, 241, 0.1);
+  color: #6366F1;
+}
+
+/* Slide transition */
+.slide-enter-active,
+.slide-leave-active {
+  transition: transform 0.25s ease;
+}
+
+.slide-enter-from,
+.slide-leave-to {
+  transform: translateX(-100%);
 }
 </style>
