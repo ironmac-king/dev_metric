@@ -1,5 +1,12 @@
 <template>
   <div class="llm-ask-v2" :class="{ 'drawer-open': logicDrawerVisible }">
+    <!-- 会话历史悬浮面板 -->
+    <SessionHistory
+      ref="sessionHistoryRef"
+      @select-session="handleSelectSession"
+      @new-session="handleNewSessionFromHistory"
+    />
+
     <!-- 居中大容器 -->
     <div class="main-container" :class="{ 'fullscreen-result': hasResult }">
       <!-- 左侧对话区 -->
@@ -32,11 +39,15 @@
             <div class="init-input-section">
               <div class="chat-input-wrapper">
                 <textarea
+                  ref="inputRef"
                   v-model="question"
                   class="chat-input"
                   placeholder="直接向我提问，输入/唤起快捷提示词"
                   rows="1"
-                  @keydown.enter.exact.prevent="handleSend"
+                  @keydown.enter.exact.prevent="handleEnterKey"
+                  @keydown.up.prevent="navigateCommand(-1)"
+                  @keydown.down.prevent="navigateCommand(1)"
+                  @keydown.esc="closeCommandPanel"
                 ></textarea>
                 <button class="send-btn" :disabled="!question.trim() || loading" @click="handleSend">
                   <svg v-if="!loading" width="20" height="20" viewBox="0 0 20 20" fill="none">
@@ -46,6 +57,28 @@
                     <circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="2" stroke-dasharray="50" stroke-dashoffset="12" stroke-linecap="round"/>
                   </svg>
                 </button>
+
+                <!-- / 快捷命令面板 -->
+                <div v-if="showCommandPanel && suggestions.length" class="command-panel">
+                  <div class="command-header">
+                    <span>快捷命令</span>
+                    <span class="command-hint">↑↓ 导航 Enter 选择 Esc 关闭</span>
+                  </div>
+                  <div
+                    v-for="(cmd, idx) in suggestions"
+                    :key="cmd.title"
+                    :class="['command-item', { selected: idx === commandSelectedIndex }]"
+                    @click="selectCommand(cmd)"
+                  >
+                    <span class="command-icon">
+                      <component :is="cmd.icon" />
+                    </span>
+                    <div class="command-content">
+                      <span class="command-title"><span class="slash">/</span>{{ cmd.title }}</span>
+                      <span class="command-desc">{{ cmd.desc }}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="input-tools-bar">
                 <span class="tool-icon">
@@ -185,7 +218,7 @@
                     />
 
                     <!-- 泛指追问选项 -->
-                    <div v-if="msg.needsClarification && msg.clarificationOptions" class="clarification-tags">
+                    <div v-if="msg.needsClarification && msg.clarificationOptions && !isSlotMissingOptions(msg.clarificationOptions)" class="clarification-tags">
                       <span class="clarification-msg">{{ msg.clarificationMessage }}</span>
                       <button
                         v-for="option in msg.clarificationOptions"
@@ -211,6 +244,8 @@
                       :truncation-length="12"
                       :metric-name="msg.metricName || ''"
                       :metric-names="msg.metricNames || []"
+                      :time-start="msg.mql?.time?.start"
+                      :time-end="msg.mql?.time?.end"
                       class="message-chart"
                     />
 
@@ -241,6 +276,7 @@
                           </span>
                           <span v-if="step.duration" class="step-duration">{{ step.duration }}</span>
                           <span v-if="step.llm_used" class="llm-badge">LLM</span>
+                          <span v-if="step.content" class="step-content">{{ step.content }}</span>
                         </div>
                       </div>
                     </div>
@@ -293,9 +329,12 @@
               <textarea
                 v-model="question"
                 class="chat-input"
-                placeholder="输入您的数据分析问题..."
+                placeholder="直接向我提问，输入/唤起快捷提示词"
                 rows="2"
-                @keydown.enter.exact.prevent="handleSend"
+                @keydown.enter.exact.prevent="handleEnterKey"
+                @keydown.up.prevent="navigateCommand(-1)"
+                @keydown.down.prevent="navigateCommand(1)"
+                @keydown.esc="closeCommandPanel"
               ></textarea>
               <button class="send-btn" :disabled="!question.trim() || loading" @click="handleSend">
                 <svg v-if="!loading" width="20" height="20" viewBox="0 0 20 20" fill="none">
@@ -305,6 +344,28 @@
                   <circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="2" stroke-dasharray="50" stroke-dashoffset="12" stroke-linecap="round"/>
                 </svg>
               </button>
+
+              <!-- / 快捷命令面板 -->
+              <div v-if="showCommandPanel && suggestions.length" class="command-panel">
+                <div class="command-header">
+                  <span>快捷命令</span>
+                  <span class="command-hint">↑↓ 导航 Enter 选择 Esc 关闭</span>
+                </div>
+                <div
+                  v-for="(cmd, idx) in suggestions"
+                  :key="cmd.title"
+                  :class="['command-item', { selected: idx === commandSelectedIndex }]"
+                  @click="selectCommand(cmd)"
+                >
+                  <span class="command-icon">
+                    <component :is="cmd.icon" />
+                  </span>
+                  <div class="command-content">
+                    <span class="command-title"><span class="slash">/</span>{{ cmd.title }}</span>
+                    <span class="command-desc">{{ cmd.desc }}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -346,17 +407,19 @@
 
 <script setup>
 import { ref, h, nextTick, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { llmAskApi } from '../api/llmAsk'
+import { useRouter, useRoute } from 'vue-router'
+import { llmAskApi, sessionApi } from '../api/llmAsk'
 import LogicChainDrawer from '../components/ask/LogicChainDrawer.vue'
 import ClarificationCard from '../components/ask/ClarificationCard.vue'
 import PlanConfirmCard from '../components/ask/PlanConfirmCard.vue'
 import ChartCard from '../components/ask/ChartCard.vue'
 import AttributionPanel from '../components/ask/AttributionPanel.vue'
 import ReportPreview from '../components/ask/ReportPreview.vue'
+import SessionHistory from '../components/ask/SessionHistory.vue'
 import lottie from 'lottie-web'
 
 const router = useRouter()
+const $route = useRoute()
 const question = ref('')
 const activeMode = ref('query')
 const messages = ref([])
@@ -365,33 +428,98 @@ const loading = ref(false)
 // Session ID for multi-turn conversation
 const sessionId = ref('')
 
-// 消息持久化到 localStorage
-const STORAGE_KEY = 'llm_ask_messages'
-const loadMessages = () => {
+// Expanded states
+const expandedThinking = ref({})
+const expandedInterpretation = ref({})
+
+// / 命令面板
+const showCommandPanel = ref(false)
+const commandSelectedIndex = ref(0)
+
+// 对话状态持久化到 localStorage
+const STORAGE_KEY = 'llm_ask_state'
+const resetState = () => {
+  // 点击导航时重置状态，显示初始化页面
+  messages.value = []
+  sessionId.value = ''
+  expandedThinking.value = {}
+  expandedInterpretation.value = {}
+}
+
+// 从会话历史选择会话
+async function handleSelectSession(session) {
+  try {
+    // 加载该会话的消息
+    const res = await llmAskApi.getHistory(session.session_id)
+    if (res.code === 0 && res.data) {
+      messages.value = res.data.messages || []
+      sessionId.value = session.session_id
+      expandedThinking.value = {}
+      expandedInterpretation.value = {}
+    }
+  } catch (e) {
+    console.error('加载会话失败:', e)
+  }
+}
+
+// 从会话历史新建会话
+function handleNewSessionFromHistory() {
+  resetState()
+}
+const loadState = () => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (saved) {
-      messages.value = JSON.parse(saved)
+      const state = JSON.parse(saved)
+      messages.value = state.messages || []
+      sessionId.value = state.sessionId || ''
+      expandedThinking.value = state.expandedThinking || {}
+      expandedInterpretation.value = state.expandedInterpretation || {}
     }
   } catch (e) {
-    console.error('Failed to load messages:', e)
+    console.error('Failed to load state:', e)
   }
 }
-const saveMessages = () => {
+const saveState = () => {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.value))
+    const state = {
+      messages: messages.value,
+      sessionId: sessionId.value,
+      expandedThinking: expandedThinking.value,
+      expandedInterpretation: expandedInterpretation.value,
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
   } catch (e) {
-    console.error('Failed to save messages:', e)
+    console.error('Failed to save state:', e)
   }
 }
-// 监听消息变化自动保存
-watch(messages, saveMessages, { deep: true })
+// 监听所有状态变化自动保存
+watch(messages, saveState, { deep: true })
+watch(sessionId, saveState)
+watch(expandedThinking, saveState, { deep: true })
+watch(expandedInterpretation, saveState, { deep: true })
+
+// 检测 / 触发命令面板
+watch(question, (val) => {
+  if (val === '/') {
+    showCommandPanel.value = true
+    commandSelectedIndex.value = 0
+  } else if (!val.startsWith('/')) {
+    showCommandPanel.value = false
+  }
+})
+
+// 路由变化时重置状态（从其他页面切换回来时）
+watch(() => $route.path, (path) => {
+  if (path === '/llm-ask-v2') {
+    resetState()
+  }
+})
 
 // 是否有消息，用于全屏自适应
 const hasResult = computed(() => messages.value.length > 0)
-const expandedThinking = ref({})
-const expandedInterpretation = ref({})
 const messagesContainer = ref(null)
+const sessionHistoryRef = ref(null)
 const avatarContainer = ref(null)
 let avatarAnimation = null
 
@@ -454,9 +582,16 @@ const intelligentWomanData = {
 }
 
 // 3D AI头像动画
-onMounted(() => {
-  // 每次进入都显示初始化页面，不加载历史记录
-  // loadMessages()
+onMounted(async () => {
+  // 获取初始快捷提问
+  await fetchInitialSuggestions()
+
+  // 每次进入页面都重置（解决 SPA 内路由切换时状态残留问题）
+  resetState()
+  console.log('[LLMAskV2A] after reset, messages count:', messages.value.length)
+
+  // 滚动到底部展示最新消息
+  scrollToBottom()
 
   if (!avatarContainer.value) return
 
@@ -505,12 +640,52 @@ const modes = [
   { id: 'alert', label: '异常告警', icon: AlertIcon }
 ]
 
-const suggestions = [
-  { title: '本月各品类销售额', desc: '查看各品类的销售数据排名，了解哪些品类表现最好', icon: QueryIcon, text: '本月各品类销售额是多少？' },
-  { title: '近30天用户趋势', desc: '分析用户数的变化趋势，发现增长或下降的规律', icon: TrendIcon, text: '近30天用户数变化趋势' },
-  { title: '指标异常检测', desc: '自动发现数据中的异常波动，及时预警问题', icon: AlertIcon, text: '最近有哪些指标出现异常？' },
-  { title: '环比数据对比', desc: '对比不同周期的数据差异，评估业务变化', icon: ChartIcon, text: '对比本月与上月数据差异' }
-]
+const suggestions = ref([])
+
+// Icon 映射
+const iconMap = {
+  QueryIcon,
+  TrendIcon,
+  ChartIcon,
+  AlertIcon
+}
+
+// 获取初始快捷提问
+async function fetchInitialSuggestions() {
+  try {
+    const res = await fetch('/api/v1/internal/ask/suggest-v2')
+    const data = await res.json()
+    if (data.code === 0 && data.data) {
+      suggestions.value = data.data.map(s => ({
+        ...s,
+        icon: iconMap[s.icon] || QueryIcon
+      }))
+    }
+  } catch (e) {
+    console.error('获取快捷提问失败:', e)
+    // 使用默认值
+    suggestions.value = [
+      { title: '本月各品类销售额', desc: '查看各品类的销售数据排名', icon: QueryIcon, text: '本月各品类销售额是多少？' },
+      { title: '近30天用户趋势', desc: '分析用户数的变化趋势', icon: TrendIcon, text: '近30天用户数变化趋势' },
+      { title: '指标异常检测', desc: '自动发现数据中的异常波动', icon: AlertIcon, text: '最近有哪些指标出现异常？' },
+      { title: '环比数据对比', desc: '对比不同周期的数据差异', icon: ChartIcon, text: '对比本月与上月数据差异' }
+    ]
+  }
+}
+
+// 处理回车键
+function handleEnterKey() {
+  // 如果命令面板打开，选择当前命令
+  if (showCommandPanel.value && suggestions.value.length > 0) {
+    const cmd = suggestions.value[commandSelectedIndex.value]
+    if (cmd) {
+      selectCommand(cmd)
+    }
+    return
+  }
+  // 否则发送消息
+  handleSend()
+}
 
 async function handleSend() {
   if (!question.value.trim() || loading.value) return
@@ -558,7 +733,16 @@ async function handleSend() {
       },
       body: JSON.stringify({
         question: userQuestion,
-        user_id: 'default',
+        user_id: (() => {
+          try {
+            const userInfo = localStorage.getItem('user_info')
+            if (userInfo) {
+              const user = JSON.parse(userInfo)
+              return user && user.id ? String(user.id) : 'default'
+            }
+          } catch (e) {}
+          return 'default'
+        })(),
         session_id: sessionId.value || undefined,
       }),
     })
@@ -655,7 +839,22 @@ async function handleSend() {
                 sessionId.value = data.session_id
               }
             } else if (currentEvent === 'done') {
-              // 完成
+              // 完成 - 保存会话摘要
+              if (sessionId.value) {
+                const firstQuestion = messages.value.find(m => m.role === 'user')?.content || ''
+                if (firstQuestion) {
+                  console.log('[DEBUG] 保存会话摘要:', sessionId.value, firstQuestion.slice(0, 30))
+                  sessionApi.save({
+                    session_id: sessionId.value,
+                    title: firstQuestion.slice(0, 50),
+                    first_question: firstQuestion
+                  }).then(res => {
+                    console.log('[DEBUG] 保存会话结果:', res)
+                    // 刷新会话列表
+                    sessionHistoryRef.value?.refreshSessions?.()
+                  }).catch(e => console.error('保存会话失败:', e))
+                }
+              }
             } else if (currentEvent === 'error') {
               console.error('SSE Error:', data.error)
             }
@@ -713,11 +912,22 @@ async function handleSend() {
       ? finalThinkingClarificationMessage
       : finalClarificationMessage
 
+    // 从 thinkingSteps 中提取最后一个有效的 mql
+    const extractedMql = (() => {
+      for (let i = finalSteps.length - 1; i >= 0; i--) {
+        if (finalSteps[i].mql) {
+          return finalSteps[i].mql
+        }
+      }
+      return null
+    })()
+
     messages.value.push({
       role: 'assistant',
       content: finalContent,
       sql: finalSql,
       thinkingSteps: finalSteps,
+      mql: extractedMql,
       resultData: finalResultData,
       metricName: finalMetricName,
       metricNames: finalMetricNames,
@@ -899,6 +1109,25 @@ function handlePlanModify(modifiedPlan) {
   })
 }
 
+// / 命令面板导航
+function navigateCommand(dir) {
+  if (!showCommandPanel.value || !suggestions.value.length) return
+  const len = suggestions.value.length
+  commandSelectedIndex.value = (commandSelectedIndex.value + dir + len) % len
+}
+
+// 选择命令
+function selectCommand(cmd) {
+  question.value = cmd.text
+  showCommandPanel.value = false
+  handleSend()
+}
+
+// 关闭命令面板
+function closeCommandPanel() {
+  showCommandPanel.value = false
+}
+
 function selectSuggestion(s) {
   question.value = s
   handleSend()
@@ -934,6 +1163,20 @@ const stepNameMap = {
 
 function getStepName(stepName) {
   return stepNameMap[stepName] || stepName
+}
+
+// 判断是否是槽位缺失选项（不是品类级别选项）
+function isSlotMissingOptions(options) {
+  if (!options || !Array.isArray(options) || options.length === 0) return false
+  // 品类级别选项有一二三级等关键词，不属于槽位缺失
+  const categoryKeywords = ['一级', '二级', '三级', '四级', '品类', '类目']
+  const isCategoryLevel = options.every(opt => {
+    const label = opt.label || opt.value || String(opt)
+    return categoryKeywords.some(kw => String(label).includes(kw))
+  })
+  if (isCategoryLevel) return false
+  // 槽位选项通常是简单字符串或对象，选项较少
+  return options.length <= 3 && options.every(opt => typeof opt === 'string' || (opt.label && typeof opt.label === 'string'))
 }
 
 function formatMessage(text) {
@@ -1539,20 +1782,24 @@ function scrollToBottom() {
 }
 
 .clarification-tag {
-  padding: 6px 14px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  border-radius: 20px;
-  font-size: 12px;
+  padding: 8px 16px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 16px;
+  font-size: 13px;
+  font-weight: 500;
   color: #6366F1;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  white-space: nowrap;
 }
 
 .clarification-tag:hover {
-  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+  background: #6366F1;
   color: #fff;
-  border-color: transparent;
+  border-color: #6366F1;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
 }
 
 /* 消息数据解读 */
@@ -1671,6 +1918,18 @@ function scrollToBottom() {
   font-weight: 600;
 }
 
+.step-content {
+  color: #374151;
+  font-size: 11px;
+  margin-left: 8px;
+  flex: 1;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+
 /* 建议问题 */
 .suggest-list {
   margin-top: 10px;
@@ -1686,20 +1945,24 @@ function scrollToBottom() {
 }
 
 .suggest-btn {
-  padding: 6px 14px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  border-radius: 20px;
-  font-size: 12px;
+  padding: 8px 16px;
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 16px;
+  font-size: 13px;
+  font-weight: 500;
   color: #6366F1;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  white-space: nowrap;
 }
 
 .suggest-btn:hover {
-  background: linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%);
+  background: #6366F1;
   color: #fff;
-  border-color: transparent;
+  border-color: #6366F1;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
 }
 
 /* 图表卡片 */
@@ -1866,6 +2129,103 @@ function scrollToBottom() {
   text-align: left;
 }
 
+/* / 快捷命令面板 */
+.command-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  background: #fff;
+  border: 1px solid #E5E7EB;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 12px rgba(0, 0, 0, 0.08);
+  z-index: 1000;
+  overflow: hidden;
+  max-height: 280px;
+  overflow-y: auto;
+  animation: dropdownFadeIn 0.15s ease-out;
+}
+
+@keyframes dropdownFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.command-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #F9FAFB;
+  border-bottom: 1px solid #F3F4F6;
+  font-size: 12px;
+  color: #6B7280;
+}
+
+.command-hint {
+  font-size: 11px;
+  color: #9CA3AF;
+}
+
+.command-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: all 0.1s ease;
+  border-bottom: 1px solid #F9FAFB;
+}
+
+.command-item:last-child {
+  border-bottom: none;
+}
+
+.command-item:hover {
+  background: #F9FAFB;
+}
+
+.command-item.selected {
+  background: #EFF6FF;
+}
+
+.command-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #F3F4F6;
+  border-radius: 8px;
+  color: #3B82F6;
+}
+
+.command-item.selected .command-icon {
+  background: #DBEAFE;
+}
+
+.command-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.command-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1F2937;
+}
+
+.command-title .slash {
+  color: #3B82F6;
+  margin-right: 2px;
+}
+
+.command-desc {
+  font-size: 12px;
+  color: #6B7280;
+}
+
 /* 快捷提问卡片 */
 .suggestions-section {
   width: 100%;
@@ -1947,5 +2307,237 @@ function scrollToBottom() {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* ========================================
+   Responsive Design - Mobile Adaptation
+   ======================================== */
+
+@media (max-width: 768px) {
+  .llm-ask-v2 {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .main-container {
+    padding: 80px 16px 24px;
+    gap: 16px;
+    height: calc(100vh - 60px);
+    height: calc(100dvh - 60px);
+  }
+
+  .init-view {
+    padding: 60px 16px 24px;
+  }
+
+  .greeting-section {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    margin-bottom: 24px;
+  }
+
+  .avatar-wrapper {
+    width: 64px;
+    height: 64px;
+  }
+
+  .avatar-wrapper svg {
+    width: 64px;
+    height: 64px;
+  }
+
+  .welcome-text {
+    font-size: 20px;
+  }
+
+  .mode-tabs {
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mode-tab {
+    height: 36px;
+    padding: 0 14px;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .init-input-section {
+    margin-bottom: 24px;
+  }
+
+  .init-input-section .chat-input-wrapper {
+    padding: 14px 18px;
+    min-height: 80px;
+    border-radius: 16px;
+  }
+
+  .init-input-section .chat-input {
+    font-size: 16px;
+    min-height: 52px;
+  }
+
+  .init-input-section .send-btn {
+    width: 44px;
+    height: 44px;
+    margin-left: 12px;
+  }
+
+  .suggestions-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .suggestion-card {
+    padding: 14px;
+    min-height: auto;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .card-icon {
+    width: 40px;
+    height: 40px;
+    margin-bottom: 8px;
+  }
+
+  .suggestions-title {
+    font-size: 16px;
+    margin-bottom: 12px;
+  }
+
+  /* Chat view responsive */
+  .chat-view {
+    padding: 0;
+  }
+
+  .messages-container {
+    padding: 16px 12px;
+  }
+
+  .message-content {
+    max-width: 85%;
+    min-width: unset;
+    padding: 14px 18px;
+  }
+
+  .message-item.assistant .message-content {
+    border-radius: 16px 16px 16px 4px;
+  }
+
+  .message-item.user .message-content {
+    border-radius: 16px 16px 4px 16px;
+  }
+
+  .input-section {
+    padding: 12px 16px 16px;
+  }
+
+  .chat-input-wrapper {
+    padding: 12px 16px;
+    border-radius: 20px;
+    min-height: 80px;
+  }
+
+  .chat-input {
+    font-size: 16px;
+    min-height: 44px;
+  }
+
+  .send-btn {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    margin-left: 12px;
+  }
+
+  .send-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  /* ========== UI 增强 ========== */
+
+  /* 输入框毛玻璃效果 */
+  .input-section {
+    background: rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-top: 1px solid rgba(255, 255, 255, 0.3);
+  }
+
+  /* 按钮触控热区 */
+  .send-btn,
+  .action-btn,
+  .suggest-btn,
+  .clarification-tag {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* 建议标签横向滑动 */
+  .suggest-list {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 8px;
+  }
+
+  .suggest-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  /* 用户气泡优化 */
+  .message-item.user .message-content {
+    background: hsl(250, 60%, 55%);
+  }
+
+  /* placeholder 可读性 */
+  .chat-input::placeholder {
+    color: #666;
+  }
+}
+
+@media (max-width: 480px) {
+  .main-container {
+    padding: 70px 12px 16px;
+  }
+
+  .init-view {
+    padding: 50px 12px 16px;
+  }
+
+  .welcome-text {
+    font-size: 18px;
+  }
+
+  .avatar-wrapper {
+    width: 56px;
+    height: 56px;
+  }
+
+  .avatar-wrapper svg {
+    width: 56px;
+    height: 56px;
+  }
+
+  .message-content {
+    max-width: 90%;
+    padding: 12px 14px;
+  }
+
+  .suggestion-card {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .card-icon {
+    margin-bottom: 0;
+    margin-right: 12px;
+  }
 }
 </style>

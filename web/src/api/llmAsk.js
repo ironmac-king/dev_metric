@@ -51,3 +51,41 @@ export const llmAskApi = {
     })
   },
 }
+
+/**
+ * 会话管理 API
+ */
+export const sessionApi = {
+  /**
+   * 获取会话列表
+   */
+  list() {
+    return request({
+      url: '/ask/sessions',
+      method: 'get',
+    })
+  },
+
+  /**
+   * 保存会话摘要（创建或更新）
+   * @param {Object} data - { session_id, title, first_question }
+   */
+  save(data) {
+    return request({
+      url: '/ask/sessions',
+      method: 'post',
+      data,
+    })
+  },
+
+  /**
+   * 删除会话
+   * @param {string} sessionId - 会话ID
+   */
+  delete(sessionId) {
+    return request({
+      url: `/ask/sessions/${sessionId}`,
+      method: 'delete',
+    })
+  },
+}

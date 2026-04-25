@@ -2,16 +2,17 @@
   <div class="chat-input-area">
     <div class="input-wrapper relative">
       <el-input
+        ref="textareaRef"
         v-model="internalQuestion"
         :placeholder="placeholder || '输入您的问题...'"
         @keyup.enter="handleEnter"
         @input="handleInput"
         @paste="handlePaste"
-        @keydown.up.prevent="$emit('navigate-up')"
-        @keydown.down.prevent="$emit('navigate-down')"
+        @keydown.up.prevent="handleNavigateUp"
+        @keydown.down.prevent="handleNavigateDown"
         @keydown.enter.prevent="handleEnterKeydown"
         @keydown.tab.prevent="handleTab"
-        @keydown.esc.stop="$emit('close-suggestions')"
+        @keydown.esc.stop="handleEsc"
         :disabled="disabled"
         resize="none"
         type="textarea"
@@ -24,24 +25,23 @@
         </svg>
       </button>
 
-      <!-- 候选下拉列表 -->
+      <!-- 维度联想下拉 -->
       <div
-        v-if="showSuggestions && suggestions.length"
+        v-if="showDimSuggestions && dimSuggestions.length"
         class="dim-suggestions-dropdown"
       >
         <div
-          v-for="(item, idx) in suggestions"
+          v-for="(item, idx) in dimSuggestions"
           :key="item.dimension_value"
           :class="[
             'dim-suggestion-item',
-            { 'selected': idx === selectedIndex }
+            { 'selected': idx === dimSelectedIndex }
           ]"
-          @click="$emit('select-suggestion', item)"
+          @click="selectDimSuggestion(item)"
         >
           <span class="candidate-name">{{ item.dimension_value }}</span>
           <span class="candidate-code">[{{ item.dimension_field }}]</span>
         </div>
-        <!-- 键盘导航提示 -->
         <div class="keyboard-hint">
           <span v-if="singleMatch"><kbd>Tab</kbd> 补全</span>
           <span v-else><kbd>↑</kbd><kbd>↓</kbd> 导航</span>
@@ -49,29 +49,55 @@
           <span><kbd>Esc</kbd> 关闭</span>
         </div>
       </div>
+
+      <!-- / 快捷命令面板 -->
+      <div
+        v-if="showCommandPanel && commandList.length"
+        class="command-panel"
+      >
+        <div class="command-header">
+          <span>快捷命令</span>
+          <span class="command-hint">选择后直接发送</span>
+        </div>
+        <div
+          v-for="(cmd, idx) in commandList"
+          :key="cmd.text"
+          :class="['command-item', { 'selected': idx === commandSelectedIndex }]"
+          @click="selectCommand(cmd)"
+        >
+          <span class="command-slash">/</span>
+          <span class="command-text">{{ cmd.title }}</span>
+        </div>
+      </div>
     </div>
     <div class="input-hint">
-      按 Enter 发送，Shift + Enter 换行
+      输入 <kbd>/</kbd> 唤起快捷命令，按 Enter 发送，Shift + Enter 换行
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
-interface Suggestion {
+interface DimSuggestion {
   dimension_field: string
   dimension_value: string
+}
+
+interface Command {
+  title: string
+  text: string
 }
 
 const props = defineProps<{
   modelValue: string
   disabled: boolean
-  suggestions: Suggestion[]
+  suggestions: DimSuggestion[]
   showSuggestions: boolean
   selectedIndex: number
   placeholder?: string
-  singleMatch: Suggestion | null
+  singleMatch: DimSuggestion | null
+  commands?: Command[]
 }>()
 
 const emit = defineEmits<{
@@ -82,12 +108,23 @@ const emit = defineEmits<{
   'navigate-down': []
   'select-current': []
   'close-suggestions': []
-  'select-suggestion': [item: Suggestion]
+  'select-suggestion': [item: DimSuggestion]
 }>()
 
-// 标记：刚选择过联想词，阻止发送
+// 维度联想
+const dimSuggestions = computed(() => props.suggestions)
+const showDimSuggestions = computed(() => props.showSuggestions && props.suggestions.length)
+const dimSelectedIndex = ref(0)
+
+// / 快捷命令
+const commandList = computed(() => props.commands || [])
+const showCommandPanel = ref(false)
+const commandSelectedIndex = ref(0)
+
+const textareaRef = ref()
+
+// 标记
 let justSelectedSuggestion = false
-// 标记：刚粘贴过，阻止触发联想
 let pasteDetected = false
 
 const internalQuestion = computed({
@@ -96,36 +133,105 @@ const internalQuestion = computed({
 })
 
 function handleInput(e: Event) {
-  // 如果是粘贴操作，不触发联想
   if (pasteDetected) {
     pasteDetected = false
     return
   }
+
+  const value = props.modelValue
+
+  // 检测 / 触发快捷命令
+  if (value === '/') {
+    showCommandPanel.value = true
+    commandSelectedIndex.value = 0
+    emit('close-suggestions')
+  } else if (showCommandPanel.value) {
+    // 过滤命令
+    if (value.startsWith('/')) {
+      // 继续输入过滤
+    } else {
+      showCommandPanel.value = false
+    }
+  }
+
   emit('input')
 }
 
 function handlePaste(e: ClipboardEvent) {
   pasteDetected = true
-  // 延迟重置标志
   setTimeout(() => { pasteDetected = false }, 100)
 }
 
+function handleNavigateUp() {
+  if (showCommandPanel.value) {
+    commandSelectedIndex.value = commandSelectedIndex.value > 0
+      ? commandSelectedIndex.value - 1
+      : commandList.value.length - 1
+  } else {
+    emit('navigate-up')
+  }
+}
+
+function handleNavigateDown() {
+  if (showCommandPanel.value) {
+    commandSelectedIndex.value = commandSelectedIndex.value < commandList.value.length - 1
+      ? commandSelectedIndex.value + 1
+      : 0
+  } else {
+    emit('navigate-down')
+  }
+}
+
 function handleEnterKeydown(e: KeyboardEvent) {
-  // 如果有联想词显示，Enter 键用于选择联想词
+  // 快捷命令面板优先
+  if (showCommandPanel.value && commandList.value.length) {
+    e.preventDefault()
+    selectCommand(commandList.value[commandSelectedIndex.value])
+    return
+  }
+
   if (props.showSuggestions && props.suggestions.length) {
     const idx = props.selectedIndex >= 0 ? props.selectedIndex : 0
     emit('select-suggestion', props.suggestions[idx])
     justSelectedSuggestion = true
-    // 延迟重置标记
     setTimeout(() => { justSelectedSuggestion = false }, 100)
   } else {
-    // 没有联想词时，阻止默认换行行为
     e.preventDefault()
   }
 }
 
+function handleTab(e: KeyboardEvent) {
+  if (props.singleMatch && props.showSuggestions) {
+    e.preventDefault()
+    emit('select-suggestion', props.singleMatch)
+  }
+}
+
+function handleEsc() {
+  if (showCommandPanel.value) {
+    showCommandPanel.value = false
+  } else {
+    emit('close-suggestions')
+  }
+}
+
+function selectDimSuggestion(item: DimSuggestion) {
+  emit('select-suggestion', item)
+  justSelectedSuggestion = true
+  setTimeout(() => { justSelectedSuggestion = false }, 100)
+}
+
+function selectCommand(cmd: Command) {
+  // 直接发送该命令
+  internalQuestion.value = cmd.text
+  showCommandPanel.value = false
+  // 自动发送
+  setTimeout(() => {
+    emit('send')
+  }, 50)
+}
+
 function handleEnter(e: KeyboardEvent) {
-  // 如果刚选择过联想词，不发送消息
   if (justSelectedSuggestion) {
     return
   }
@@ -135,13 +241,10 @@ function handleEnter(e: KeyboardEvent) {
   }
 }
 
-function handleTab(e: KeyboardEvent) {
-  // 如果有单一精确匹配，直接补全
-  if (props.singleMatch && props.showSuggestions) {
-    e.preventDefault()
-    emit('select-suggestion', props.singleMatch)
-  }
-}
+// 暴露方法让父组件可以关闭命令面板
+defineExpose({
+  closeCommandPanel: () => { showCommandPanel.value = false }
+})
 </script>
 
 <style scoped>
@@ -338,5 +441,95 @@ function handleTab(e: KeyboardEvent) {
   color: var(--text-muted);
   text-align: center;
   margin-top: 8px;
+}
+
+.input-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+/* / 快捷命令面板 */
+.command-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 12px rgba(0, 0, 0, 0.08);
+  z-index: 9999;
+  overflow: hidden;
+  max-height: 280px;
+  overflow-y: auto;
+  animation: dropdownFadeInUp 0.15s ease-out;
+}
+
+.command-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-light);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.command-hint {
+  font-size: 11px;
+}
+
+.command-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: all 0.1s ease;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.command-item:last-child {
+  border-bottom: none;
+}
+
+.command-item:hover {
+  background: var(--bg-primary);
+}
+
+.command-item.selected {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  color: white;
+}
+
+.command-slash {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--primary);
+  width: 16px;
+}
+
+.command-item.selected .command-slash {
+  color: white;
+}
+
+.command-text {
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.command-item.selected .command-text {
+  color: white;
 }
 </style>
