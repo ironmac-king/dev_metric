@@ -67,18 +67,44 @@
 
     <!-- 多指标表格模式 -->
     <div v-else-if="chartType === 'table' && props.data && props.data.length > 0" class="metric-table">
+      <!-- 时间范围标签 -->
+      <div v-if="timeRangeLabel" class="time-range-label">{{ timeRangeLabel }}</div>
       <table class="data-table">
         <thead>
           <tr>
-            <th v-for="(header, idx) in tableHeaders" :key="tableKeys[idx]">{{ header }}</th>
+            <th
+              v-for="(header, idx) in tableHeaders"
+              :key="tableKeys[idx]"
+              @click="handleSort(tableKeys[idx])"
+              :class="{ sortable: true, sorted: sortKey === tableKeys[idx] }"
+            >
+              {{ header }}
+              <span v-if="sortKey === tableKeys[idx]" class="sort-icon">
+                {{ sortOrder === 'asc' ? '↑' : '↓' }}
+              </span>
+              <span v-else class="sort-icon default">↕</span>
+            </th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, idx) in props.data" :key="idx">
-            <td v-for="key in tableKeys" :key="key">{{ formatTableCell(key, row[key]) }}</td>
+          <tr v-for="(row, idx) in sortedPaginatedData" :key="idx">
+            <td v-for="(key, colIdx) in tableKeys" :key="key" :class="{ numeric: isNumericColumn(key, row[key]) }">
+              {{ formatTableCell(key, row[key], colIdx) }}
+            </td>
           </tr>
         </tbody>
       </table>
+      <div class="table-pagination" v-if="props.data.length > pageSize">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          :total="props.data.length"
+          layout="total, sizes, prev, pager, next"
+          @current-change="handlePageChange"
+          @size-change="handlePageChange"
+        />
+      </div>
     </div>
 
     <div v-else ref="chartContainer" class="chart-container" :style="{ height: height + 'px', width: '100%' }"></div>
@@ -165,6 +191,14 @@ const props = defineProps({
   metricNames: {
     type: Array,
     default: () => []
+  },
+  timeStart: {
+    type: String,
+    default: ''
+  },
+  timeEnd: {
+    type: String,
+    default: ''
   }
 })
 
@@ -177,18 +211,149 @@ const showInterpretation = ref(false)
 let chartInstance = null
 let fullscreenChartInstance = null
 
-// 多指标表格的列 keys
-const tableKeys = computed(() => {
+// 分页
+const currentPage = ref(1)
+const pageSize = ref(10)
+
+// 排序
+const sortKey = ref('')
+const sortOrder = ref('') // 'asc' | 'desc' | ''
+
+// 排序后且分页的数据
+const sortedPaginatedData = computed(() => {
   if (!props.data || props.data.length === 0) return []
-  return Object.keys(props.data[0])
+  let data = [...props.data]
+  // 排序
+  if (sortKey.value) {
+    const key = sortKey.value
+    const order = sortOrder.value
+    data.sort((a, b) => {
+      const aVal = a[key]
+      const bVal = b[key]
+      if (aVal === null || aVal === undefined) return 1
+      if (bVal === null || bVal === undefined) return -1
+      // 尝试将值转换为数值进行比较（处理 "40084806.65" 这样的字符串数字）
+      const aNum = typeof aVal === 'number' ? aVal : (typeof aVal === 'string' && !isNaN(parseFloat(aVal)) ? parseFloat(aVal) : null)
+      const bNum = typeof bVal === 'number' ? bVal : (typeof bVal === 'string' && !isNaN(parseFloat(bVal)) ? parseFloat(bVal) : null)
+      if (aNum !== null && bNum !== null) {
+        return order === 'asc' ? aNum - bNum : bNum - aNum
+      }
+      const aStr = String(aVal)
+      const bStr = String(bVal)
+      return order === 'asc' ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr)
+    })
+  }
+  // 分页
+  const start = (currentPage.value - 1) * pageSize.value
+  return data.slice(start, start + pageSize.value)
 })
 
-// 判断是否是数值列（排除时间维度列 MONTHS/FDATE）
-function isNumericColumn(key, val) {
-  if (key === 'MONTHS' || key === 'FDATE') return false
-  if (val === null || val === '') return false
-  return typeof val === 'number' || !isNaN(parseFloat(val))
+function handleSort(key) {
+  if (sortKey.value === key) {
+    if (sortOrder.value === 'asc') {
+      sortOrder.value = 'desc'
+    } else if (sortOrder.value === 'desc') {
+      sortOrder.value = ''
+      sortKey.value = ''
+    } else {
+      sortOrder.value = 'asc'
+    }
+  } else {
+    sortKey.value = key
+    sortOrder.value = 'asc'
+  }
+  currentPage.value = 1
 }
+
+function handlePageChange(page) {
+  currentPage.value = page
+}
+
+// 时间范围标签（统一格式：YYYY-MM-DD ~ YYYY-MM-DD）
+const timeRangeLabel = computed(() => {
+  // 优先使用 props.timeStart 和 props.timeEnd（从 MQL 传递的日期范围）
+  if (props.timeStart && props.timeEnd) {
+    if (props.timeStart === props.timeEnd) {
+      return `日期范围：${props.timeStart}`
+    }
+    return `日期范围：${props.timeStart} ~ ${props.timeEnd}`
+  }
+
+  if (!props.data || props.data.length === 0) return ''
+  const firstRow = props.data[0]
+  const keys = Object.keys(firstRow)
+
+  // 兜底：从 FDATE 列提取日期范围
+  if (keys.includes('FDATE')) {
+    const dates = props.data.map(r => r.FDATE).filter(d => d && typeof d === 'string' && d.includes('-'))
+    if (dates.length > 0) {
+      const sortedDates = [...dates].sort()
+      const min = sortedDates[0]
+      const max = sortedDates[sortedDates.length - 1]
+      if (min === max) {
+        return `日期范围：${min}`
+      }
+      return `日期范围：${min} ~ ${max}`
+    }
+  }
+
+  return ''
+})
+
+// 多指标表格的列 keys（排除时间维度列）
+// 按照 tableHeaders 的顺序排列，确保列和值对齐
+const tableKeys = computed(() => {
+  if (!props.data || props.data.length === 0) return []
+  const keys = Object.keys(props.data[0])
+  // 过滤掉时间维度列（MONTHS/FDATE/FDATE_START/FDATE_END）
+  const filteredKeys = keys.filter(k => k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
+
+  // 分离维度列和指标列
+  const dimKeys = filteredKeys.filter(k => isDimensionColumn(k))
+  const metricKeys = filteredKeys.filter(k => !isDimensionColumn(k))
+
+  // 按照 tableHeaders 的顺序返回：[维度列..., 指标列...]
+  // 指标列顺序与 metricNames 一致
+  return [...dimKeys, ...metricKeys]
+})
+
+// 判断是否是维度列（用于 tableKeys 排序）
+function isDimensionColumn(key) {
+  const dimColumnPatterns = [
+    'SKU', 'ASIN', 'FSITE', 'FSITECODE', 'SHOP', 'STORE', 'BRAND',
+    'PLATFORM', 'COUNTRY', 'CITY', 'REGION', 'CHANNEL', 'CAMPAIGN',
+    'PRODUCT', 'CATEGORY', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4',
+  ]
+  const upperKey = key.toUpperCase()
+  return dimColumnPatterns.some(pattern => upperKey.includes(pattern))
+}
+
+// 判断是否是数值列（排除时间维度列 MONTHS/FDATE/FDATE_START/FDATE_END 及类似列）
+function isNumericColumn(key, val) {
+  // 已知维度列（不是指标列）
+  if (['MONTHS', 'FDATE', 'FDATE_START', 'FDATE_END', 'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'BRAND', 'PLATFORM', 'SHOP', 'FSITE', 'FSITECODE'].includes(key)) return false
+  if (val === null || val === '') return false
+  // SKU 格式：5位数字 + 0-2个字母（如 12345、12345AB），不是数值
+  if (typeof val === 'string' && /^[0-9]+[A-Za-z]{0,2}$/.test(val)) return false
+  // 日期格式字符串（如 "2026-04-01"）不是数值
+  if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val)) return false
+  // 对于字符串：parseFloat 后必须等于自身（排除 "2026-04-01" → 2026, "3430.94万" → 3430.94）
+  if (typeof val === 'string') {
+    const parsed = parseFloat(val)
+    if (isNaN(parsed)) return false
+    // 纯数值字符串（如 "123", "3430.94"）才是数值
+    return /^-?\d+(\.\d+)?$/.test(val)
+  }
+  return typeof val === 'number'
+}
+
+// 已知维度列名（用于过滤 metricNames 中的维度名）
+const KNOWN_DIM_COLUMNS = new Set([
+  'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4',
+  'FDATE', 'FDATE_START', 'FDATE_END', 'MONTHS',
+  'SKU', 'ASIN', 'FSITE', 'FSITECODE', 'SHOP', 'STORE', 'BRAND',
+  'PLATFORM', 'COUNTRY', 'CITY', 'REGION', 'CHANNEL', 'CAMPAIGN', 'PRODUCT', 'CATEGORY'
+])
 
 // 多指标表格的列 header（中文名）
 const tableHeaders = computed(() => {
@@ -197,9 +362,9 @@ const tableHeaders = computed(() => {
   // 过滤出数值列（metric 对应的列，排除 MONTHS/FDATE）
   const numericKeys = keys.filter(k => isNumericColumn(k, props.data[0][k]))
   console.log('[DEBUG tableHeaders] metricNames:', props.metricNames, 'keys:', keys, 'numericKeys:', numericKeys, 'firstRow:', props.data[0])
-  // 维度列（GROUP_X, MONTHS, FDATE）→ 使用中文维度类型名
+  // 维度列（GROUP_X）→ 使用中文维度类型名（排除 MONTHS/FDATE/FDATE_START/FDATE_END）
   const dimensionHeaders = keys
-    .filter(k => !numericKeys.includes(k))
+    .filter(k => !numericKeys.includes(k) && k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
     .map(k => {
       // GROUP_X → 二级品类
       if (k === 'GROUP_2') return '二级品类'
@@ -210,35 +375,64 @@ const tableHeaders = computed(() => {
       if (k === 'MONTHS') return '月份'
       return k
     })
-  // 指标列 → 使用 metricNames
-  const metricHeaders = props.metricNames && props.metricNames.length > 0
-    ? props.metricNames.slice(0, numericKeys.length)
-    : numericKeys
+  // 指标列：从 metricNames 中过滤掉维度名，剩下的就是指标名
+  let metricHeaders = []
+  if (props.metricNames && props.metricNames.length > 0) {
+    // metricNames 可能混入了维度名，需要过滤
+    metricHeaders = props.metricNames.filter(name => !KNOWN_DIM_COLUMNS.has(name) && !name.includes('品类') && !name.includes('日期') && !name.includes('月份'))
+    // 如果过滤后为空，用 numericKeys 作为 fallback
+    if (metricHeaders.length === 0) {
+      metricHeaders = numericKeys
+    }
+    // 确保数量不超过 numericKeys
+    metricHeaders = metricHeaders.slice(0, numericKeys.length)
+  } else {
+    metricHeaders = numericKeys
+  }
   return [...dimensionHeaders, ...metricHeaders]
 })
 
-// 格式化表格单元格
-function formatTableCell(key, val) {
+// 格式化表格单元格（根据指标名决定格式化方式）
+function formatTableCell(key, val, colIdx) {
   if (val === null || val === undefined) return '-'
-  // 月份列：数字或字符串数字加"月"后缀
-  if (key === 'MONTHS') {
-    const num = typeof val === 'number' ? val : parseFloat(val)
-    if (!isNaN(num)) return num + '月'
-    return val + '月'
+
+  // 已知维度列（不是指标列），直接返回原始值
+  const dimKeys = new Set(['MONTHS', 'FDATE', 'FDATE_START', 'FDATE_END', 'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'BRAND', 'PLATFORM', 'SHOP', 'FSITE', 'FSITECODE'])
+  if (dimKeys.has(key)) {
+    // 月份列加"月"后缀
+    if (key === 'MONTHS') {
+      const num = typeof val === 'number' ? val : parseFloat(val)
+      if (!isNaN(num)) return num + '月'
+      return val + '月'
+    }
+    return val
   }
-  if (typeof val === 'number') {
-    const formatted = formatChartValue(val)
-    console.log('[DEBUG formatTableCell] raw:', val, 'formatted:', formatted)
-    return formatted
+
+  // 判断该列是否使用千分位格式（销量类指标）
+  const useCommaFormat = (() => {
+    if (!props.metricNames || props.metricNames.length === 0) return false
+    const keys = Object.keys(props.data?.[0] || {})
+    // 维度列
+    const dimKeys = new Set(['MONTHS', 'FDATE', 'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'BRAND', 'PLATFORM', 'SHOP', 'FSITE', 'FSITECODE'])
+    // 计算 colIdx 之前有多少个维度列，确定该列对应 metricNames 的第几项
+    let metricColIdx = 0
+    for (let i = 0; i < colIdx; i++) {
+      if (!dimKeys.has(keys[i])) metricColIdx++
+    }
+    if (metricColIdx < 0 || metricColIdx >= props.metricNames.length) return false
+    const metricName = props.metricNames[metricColIdx]
+    return metricName?.includes('销量')
+  })()
+
+  const rawNum = typeof val === 'number' ? val : parseFloat(String(val).replace(/,/g, ''))
+  if (isNaN(rawNum)) return val
+
+  if (useCommaFormat) {
+    // 销量：千分位逗号
+    return rawNum.toLocaleString()
   }
-  // 尝试解析字符串数字
-  const parsed = parseFloat(String(val).replace(/,/g, ''))
-  if (!isNaN(parsed)) {
-    const formatted = formatChartValue(parsed)
-    console.log('[DEBUG formatTableCell] string raw:', val, 'parsed:', parsed, 'formatted:', formatted)
-    return formatted
-  }
-  return val
+  // 其他指标：万/亿
+  return formatChartValue(rawNum)
 }
 
 // Determine chart type based on data structure
@@ -627,7 +821,7 @@ function getSeriesColor(idx) {
   return colors[idx % colors.length]
 }
 
-// 格式化数值（图表用，超过10000显示万/亿）
+// 格式化数值（图表用，超过1000显示万/亿）
 function formatChartValue(val) {
   if (val === null || val === undefined) return '-'
   const num = typeof val === 'number' ? val : parseFloat(String(val).replace(/,/g, ''))
@@ -991,6 +1185,13 @@ onBeforeUnmount(() => {
 }
 
 /* 多指标表格 */
+.time-range-label {
+  font-size: 13px;
+  color: #666;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
 .metric-table {
   width: 100%;
   overflow-x: auto;
@@ -1009,6 +1210,32 @@ onBeforeUnmount(() => {
   text-align: left;
   padding: 10px 12px;
   border-bottom: 2px solid #E5E7EB;
+  cursor: pointer;
+  user-select: none;
+}
+
+.data-table th.sortable:hover {
+  background: #F0F1F3;
+}
+
+.sort-icon {
+  margin-left: 4px;
+  color: #9CA3AF;
+  font-size: 11px;
+}
+
+.sort-icon.default {
+  color: #D1D5DB;
+}
+
+.data-table th.sorted .sort-icon {
+  color: #3B82F6;
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 .data-table td {
@@ -1019,5 +1246,71 @@ onBeforeUnmount(() => {
 
 .data-table tr:hover td {
   background: #F9FAFB;
+}
+
+/* ========================================
+   Mobile Table Optimizations
+   ======================================== */
+
+@media (max-width: 768px) {
+  .metric-table {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    /* 隐藏滚动条但保持功能 */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .metric-table::-webkit-scrollbar {
+    display: none;
+  }
+
+  .data-table {
+    /* 确保文字不折行 */
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .data-table th,
+  .data-table td {
+    /* 首列固定 */
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: inherit;
+  }
+
+  .data-table th {
+    /* 表头固定 */
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  /* 关键数据列突出 */
+  .data-table td:first-child {
+    font-weight: 600;
+    color: #1F1F1F;
+  }
+
+  /* 数值列右对齐 */
+  .data-table td.numeric {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 表格行点击反馈 */
+  .data-table tbody tr {
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }
+
+  .data-table tbody tr:active td {
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  .data-table th {
+    background: #F9FAFB;
+  }
 }
 </style>
