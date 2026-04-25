@@ -17,42 +17,60 @@
       </div>
       <nav class="sidebar-nav">
         <!-- 核心页面 -->
-        <div class="sidebar-icon" :class="{ active: $route.path === '/dashboard' }" title="工作台" @click="router.push('/dashboard')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <rect x="2" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="11" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="2" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="11" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/dashboard' }" @click="router.push('/dashboard')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <rect x="2" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="11" y="2" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="2" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="11" y="11" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <span class="nav-text">工作台</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/metrics' }" title="指标库" @click="router.push('/metrics')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M3 5V17M7 3V17M11 7V17M15 2V17M19 9V17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/metrics' }" @click="router.push('/metrics')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M3 5V17M7 3V17M11 7V17M15 2V17M19 9V17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">指标库</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/ai-assistant' }" title="AI 问数" @click="router.push('/ai-assistant')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M7 10H13M10 7V13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/ai-assistant' }" @click="router.push('/ai-assistant')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M7 10H13M10 7V13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">AI 问数</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-ask-v2' }" title="LLM.V2" @click="router.push('/llm-ask-v2')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <rect x="2" y="12" width="4" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="8" y="8" width="4" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="14" y="4" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-ask-v2' }" @click="router.push('/llm-ask-v2')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <rect x="2" y="12" width="4" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="8" y="8" width="4" height="10" rx="1" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="14" y="4" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <span class="nav-text">LLM.V2</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/ask-analysis' }" title="问数分析" @click="router.push('/ask-analysis')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M3 10L7 6L11 9L17 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M3 14L7 10L11 13L17 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/ask-analysis' }" @click="router.push('/ask-analysis')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M3 10L7 6L11 9L17 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M3 14L7 10L11 13L17 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+            </svg>
+          </div>
+          <span class="nav-text">问数分析</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/analysis' }" title="决策分析" @click="router.push('/analysis')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M3 14L7 9L10 12L17 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/analysis' }" @click="router.push('/analysis')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M3 14L7 9L10 12L17 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">决策分析</span>
         </div>
       </nav>
 
@@ -60,51 +78,72 @@
       <div class="sidebar-bottom">
         <div class="sidebar-divider"></div>
         <!-- 次要入口 -->
-        <div class="sidebar-icon" :class="{ active: $route.path === '/feedback' }" title="反馈看板" @click="router.push('/feedback')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M4 4H16V12H4V4Z" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M7 16H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            <path d="M7 8L10 11L13 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/feedback' }" @click="router.push('/feedback')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M4 4H16V12H4V4Z" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M7 16H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M7 8L10 11L13 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">反馈看板</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/alerts' }" title="告警配置" @click="router.push('/alerts')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M10 2C7.24 2 5 4.24 5 7V10L3 13V14H17V13L15 10V7C15 4.24 12.76 2 10 2Z" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M8 14V15C8 16.1 8.9 17 10 17C11.1 17 12 16.1 12 15V14H8Z" stroke="currentColor" stroke-width="1.5"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/alerts' }" @click="router.push('/alerts')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M10 2C7.24 2 5 4.24 5 7V10L3 13V14H17V13L15 10V7C15 4.24 12.76 2 10 2Z" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 14V15C8 16.1 8.9 17 10 17C11.1 17 12 16.1 12 15V14H8Z" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <span class="nav-text">告警配置</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-config' }" title="LLM配置" @click="router.push('/llm-config')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <circle cx="10" cy="10" r="2.5" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M10 2V4.5M10 15.5V18M18 10H15.5M4.5 10H2M15.5 4.5L14 6M6 14L4.5 15.5M15.5 15.5L14 14M6 6L4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-config' }" @click="router.push('/llm-config')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 2V4.5M10 15.5V18M18 10H15.5M4.5 10H2M15.5 4.5L14 6M6 14L4.5 15.5M15.5 15.5L14 14M6 6L4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">LLM配置</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/nlp-config' }" title="意图配置" @click="router.push('/nlp-config')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M4 6L10 4L16 6V14L10 16L4 14V6Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-            <path d="M8 8L12 10L8 12V8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/nlp-config' }" @click="router.push('/nlp-config')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M4 6L10 4L16 6V14L10 16L4 14V6Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M8 8L12 10L8 12V8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">意图配置</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/starrocks-config' }" title="数据源配置" @click="router.push('/starrocks-config')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <ellipse cx="10" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M3 6V12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12V6" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M3 12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12" stroke="currentColor" stroke-width="1.5"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/starrocks-config' }" @click="router.push('/starrocks-config')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <ellipse cx="10" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M3 6V12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12V6" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M3 12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <span class="nav-text">数据源配置</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/dimension-config' }" title="维度配置" @click="router.push('/dimension-config')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <rect x="3" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="11" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="3" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-            <rect x="11" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/dimension-config' }" @click="router.push('/dimension-config')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <rect x="3" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="11" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="3" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="11" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <span class="nav-text">维度配置</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/user-management' }" title="用户管理" @click="router.push('/user-management')">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <circle cx="10" cy="6" r="3" stroke="currentColor" stroke-width="1.5"/>
-            <path d="M3 17C3 13.5 6 11 10 11C14 11 17 13.5 17 17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/user-management' }" @click="router.push('/user-management')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="6" r="3" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M3 17C3 13.5 6 11 10 11C14 11 17 13.5 17 17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">用户管理</span>
         </div>
         <div class="user-avatar" @click="handleUserClick">
           {{ username ? username.charAt(0).toUpperCase() : 'U' }}
@@ -473,28 +512,6 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.sidebar-icon::before {
-  content: attr(title);
-  position: absolute;
-  left: 50px;
-  background: #fff;
-  color: #1F1F1F;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-  white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s;
-  z-index: 1000;
-  font-weight: 450;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-}
-
-.sidebar:hover .sidebar-icon::before {
-  opacity: 1;
-}
-
 .sidebar-icon:hover {
   background: #F5F6F7;
   color: #165DFF;
@@ -515,6 +532,32 @@ onMounted(() => {
   height: 20px;
   background: #165DFF;
   border-radius: 0 2px 2px 0;
+}
+
+.sidebar-icon .icon-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.sidebar-icon .nav-text {
+  display: none;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.sidebar:hover .sidebar-icon {
+  width: auto;
+  min-width: 44px;
+}
+
+.sidebar:hover .sidebar-icon .nav-text {
+  display: block;
+  padding-right: 16px;
 }
 
 .sidebar-bottom {
