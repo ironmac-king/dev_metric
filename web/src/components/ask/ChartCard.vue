@@ -46,12 +46,12 @@
       </div>
       <div class="comparison-values">
         <div class="comparison-item">
-          <div class="comparison-label">上期（2月）</div>
+          <div class="comparison-label">{{ props.periodInfo?.comparePeriod || chartOptions.comparePeriod || '上期' }}</div>
           <div class="comparison-value">{{ chartOptions.compareVal }}</div>
         </div>
         <div class="comparison-arrow">→</div>
         <div class="comparison-item">
-          <div class="comparison-label">当期（3月）</div>
+          <div class="comparison-label">{{ props.periodInfo?.currentPeriod || chartOptions.currentPeriod || '当期' }}</div>
           <div class="comparison-value">{{ chartOptions.currentVal }}</div>
         </div>
         <div class="comparison-item change">
@@ -199,6 +199,10 @@ const props = defineProps({
   timeEnd: {
     type: String,
     default: ''
+  },
+  periodInfo: {
+    type: Object,
+    default: () => ({ currentPeriod: '', comparePeriod: '' })
   }
 })
 
@@ -301,20 +305,14 @@ const timeRangeLabel = computed(() => {
 })
 
 // 多指标表格的列 keys（排除时间维度列）
-// 按照 tableHeaders 的顺序排列，确保列和值对齐
+// 保持 Object.keys 的原始顺序（与 SQL SELECT 列顺序一致）
+// 不要按字母排序，否则 tableHeaders 和 tableKeys 会错位
 const tableKeys = computed(() => {
   if (!props.data || props.data.length === 0) return []
   const keys = Object.keys(props.data[0])
   // 过滤掉时间维度列（MONTHS/FDATE/FDATE_START/FDATE_END）
   const filteredKeys = keys.filter(k => k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
-
-  // 分离维度列和指标列
-  const dimKeys = filteredKeys.filter(k => isDimensionColumn(k))
-  const metricKeys = filteredKeys.filter(k => !isDimensionColumn(k))
-
-  // 按照 tableHeaders 的顺序返回：[维度列..., 指标列...]
-  // 指标列顺序与 metricNames 一致
-  return [...dimKeys, ...metricKeys]
+  return filteredKeys
 })
 
 // 判断是否是维度列（用于 tableKeys 排序）
@@ -326,6 +324,38 @@ function isDimensionColumn(key) {
   ]
   const upperKey = key.toUpperCase()
   return dimColumnPatterns.some(pattern => upperKey.includes(pattern))
+}
+
+// 字段英文名到中文的映射（用于图表 tooltip 显示）
+const FIELD_NAME_MAP = {
+  'ORDERED_PRODUCTSALES': '销售额',
+  'REFUND_QTY': '退款数量',
+  'REFUND_AMOUNT': '退款金额',
+  'VISITORS': '访客数',
+  'ORDERS': '订单数',
+  'UNITS': '销售单元',
+  'PROFIT': '利润',
+  'GMV': 'GMV',
+  'CR': '转化率',
+  'CVR': '转化率',
+  'CTR': '点击率',
+  'ACP': '平均客单价',
+  'AOV': '平均订单价值',
+}
+
+// 维度列类型到中文名的映射
+const DIM_TYPE_NAME_MAP = {
+  'GROUP_1': '一级品类',
+  'GROUP_2': '二级品类',
+  'GROUP_3': '三级品类',
+  'GROUP_4': '四级品类',
+  'FSITE': '站点',
+  'PLATFORM': '平台',
+  'REGION': '地区',
+  'FDATE': '日期',
+  'MONTHS': '月份',
+  'SKU': 'SKU',
+  'ASIN': 'ASIN',
 }
 
 // 判断是否是数值列（排除时间维度列 MONTHS/FDATE/FDATE_START/FDATE_END 及类似列）
@@ -356,40 +386,43 @@ const KNOWN_DIM_COLUMNS = new Set([
 ])
 
 // 多指标表格的列 header（中文名）
+// 保持与 tableKeys 完全一致的顺序（按 result_data 原始 key 顺序）
 const tableHeaders = computed(() => {
   if (!props.data || props.data.length === 0) return []
   const keys = Object.keys(props.data[0])
   // 过滤出数值列（metric 对应的列，排除 MONTHS/FDATE）
   const numericKeys = keys.filter(k => isNumericColumn(k, props.data[0][k]))
-  console.log('[DEBUG tableHeaders] metricNames:', props.metricNames, 'keys:', keys, 'numericKeys:', numericKeys, 'firstRow:', props.data[0])
-  // 维度列（GROUP_X）→ 使用中文维度类型名（排除 MONTHS/FDATE/FDATE_START/FDATE_END）
-  const dimensionHeaders = keys
-    .filter(k => !numericKeys.includes(k) && k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
-    .map(k => {
-      // GROUP_X → 二级品类
-      if (k === 'GROUP_2') return '二级品类'
-      if (k === 'GROUP_1') return '一级品类'
-      if (k === 'GROUP_3') return '三级品类'
-      if (k === 'GROUP_4') return '四级品类'
-      if (k === 'FDATE') return '日期'
-      if (k === 'MONTHS') return '月份'
-      return k
-    })
-  // 指标列：从 metricNames 中过滤掉维度名，剩下的就是指标名
-  let metricHeaders = []
-  if (props.metricNames && props.metricNames.length > 0) {
-    // metricNames 可能混入了维度名，需要过滤
-    metricHeaders = props.metricNames.filter(name => !KNOWN_DIM_COLUMNS.has(name) && !name.includes('品类') && !name.includes('日期') && !name.includes('月份'))
-    // 如果过滤后为空，用 numericKeys 作为 fallback
-    if (metricHeaders.length === 0) {
-      metricHeaders = numericKeys
+  // 过滤掉时间维度列（保持原始 key 顺序）
+  const filteredKeys = keys.filter(k => k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
+
+  // 构建 key → header 映射（与 tableKeys 顺序完全一致）
+  // metricNames 负责映射数值列的中文名，其他列直接用 key 或中文映射
+  const metricNames = props.metricNames || []
+  const metricNameSet = new Set(metricNames)
+
+  return filteredKeys.map(k => {
+    // 数值列：优先用 metricNames 中对应的中文名
+    if (numericKeys.includes(k)) {
+      // 在 metricNames 中找对应的英文名
+      // metricNames 顺序与 numericKeys 顺序应该对应
+      const idx = numericKeys.indexOf(k)
+      if (idx >= 0 && idx < metricNames.length) {
+        return metricNames[idx]
+      }
+      // fallback：用 FIELD_NAME_MAP 映射
+      return FIELD_NAME_MAP[k] || k
     }
-    // 确保数量不超过 numericKeys
-    metricHeaders = metricHeaders.slice(0, numericKeys.length)
-  } else {
-    metricHeaders = numericKeys
-  }
-  return [...dimensionHeaders, ...metricHeaders]
+    // 非数值列（维度列）：中文映射
+    if (k === 'GROUP_2') return '二级品类'
+    if (k === 'GROUP_1') return '一级品类'
+    if (k === 'GROUP_3') return '三级品类'
+    if (k === 'GROUP_4') return '四级品类'
+    if (k === 'FDATE') return '日期'
+    if (k === 'MONTHS') return '月份'
+    // 使用 DIM_TYPE_NAME_MAP 映射维度列
+    if (DIM_TYPE_NAME_MAP[k]) return DIM_TYPE_NAME_MAP[k]
+    return k
+  })
 })
 
 // 格式化表格单元格（根据指标名决定格式化方式）
@@ -454,13 +487,23 @@ const chartType = computed(() => {
   // 单条汇总数据，显示为数字卡片
   if (props.data.length === 1) {
     const keys = Object.keys(props.data[0])
+    // 检查是否存在 GROUP BY 维度列（GROUP_1/2/3/4 等）
+    const hasDimensionColumn = keys.some(k =>
+      k.startsWith('GROUP_') || k === 'FSITE' || k === 'FSITECODE' ||
+      k === 'BRAND' || k === 'PLATFORM' || k === 'REGION' || k === 'SKU' || k === 'ASIN'
+    )
     const numericKeys = keys.filter(k => {
       const val = props.data[0][k]
       const isNum = typeof val === 'number' || !isNaN(parseFloat(val))
       return isNum
     })
-    console.log('[DEBUG chartType] single row, numericKeys length:', numericKeys.length)
-    // 如果只有一个数值字段，显示为数字卡片；多个数值字段显示为表格
+    console.log('[DEBUG chartType] single row, numericKeys length:', numericKeys.length, 'hasDimensionColumn:', hasDimensionColumn)
+    // 如果存在 GROUP BY 维度列，即使只有一个数值也显示为表格（维度名称不能丢失）
+    if (hasDimensionColumn) {
+      console.log('[DEBUG chartType] returning table because has GROUP BY dimension column')
+      return 'table'
+    }
+    // 如果只有一个数值字段且无维度列，显示为数字卡片；多个数值字段显示为表格
     if (numericKeys.length === 1) {
       return 'card'
     } else if (numericKeys.length > 1) {
@@ -470,20 +513,43 @@ const chartType = computed(() => {
   }
 
   const keys = Object.keys(props.data[0])
-  const isTimeSeries = props.data.some(row => {
-    const val = row[props.xAxisKey || keys[0]]
-    return val && (val.includes('-') || val.includes('/') || !isNaN(Date.parse(val)))
-  })
 
+  // 排除非指标列：FDATE系列、MONTHS、ASIN、SKU等分组维度列
+  const excludeKeys = ['FDATE', 'FDATE_END', 'FDATE_START', 'MONTHS', 'ASIN', 'SKU', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4']
   const numericKeys = keys.filter(k => {
+    if (excludeKeys.includes(k)) return false
     // 检查所有行，只要任意一行有有效数值就认为是数值列
     return props.data.some(row => {
       const val = row[k]
-      return val !== null && val !== '' && (typeof val === 'number' || !isNaN(parseFloat(val)))
+      if (val === null || val === '') return false
+      // 排除已经是字符串日期格式的值
+      if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val)) return false
+      return typeof val === 'number' || !isNaN(parseFloat(val))
     })
   })
 
-  console.log('[DEBUG chartType] keys:', keys, 'numericKeys:', numericKeys)
+  // 查找维度列（GROUP_X, REGION, PLATFORM, FSITE 等）
+  const dimensionKeys = keys.filter(k =>
+    k.startsWith('GROUP_') ||
+    k === 'REGION' || k === 'PLATFORM' ||
+    k === 'FSITE' || k === 'FCOUNTRY' ||
+    k === 'FBRAND' || k === 'FPRODUCTLINE'
+  )
+
+  // 优先使用指定的 xAxisKey，如果没有则使用维度列
+  const xAxisKey = props.xAxisKey || (dimensionKeys.length > 0 ? dimensionKeys[0] : keys[0])
+
+  // 判断是否时间序列：如果 x 轴值是日期格式且没有分组维度，则是时间序列
+  const isTimeSeries = props.data.some(row => {
+    const val = row[xAxisKey]
+    // 如果有 GROUP_X 等维度列，通常是分类数据，不是时间序列
+    if (dimensionKeys.length > 0 && dimensionKeys.includes(xAxisKey)) {
+      return false
+    }
+    return val && (val.includes('-') || val.includes('/') || !isNaN(Date.parse(val)))
+  })
+
+  console.log('[DEBUG chartType] keys:', keys, 'numericKeys:', numericKeys, 'dimensionKeys:', dimensionKeys, 'xAxisKey:', xAxisKey, 'isTimeSeries:', isTimeSeries)
 
   if (numericKeys.length === 1) {
     // 檢測是否是佔比/比率數據，優先顯示餅圖
@@ -516,13 +582,28 @@ const chartOptions = computed(() => {
 
   const data = props.data
   const keys = Object.keys(data[0])
-  const xKey = props.xAxisKey || keys[0]
+
+  // 排除非指标列：FDATE系列、MONTHS、ASIN、SKU等分组维度列
+  const excludeKeys = ['FDATE', 'FDATE_END', 'FDATE_START', 'MONTHS', 'ASIN', 'SKU', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4']
+
+  // 查找维度列（GROUP_X, REGION, PLATFORM, FSITE 等）
+  const dimensionKeys = keys.filter(k =>
+    k.startsWith('GROUP_') ||
+    k === 'REGION' || k === 'PLATFORM' ||
+    k === 'FSITE' || k === 'FCOUNTRY' ||
+    k === 'FBRAND' || k === 'FPRODUCTLINE'
+  )
+
+  // 优先使用指定的 xAxisKey，如果没有则使用维度列
+  const xKey = props.xAxisKey || (dimensionKeys.length > 0 ? dimensionKeys[0] : keys[0])
   // 支持字符串数字
   const isNumeric = (val) => typeof val === 'number' || (!isNaN(parseFloat(val)) && typeof val !== 'boolean')
+  // 排除的维度列（时间维度列不是指标）
+  const excludeDateKeys = ['FDATE', 'FDATE_END', 'FDATE_START', 'MONTHS']
   // 计算数值列：检查所有行，只要任意一行有有效数值就认为是数值列
   const numericKeys = props.seriesConfig.length > 0
     ? props.seriesConfig.map(s => s.key)
-    : keys.filter(k => data.some(row => {
+    : keys.filter(k => !excludeDateKeys.includes(k) && data.some(row => {
         const val = row[k]
         return val !== null && val !== '' && (typeof val === 'number' || !isNaN(parseFloat(val)))
       }))
@@ -534,6 +615,37 @@ const chartOptions = computed(() => {
     const compareVal = parseFloat(row.compare_val) || 0
     const changeRate = row.change_rate || '0'
     const trend = row.trend || ''
+
+    // 计算期间标签
+    const formatPeriod = (dateStr) => {
+      if (!dateStr) return ''
+      try {
+        const d = new Date(dateStr)
+        return `${d.getFullYear()}年${d.getMonth() + 1}月`
+      } catch {
+        return dateStr
+      }
+    }
+
+    const currentPeriod = formatPeriod(props.timeStart)
+    // 对比期：YoY 减1年，MoM 减1个月
+    const comparePeriod = (() => {
+      if (!props.timeStart) return '上期'
+      try {
+        const d = new Date(props.timeStart)
+        const isYoy = props.timeStart.includes('-04-') // 简单判断：4月同比通常是YoY
+        // 通过数据行里的时间范围判断（当前期 vs 对比期年份是否相同）
+        // 通用方法：如果 timeStart 存在，用年份差判断
+        const currentYear = d.getFullYear()
+        // 假设 YoY：对比期是去年
+        const compareDate = new Date(d)
+        compareDate.setFullYear(currentYear - 1)
+        return formatPeriod(compareDate.toISOString().slice(0, 10))
+      } catch {
+        return '上期'
+      }
+    })()
+
     return {
       type: 'comparison',
       currentVal: formatChartValue(currentVal),
@@ -541,7 +653,9 @@ const chartOptions = computed(() => {
       changeRate: `${changeRate}%`,
       trend: trend,
       trendClass: trend === '增长' ? 'up' : trend === '下降' ? 'down' : 'flat',
-      trendText: trend === '增长' ? `↑ ${changeRate}%` : trend === '下降' ? `↓ ${changeRate}%` : '持平'
+      trendText: trend === '增长' ? `↑ ${changeRate}%` : trend === '下降' ? `↓ ${changeRate}%` : '持平',
+      currentPeriod,
+      comparePeriod
     }
   }
 
@@ -585,8 +699,9 @@ const chartOptions = computed(() => {
         let html = `<div style="font-weight:500;margin-bottom:4px">${xValue}</div>`
         params.forEach(p => {
           const formattedValue = formatChartValue(p.value)
-          // 单系列时使用中文指标名，多系列时使用各系列自己的名字（如 current_val、compare_val）
-          const label = (params.length === 1 && props.metricName) ? props.metricName : p.seriesName
+          // 单系列时优先使用 props.metricName（后端传递的中文指标名），多系列时用 FIELD_NAME_MAP 映射英文名
+          const seriesName = p.seriesName || ''
+          const label = (params.length === 1 && props.metricName) ? props.metricName : (FIELD_NAME_MAP[seriesName] || seriesName)
           html += `<div style="display:flex;justify-content:space-between;gap:16px">
             <span style="color:#6b7280">${p.marker}${label}</span>
             <span style="font-weight:500;color:#374151">${formattedValue}</span>
@@ -631,7 +746,7 @@ const chartOptions = computed(() => {
         splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } }
       },
       series: numericKeys.map((key, idx) => ({
-        name: numericKeys.length === 1 && props.metricName ? props.metricName : key,
+        name: props.metricName || FIELD_NAME_MAP[key] || key,
         type: 'line',
         data: data.map(row => row[key]),
         smooth: true,
@@ -707,7 +822,7 @@ const chartOptions = computed(() => {
         splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } }
       },
       series: numericKeys.map((key, idx) => ({
-        name: numericKeys.length === 1 && props.metricName ? props.metricName : key,
+        name: props.metricName || FIELD_NAME_MAP[key] || key,
         type: 'bar',
         data: data.map(row => row[key]),
         barWidth: '60%',
