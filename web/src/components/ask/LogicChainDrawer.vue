@@ -1,6 +1,7 @@
 <template>
+  <!-- 桌面端：完整面板 -->
   <transition name="slide-in">
-    <div v-if="visible" class="logic-chain-panel">
+    <div v-if="visible && !isMobile" class="logic-chain-panel">
       <div class="panel-header">
         <div class="panel-title">
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -166,10 +167,32 @@
       </div>
     </div>
   </transition>
+
+  <!-- 移动端：浮动步骤卡片 -->
+  <transition name="step-float">
+    <div v-if="visible && isMobile && stableStep" class="mobile-step-card">
+      <div class="mobile-step-icon" :class="currentStep.status">
+        <svg v-if="currentStep.status === 'completed'" width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M2 7L5.5 10.5L12 4" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <svg v-else-if="currentStep.status === 'pending' || currentStep.status === 'in_progress'" width="14" height="14" viewBox="0 0 14 14" fill="none" class="spinner">
+          <circle cx="7" cy="7" r="5" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
+          <path d="M7 2C7 2 12 2 12 7" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <svg v-else width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M3 3L11 11M11 3L3 11" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div class="mobile-step-info">
+        <span class="mobile-step-name">{{ getStepName(stableStep.step) }}</span>
+        <span v-if="stableStep.duration" class="mobile-step-duration">{{ stableStep.duration }}</span>
+      </div>
+    </div>
+  </transition>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
   modelValue: {
@@ -197,6 +220,51 @@ const visible = computed({
   set: (val) => emit('update:modelValue', val)
 })
 
+// 移动端检测
+const isMobile = ref(false)
+const checkMobile = () => {
+  isMobile.value = window.innerWidth <= 768
+}
+onMounted(() => {
+  checkMobile()
+  window.addEventListener('resize', checkMobile)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', checkMobile)
+})
+
+// 当前步骤（用于移动端卡片）- 带稳定性延迟
+const currentStep = computed(() => {
+  if (!props.steps || props.steps.length === 0) return null
+  // 找到进行中的步骤
+  const pendingIndex = props.steps.findIndex(s => s.status === 'pending' || s.status === 'in_progress')
+  if (pendingIndex !== -1) return props.steps[pendingIndex]
+  // 如果没有进行中的，保持显示上一个完成的步骤一段时间
+  return null
+})
+
+// 稳定显示的步骤（不会快速切换）
+const stableStep = ref(null)
+let stableTimer = null
+
+watch(() => props.steps, (newSteps) => {
+  if (!newSteps || newSteps.length === 0) {
+    stableStep.value = null
+    return
+  }
+  const pendingIndex = newSteps.findIndex(s => s.status === 'pending' || s.status === 'in_progress')
+  if (pendingIndex !== -1) {
+    // 有进行中的步骤，稳定显示
+    stableStep.value = newSteps[pendingIndex]
+  } else {
+    // 所有步骤都完成了，延迟隐藏
+    if (stableTimer) clearTimeout(stableTimer)
+    stableTimer = setTimeout(() => {
+      stableStep.value = null
+    }, 1500) // 完成后保持显示1.5秒再消失
+  }
+}, { deep: true })
+
 const currentStepIndex = computed(() => {
   return props.steps.findIndex(s => s.status === 'pending' || s.status === 'in_progress')
 })
@@ -206,6 +274,12 @@ const sqlExpanded = ref(false)
 
 // MQL JSON 展开状态
 const expandedMqlSteps = ref(new Set())
+
+// 移动端收起/展开状态
+const isCollapsed = ref(false)
+const toggleCollapse = () => {
+  isCollapsed.value = !isCollapsed.value
+}
 
 // 切换 SQL 显示
 function toggleSql() {
@@ -1074,7 +1148,7 @@ pre :deep(.sql-comment) { color: #9CA3AF; font-style: italic; }
 pre :deep(.sql-table) { color: #0891B2; }
 pre :deep(.sql-column) { color: #374151; }
 
-/* Slide transition */
+/* Slide transition - 从底部滑入 */
 .slide-in-enter-active,
 .slide-in-leave-active {
   transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -1082,6 +1156,142 @@ pre :deep(.sql-column) { color: #374151; }
 
 .slide-in-enter-from,
 .slide-in-leave-to {
-  transform: translateX(100%);
+  transform: translateY(100%);
+}
+
+/* ========================================
+   Responsive Design - Mobile Bottom Sheet
+   ======================================== */
+
+@media (max-width: 768px) {
+  .logic-chain-panel {
+    width: 100%;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 60vh;
+    max-height: 60vh;
+    border-radius: 16px 16px 0 0;
+    z-index: 1000;
+    top: auto;
+    transform: translateY(0);
+    transition: height 0.3s ease, transform 0.3s ease;
+  }
+
+  /* 收起状态 */
+  .logic-chain-panel.collapsed {
+    height: 48px;
+    overflow: hidden;
+  }
+
+  .drag-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px 0 8px;
+    cursor: pointer;
+  }
+
+  .drag-indicator {
+    width: 36px;
+    height: 4px;
+    background: #E0E0E0;
+    border-radius: 2px;
+  }
+
+  .panel-header {
+    padding: 8px 16px 12px;
+    border-radius: 0;
+  }
+
+  .close-btn {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+/* ========================================
+   Mobile Floating Step Card
+   ======================================== */
+
+.mobile-step-card {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  background: rgba(30, 30, 40, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 24px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  z-index: 999;
+  min-width: 120px;
+}
+
+.mobile-step-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mobile-step-icon.completed {
+  background: #10B981;
+}
+
+.mobile-step-icon.pending,
+.mobile-step-icon.in_progress {
+  background: #6366F1;
+}
+
+.mobile-step-icon.failed,
+.mobile-step-icon.error {
+  background: #EF4444;
+}
+
+.mobile-step-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mobile-step-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.mobile-step-duration {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* 步骤卡片动画 */
+.step-float-enter-active,
+.step-float-leave-active {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.step-float-enter-from,
+.step-float-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(20px);
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 </style>

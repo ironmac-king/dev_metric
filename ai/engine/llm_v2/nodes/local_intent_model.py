@@ -50,10 +50,14 @@ ID2TAG = {i: tag for i, tag in enumerate(BIO_TAGS)}
 
 TIME_EXPRESSIONS = [
     '今日', '昨日', '本周', '上周', '本月', '上月',
-    '本季度', '上季度', '本年', '去年',
+    '本季度', '上季度', '本年', '去年', '今年',
     '近7天', '近30天', '近3个月',
     '2024年1月', '2023年Q4',
-    '本月至今', '本年至今', '今日实时'
+    '本月至今', '本年至今', '今日实时',
+    # 季度表达式
+    'Q1', 'Q2', 'Q3', 'Q4',
+    '一季度', '二季度', '三季度', '四季度',
+    '本季度初', '上季度末',
 ]
 
 # ============== SKU 格式 ==============
@@ -246,72 +250,104 @@ class LocalJointIntentModel:
         """解码 NER 预测结果"""
         entities = []
 
+        # 获取 offset_mapping，将 token 索引映射到字符偏移
+        offset_mapping = inputs.get('offset_mapping')
+        if offset_mapping is not None:
+            offset_mapping = offset_mapping[0].cpu().numpy()
+        else:
+            # 重新 tokenize 获取 offset_mapping
+            inputs_for_offset = self.tokenizer(
+                original_text,
+                max_length=128,
+                padding='max_length',
+                truncation=True,
+                return_offsets_mapping=True,
+                return_tensors='pt'
+            )
+            offset_mapping = inputs_for_offset['offset_mapping'][0].cpu().numpy()
+
         tokens = self.tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
         current_entity = None
-        entity_start = None
+        entity_start_char = None
 
         for i, (token, pred_id) in enumerate(zip(tokens, ner_preds)):
             if i == 0:  # Skip [CLS]
                 continue
             if i >= 128 - 1:  # Skip [SEP] and padding
                 break
+            if offset_mapping is not None:
+                start_char, end_char = offset_mapping[i]
+                if start_char == end_char == 0:  # Skip special tokens
+                    continue
 
             tag = self.id2tag.get(pred_id, 'O')
 
             if tag.startswith('B-'):
                 # 保存前一个实体
-                if current_entity:
-                    entity_text = self._convert_tokens_to_string(tokens[entity_start:i])
+                if current_entity and entity_start_char is not None:
+                    char_end = last_char_end
+                    entity_text = original_text[entity_start_char:char_end] if original_text else self._convert_tokens_to_string(tokens[entity_start_char:i])
                     if entity_text:
                         entities.append({
                             'text': entity_text,
                             'type': current_entity,
-                            'start': entity_start,
-                            'end': i
+                            'start': entity_start_char,
+                            'end': char_end
                         })
                 # 开始新实体
                 current_entity = tag[2:]
-                entity_start = i
+                entity_start_char = start_char
+                last_char_end = end_char
 
             elif tag.startswith('I-') and current_entity:
                 if tag[2:] != current_entity:
                     # I-标签与当前 B-标签不匹配，重新开始
-                    if current_entity:
-                        entity_text = self._convert_tokens_to_string(tokens[entity_start:i])
+                    if current_entity and entity_start_char is not None:
+                        char_end = last_char_end
+                        entity_text = original_text[entity_start_char:char_end] if original_text else self._convert_tokens_to_string(tokens[entity_start_char:i])
                         if entity_text:
                             entities.append({
                                 'text': entity_text,
                                 'type': current_entity,
-                                'start': entity_start,
-                                'end': i
+                                'start': entity_start_char,
+                                'end': char_end
                             })
                     current_entity = tag[2:]
-                    entity_start = i
-                # 否则继续实体
+                    entity_start_char = start_char
+                    last_char_end = end_char
+                else:
+                    # 继续当前实体，更新 last_char_end
+                    last_char_end = end_char
 
             else:
                 # O标签，保存当前实体
-                if current_entity:
-                    entity_text = self._convert_tokens_to_string(tokens[entity_start:i])
+                if current_entity and entity_start_char is not None:
+                    char_end = last_char_end
+                    entity_text = original_text[entity_start_char:char_end] if original_text else self._convert_tokens_to_string(tokens[entity_start_char:i])
                     if entity_text:
                         entities.append({
                             'text': entity_text,
                             'type': current_entity,
-                            'start': entity_start,
-                            'end': i
+                            'start': entity_start_char,
+                            'end': char_end
                         })
                 current_entity = None
-                entity_start = None
+                entity_start_char = None
+                last_char_end = None
 
         # 处理最后一个实体
-        if current_entity:
-            entity_text = self._convert_tokens_to_string(tokens[entity_start:])
+        if current_entity and entity_start_char is not None:
+            if offset_mapping is not None and len(offset_mapping) > i:
+                char_end = offset_mapping[i][1]
+            else:
+                char_end = len(original_text) if original_text else len(tokens)
+            entity_text = original_text[entity_start_char:char_end] if original_text else self._convert_tokens_to_string(tokens[entity_start_char:])
             if entity_text:
                 entities.append({
                     'text': entity_text,
                     'type': current_entity,
-                    'start': entity_start,
-                    'end': len(tokens)
+                    'start': entity_start_char,
+                    'end': char_end
                 })
 
         # 规则补充：提取 SKU
@@ -390,7 +426,7 @@ class LocalJointIntentModel:
 
     def _build_rule_dict(self):
         """构建规则匹配的词典（从业务术语表加载同义词等）"""
-        self.rule_entities = {'TIME': set(TIME_EXPRESSIONS), 'METRIC': set(), 'DIM_VALUE': set(), 'PLATFORM': set(), 'FULFILL': set()}
+        self.rule_entities = {'TIME': set(TIME_EXPRESSIONS), 'METRIC': set(), 'DIM': set(), 'DIM_VALUE': set(), 'PLATFORM': set(), 'FULFILL': set()}
 
         # 常见指标作为兜底
         common_metrics = ['销售额', 'GMV', '销量', '收入', '利润', '成本', 'ACOS', 'ROAS', 'CPC', 'CTR', '曝光量', '点击量', '会话量', '订单量', '转化率', '客单价', '毛利率', '净利率', '业绩', '利润额']
@@ -406,20 +442,34 @@ class LocalJointIntentModel:
                 for term_info in terms:
                     term = term_info.get('term', '')
                     synonyms = term_info.get('synonyms', '')
-                    if term:
+                    dim_field = term_info.get('dimension_field', '')  # 维度字段名，非空则表示是维度类型
+                    if not term:
+                        continue
+
+                    # 解析同义词列表
+                    def parse_synonyms(syns):
+                        if isinstance(syns, list):
+                            return [s.strip() for s in syns if s and len(s.strip()) >= 2]
+                        elif isinstance(syns, str):
+                            return [s.strip() for s in syns.split(',') if s.strip() and len(s.strip()) >= 2]
+                        return []
+
+                    syn_list = parse_synonyms(synonyms)
+
+                    if dim_field and dim_field.strip():
+                        # 有 dimension_field → 该 term 是维度字段，主词入 DIM，同义词入 DIM_VALUE
+                        if len(term) >= 2:
+                            self.rule_entities['DIM'].add(term)
+                        for s in syn_list:
+                            if s != term:
+                                self.rule_entities['DIM_VALUE'].add(s)
+                    else:
+                        # 无 dimension_field → 作为指标处理
                         if term not in self.rule_entities['METRIC']:
                             self.rule_entities['METRIC'].add(term)
-                    # 解析同义词（可能是字符串或列表）
-                    if synonyms:
-                        if isinstance(synonyms, list):
-                            for syn in synonyms:
-                                if syn and len(syn) >= 2:
-                                    self.rule_entities['METRIC'].add(syn)
-                        elif isinstance(synonyms, str):
-                            for syn in synonyms.split(','):
-                                syn = syn.strip()
-                                if syn and len(syn) >= 2:
-                                    self.rule_entities['METRIC'].add(syn)
+                        for s in syn_list:
+                            if s not in self.rule_entities['METRIC']:
+                                self.rule_entities['METRIC'].add(s)
                 logger.info(f"[LocalJointIntentModel] 从 API 加载了 {len(terms)} 个业务术语")
         except Exception as e:
             logger.warning(f"[LocalJointIntentModel] 加载业务术语失败: {e}")
@@ -503,17 +553,32 @@ class LocalJointIntentModel:
                 all_entities.append(e)
                 covered_ranges.append((e['start'], e['end']))
 
-        # 去重（同类型、同文本）
+        # 按 start 排序
+        all_entities.sort(key=lambda x: (x['start'], -x['end']))
+
+        # 去重 + 类型优先级：DIM > METRIC > DIM_VALUE > TIME > PLATFORM > FULFILL
+        type_priority = {'DIM': 0, 'METRIC': 2, 'DIM_VALUE': 1, 'TIME': 3, 'PLATFORM': 4, 'FULFILL': 5, 'SKU_VALUE': 6}
         seen = set()
         final = []
         for e in all_entities:
-            key = (e['text'], e['type'])
+            key = (e['start'], e['end'])
             if key not in seen:
+                # 检查是否与已有实体重叠，重叠则按优先级决定是否替换
+                replace_idx = None
+                for i, f in enumerate(final):
+                    if e['start'] < f['end'] and e['end'] > f['start']:
+                        p1 = type_priority.get(e['type'], 99)
+                        p2 = type_priority.get(f['type'], 99)
+                        if p1 < p2:
+                            replace_idx = i
+                        break
+                if replace_idx is not None:
+                    final[replace_idx] = e
+                else:
+                    final.append(e)
                 seen.add(key)
-                final.append(e)
-
-        # 按 start 排序
-        final.sort(key=lambda x: x['start'])
+            else:
+                pass  # 完全相同的 key 已跳过
 
         # 过滤太短的实体（长度 < 2）
         final = [e for e in final if len(e['text']) >= 2]

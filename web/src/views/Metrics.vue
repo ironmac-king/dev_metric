@@ -128,7 +128,7 @@
           row-class-name="table-row"
           @row-click="handleRowClick"
         >
-          <el-table-column prop="metric_code" label="指标编号" width="180" align="right">
+          <el-table-column prop="metric_code" label="指标编号" width="180" align="right" sortable :sort-orders="['descending', 'ascending']">
             <template #default="{ row }">
               <span class="code-text">{{ row.metric_code }}</span>
             </template>
@@ -785,17 +785,18 @@ async function handleEdit(row) {
 
 async function submitForm() {
   if (!formRef.value) return
+  // validate() 失败返回 false 而非抛出异常，需要先检查返回值
+  const valid = await formRef.value.validate().catch(() => false)
+  if (!valid) return
+
   try {
-    await formRef.value.validate()
     submitting.value = true
     await metricAPI.create(formData.value)
     ElMessage.success('创建成功')
     dialogVisible.value = false
     loadMetrics()
   } catch (e) {
-    if (e !== false) {
-      ElMessage.error('创建失败')
-    }
+    ElMessage.error('创建失败')
   } finally {
     submitting.value = false
   }

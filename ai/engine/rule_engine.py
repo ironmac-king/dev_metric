@@ -738,8 +738,9 @@ class RuleEngine:
                 metric_name = ml_entities.get("metric_name")
                 if metric_name:
                     # 尝试用抽取的指标名匹配
+                    # 注意：只允许后缀匹配，不允许包含匹配，避免"佣金"匹配到"佣金费率"
                     for term, metric_info in self.metric_templates.items():
-                        if metric_name in term or term in metric_name:
+                        if metric_name == term or term.endswith(metric_name):
                             result.update(metric_info)
                             found_metric = True
                             logger.debug(f"ML实体抽取匹配成功: {metric_name} -> {metric_info.get('metric_name')}")

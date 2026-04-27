@@ -14,6 +14,7 @@ from ai.engine.prompt_manager import get_prompt_manager
 from ai.engine.llm import get_llm_engine
 from ..schema import MQLSchema, MQLIntent, MQLMetric, MQLDimension, MQLFilter, TimeRange, TimeType, OperatorType
 from ..cache import get_history_reuse_cache
+from ai.engine.time_parser import TimeParser
 
 logger = get_logger("ai.llm_v2.mql_generator")
 
@@ -55,6 +56,7 @@ class MQLGenerator:
         question: str,
         rag_context: List[Dict[str, Any]] = None,
         inherited_mql: Optional[MQLSchema] = None,
+        intent_router_mql: Optional[MQLSchema] = None,
     ) -> Optional[MQLSchema]:
         """
         生成 MQL
@@ -63,6 +65,7 @@ class MQLGenerator:
             question: 用户问题
             rag_context: RAG 检索到的相似案例
             inherited_mql: 继承的 MQL（多轮对话）
+            intent_router_mql: intent_router 已识别到的 MQL（本地模型成功时传入）
 
         Returns:
             MQLSchema 或 None
@@ -70,14 +73,25 @@ class MQLGenerator:
         logger.info(f"[MQLGenerator] 生成 MQL: {question[:50]}...")
 
         try:
-            # 0. 查历史缓存（优化：相似问题直接复用，跳过 LLM 调用）
+            # 0. 如果 intent_router 本地模型已成功识别，直接基于其结果生成 MQL（跳过 LLM）
+            if intent_router_mql:
+                logger.info(f"[MQLGenerator] 本地模型已识别，使用 intent_router_mql: metric={intent_router_mql.metric.name if intent_router_mql.metric else None}")
+                mql = intent_router_mql
+                # 填充默认值
+                self._fill_defaults(mql, inherited_mql)
+                # 校正指标名中的维度值
+                self._correct_dimension_value_in_metric_name(mql)
+                logger.info(f"[MQLGenerator] 本地模型 MQL 生成完成: intent={mql.intent.value}")
+                return mql
+
+            # 1. 查历史缓存（优化：相似问题直接复用，跳过 LLM 调用）
             # 注意：对于追问（source=followup），跳过缓存以保留从 intent_router 继承的 comparison 和 dimensions
             history_cache = get_history_reuse_cache()
             # 检查是否是追问场景（通过 inherited_mql 判断）
             is_followup = inherited_mql is not None
             if not is_followup:
                 # 非追问场景才查缓存
-                cached = history_cache.find_similar(question, threshold=0.75)
+                cached = history_cache.find_similar(question, threshold=0.99)
             else:
                 # 追问场景跳过缓存
                 cached = None
@@ -218,6 +232,44 @@ class MQLGenerator:
             logger.warning(f"[_load_business_terms] 加载业务术语失败: {e}")
             return {}, set()
 
+    def _get_synonym_context(self) -> str:
+        """
+        获取维度值同义词上下文，用于 prompt 中告诉 LLM 同义词映射关系。
+        格式：用户词 → 标准值 (field=列名)
+        说明：当用户问题中出现"用户词"时，应生成 filter {"field": "列名", "value": "标准值"}
+        """
+        try:
+            from ai.client.metric_client import MetricClient
+            from ai.services.dimension_service import DimensionService
+            client = MetricClient()
+            svc = DimensionService()
+            terms = client.get_business_terms()
+            lines = []
+            # 添加说明头部
+            header = "【重要】以下用户词对应具体的数据库维度值，遇到这些词必须生成 filter："
+            for t in terms:
+                synonyms = t.get("synonyms") or []
+                if isinstance(synonyms, str):
+                    synonyms = [s.strip().strip('"') for s in synonyms.strip("{}").split(",") if s.strip()]
+                dim_type = t.get("dimension_field", "")  # 中文维度类型，如"站点"
+                canonical = t.get("dimension_value", "")
+                if not canonical or not synonyms:
+                    continue
+                # 只处理有维度字段的同义词（用于维度值映射）
+                if dim_type:
+                    # 将中文维度类型转换为列名
+                    col_name = svc.find_column_by_type(dim_type)
+                    if not col_name:
+                        col_name = dim_type  # fallback
+                    syn_list = "、".join(synonyms[:5])  # 最多5个同义词
+                    lines.append(f"  {syn_list} → filter={{\"field\": \"{col_name}\", \"value\": \"{canonical}\"}}")
+            if lines:
+                return header + "\n" + "\n".join(lines[:20])  # 最多20条
+            return ""
+        except Exception as e:
+            logger.warning(f"[_get_synonym_context] 获取同义词上下文失败: {e}")
+            return ""
+
     def _build_prompt(
         self,
         question: str,
@@ -258,11 +310,42 @@ class MQLGenerator:
 
         # 维度值上下文（从 dim_value_mapping 查询）
         dim_values_context = self._get_dimension_values_context()
-        if dim_values_context:
-            context_parts.append("\n【维度值参考】")
-            context_parts.append(dim_values_context)
 
-        context_str = "\n".join(context_parts) if context_parts else "（无历史上下文）"
+        # 同义词上下文（告诉 LLM 用户词到标准值的映射）
+        synonym_context = self._get_synonym_context()
+
+        # 合并所有上下文
+        full_context_parts = []
+        if context_parts:
+            full_context_parts.extend(context_parts)
+        if synonym_context:
+            full_context_parts.append("\n【同义词映射】")
+            full_context_parts.append(synonym_context)
+
+        # 如果有上下文内容，插入到 prompt 模板中
+        if dim_values_context or full_context_parts or synonym_context:
+            # 构建上下文字符串
+            context_sections = []
+            if full_context_parts:
+                context_sections.append("\n".join(full_context_parts))
+            if dim_values_context:
+                context_sections.append("\n【维度值参考】\n" + dim_values_context)
+
+            combined_context = "\n".join(context_sections) if context_sections else ""
+
+            # 直接在模板中插入上下文内容（因为模板中没有 {context} 占位符）
+            # 在【上下文】和【维度值参考】之间插入
+            if combined_context.strip():
+                # 移除模板中【上下文】后面的空行，插入我们的内容
+                prompt_template = prompt_template.replace(
+                    "【上下文】\n\n【维度值参考】",
+                    f"【上下文】\n{combined_context}\n\n【维度值参考】"
+                )
+                # 如果模板只有【上下文】没有【维度值参考】
+                prompt_template = prompt_template.replace(
+                    "【上下文】\n\n",
+                    f"【上下文】\n{combined_context}\n"
+                )
 
         # 动态获取中文维度关键词
         dim_keywords_str = self._get_dimension_keywords_str()
@@ -273,7 +356,6 @@ class MQLGenerator:
         return self._safe_format(
             prompt_template,
             question=question,
-            context=context_str,
             dimension_keywords=dim_keywords_str,
         )
 
@@ -433,6 +515,21 @@ class MQLGenerator:
                 )
             except ValueError:
                 mql.time = TimeRange(original=time_data.get("original", "本月"))
+            # 如果 start/end 为空，调用 TimeParser 将 original 转换为绝对日期
+            if not mql.time.start or not mql.time.end:
+                time_parser = TimeParser()
+                parsed = time_parser.parse(mql.time.original)
+                if parsed:
+                    if not mql.time.start:
+                        mql.time.start = parsed.get("start", "")
+                    if not mql.time.end:
+                        mql.time.end = parsed.get("end", "")
+                    if parsed.get("type"):
+                        try:
+                            mql.time.type = TimeType(parsed["type"])
+                        except ValueError:
+                            pass
+            logger.info(f"[_parse_mql] 时间解析: original={mql.time.original}, start={mql.time.start}, end={mql.time.end}")
 
         # 加载 dimension_configs 动态映射
         self._load_dimension_configs()
@@ -515,15 +612,30 @@ class MQLGenerator:
                     # 1. 标准化：同义词映射到标准值
                     normalized_value = synonym_map.get(value_str, value_str)
 
-                    for kw in dimension_keywords:
-                        # 检查两种顺序：kw+value 或 value+kw（使用原值和标准化值）
-                        patterns = [
-                            kw + value_str, value_str + kw,
-                            kw + normalized_value, normalized_value + kw
-                        ]
-                        if any(p in question for p in patterns):
+                    # 验证逻辑：
+                    # 1. 如果值本身或其同义词在问题中出现，则验证通过
+                    # 2. 或者，如果值紧跟维度关键词出现，也验证通过
+                    all_values = {value_str, normalized_value}
+                    # 找到这个标准值对应的所有同义词
+                    for syn, canon in synonym_map.items():
+                        if canon == normalized_value or canon == value_str:
+                            all_values.add(syn)
+
+                    is_valid_filter = False
+                    for v in all_values:
+                        # 方式1：值本身在问题中出现
+                        if v in question:
                             is_valid_filter = True
-                            logger.info(f"[_parse_mql] 验证通过: filter field={field}, value={filter_value} 紧跟维度关键词'{kw}'")
+                            logger.info(f"[_parse_mql] 验证通过: filter field={field}, value={filter_value} (值'{v}'在问题中出现)")
+                            break
+                        # 方式2：值紧跟维度关键词出现
+                        for kw in dimension_keywords:
+                            patterns = [kw + v, v + kw]
+                            if any(p in question for p in patterns):
+                                is_valid_filter = True
+                                logger.info(f"[_parse_mql] 验证通过: filter field={field}, value={filter_value} 紧跟维度关键词'{kw}'")
+                                break
+                        if is_valid_filter:
                             break
 
                     # 2. 值验证：确保是有效的业务术语
@@ -537,19 +649,21 @@ class MQLGenerator:
                             is_valid_filter = False
 
                 if is_valid_filter:
+                    # 使用标准化后的值（美国站 → 美国亚马逊）
+                    final_value = synonym_map.get(value_str, filter_value)
                     mql.filters.append(MQLFilter(
                         field=field,
                         operator=OperatorType(filter_data.get("operator", "eq")),
-                        value=filter_value,
+                        value=final_value,
                     ))
                 else:
                     logger.warning(f"[_parse_mql] 丢弃无效 filter: field={field}, value={filter_value}, question={question[:50]}...")
             except ValueError:
                 pass
 
-        # 对比
-        comparison_data = result.get("comparison", {})
-        if comparison_data:
+        # 对比 - 只有当 enabled=true 且有实际 types 时才使用 LLM 返回值，否则留空让 graph.py 恢复 inherited 值
+        comparison_data = result.get("comparison")
+        if comparison_data and comparison_data.get("enabled") and comparison_data.get("types"):
             from ..schema import ComparisonSpec
             mql.comparison = ComparisonSpec(
                 enabled=comparison_data.get("enabled", False),
@@ -740,8 +854,13 @@ class MQLGenerator:
         return None
 
     def _get_default_nl2mql_prompt(self) -> str:
-        """默认 NL2MQL prompt"""
-        return """【角色】
+        """默认 NL2MQL prompt - 动态注入实际指标和维度"""
+        from ai.engine.prompt_metadata_loader import get_prompt_metadata_loader
+        loader = get_prompt_metadata_loader()
+        metric_names_str = loader.build_metric_names_section(max_count=80)
+        dim_mappings_str = loader.build_dimension_mappings_section()
+
+        prompt = """【角色】
 你是一个专业的业务指标查询助手，擅长将用户的自然语言问题转换为结构化的 MQL (Metric Query Language) JSON。
 
 【MQL JSON Schema】
@@ -751,7 +870,7 @@ class MQLGenerator:
   "confidence": 0.0-1.0,
   "metric": {{
     "code": "留空，不填！由后续系统根据 name 自动查找",
-    "name": "指标名称，如 总销售额、客单价、订单量",
+    "name": "指标名称，从以下列表中选择：{METRIC_NAMES}",
     "table": "留空，不填！由后续系统根据 name 自动查找",
     "field": "留空，不填！由后续系统根据 name 自动查找"
   }},
@@ -786,13 +905,24 @@ class MQLGenerator:
 - query_trend: 查询趋势变化
 - query_comparison: 对比分析（同比/环比）
 - query_ranking: 排名分析
-- query_ratio: 占比分析
+- query_ratio: 占比分析（仅当用户明确指定"XX占YY的比重"时才使用，否则应使用 query_value + dimensions）
 - query_metadata: 查询元数据
 
 【时间类型说明】
 - date_range: 日期范围，如 2026-03-01 到 2026-03-15
 - relative: 相对表达，如 近30天、本月、上月
 - absolute_month: 绝对月份，如 2026-03
+- absolute_quarter: 绝对季度，表示季度范围，用 start/end 表示，如 2026-Q1 → start="2026-01-01", end="2026-03-31"
+  * 常见季度表达：一季度/Q1、二季度/Q2、三季度/Q3、四季度/Q4
+  * 示例："今年一季度" → type="absolute_quarter", start="2026-01-01", end="2026-03-31", original="今年一季度"
+  * 示例："去年Q3" → type="absolute_quarter", start="2025-07-01", end="2025-09-30", original="去年Q3"
+- ⚠️ 重要："今年"（不带季度）→ start="2026-01-01", end="昨天日期"，original="今年"
+  * 示例："今年业绩" → type="date_range", start="2026-01-01", end="2026-04-26", original="今年"
+  * 示例："今年销售额" → type="date_range", start="2026-01-01", end="2026-04-26", original="今年"
+  * "今年"不要误解为"本月"、"近30天"、"近7天"！
+- ⚠️ 重要：**只返回 `original`，不要返回 `start` 和 `end`**！让系统自动计算日期范围！
+  * 错误示例：{"type": "date_range", "start": "2026-04-01", "end": "2026-04-27", "original": "今年"}
+  * 正确示例：{"type": "date_range", "start": "", "end": "", "original": "今年"}
 
 【计算模式】
 - yoy: 同比
@@ -813,32 +943,20 @@ class MQLGenerator:
 3. 每个指标只需提供 name（code/table/field 由后续系统自动查找）
 
 【占比计算（percentage）填写说明】
-当用户询问"XX占YY的比重/比例/占比"时：
+⚠️ 重要：只有当用户明确说"XX占YY的比重/比例/占比"时（即明确指定分子和分母），才使用 percentage 模式！
+❌ 错误理解："各站点销售额占比"、"按平台计算销售额占比" → 这只是按维度分组查询，不是占比计算！
+✅ 正确理解："美国站销售额占总销售额的比重" → 分子=美国站销售额, 分母=总销售额
 1. 设置 calculation_patterns: ["percentage"]
-2. molecule_metric: 分子，如 {{"name": "退款数量", "field": "REFUND_QTY", "aggregation": "SUM"}}
-3. denominator_metric: 分母，如 {{"name": "销量", "field": "ORDERED_PRODUCTSALES", "aggregation": "SUM"}}
-注意：field 字段名必须是 StarRocks 表中实际存在的列名！
+2. molecule_metric: 分子，如 {{"name": "美国站销售额", "field": "ORDERED_PRODUCTSALES", "aggregation": "SUM", "code": "MKI-02-0009"}}
+3. denominator_metric: 分母，如 {{"name": "总销售额", "field": "ORDERED_PRODUCTSALES", "aggregation": "SUM", "code": "MKI-02-0009"}}
+注意：field 字段名必须是 StarRocks 表中实际存在的列名！分子/分母的 field 应该相同（都是 ORDERED_PRODUCTSALES）
 
-【维度类型参考】
-- GROUP_1: 一级品类
-- GROUP_2: 二级品类
-- GROUP_3: 三级品类
-- GROUP_4: 四级品类
-- SKU: 商品SKU
+【系统实际维度类型（严格按此映射）】
+{DIMENSION_MAPPINGS}
 - FDATE: 日期
 - MONTHS: 月份
 - WEEKS: 周
 - YEARS: 年
-- REGION: 地区/区域
-- FCOUNTRY: 国家
-- PLATFORM: 平台
-- FSITE: 店铺
-- FSITECODE: 站点
-- FCHANNEL: 渠道
-- FBRANDS: 品牌
-- FPRODUCTLINE: 产品线
-- FADTYPE: 广告类型
-- AD_TYPE: 广告类型
 
 【时间粒度分组规则】
 当用户提到以下时间粒度关键词时，在 dimensions 中返回对应的语义类型（由系统代码映射到数据库列名）：
@@ -850,6 +968,9 @@ class MQLGenerator:
 示例：
 - 用户说"本月每天销售额" → dimensions 应包含 [{{"type": "天"}}]
 - 用户说"每周订单量趋势" → dimensions 应包含 [{{"type": "周"}}]
+- 用户说"广告效果分析" → metric.name="广告效果"，intent="query_value"，confidence=0.7（广告效果是指标名，不是维度）
+- 用户说"本月ROAS是多少" → metric.name="ROAS"，intent="query_value"
+- 用户说"广告花费对比" → metric.name="广告花费"，intent="query_comparison"，comparison={{"enabled": true, "types": ["同比"]}}
 
 【约束条件】
 1. 必须输出合法 JSON
@@ -878,3 +999,7 @@ class MQLGenerator:
 {question}
 
 请输出 JSON："""
+
+        prompt = prompt.replace("{METRIC_NAMES}", metric_names_str)
+        prompt = prompt.replace("{DIMENSION_MAPPINGS}", dim_mappings_str)
+        return prompt

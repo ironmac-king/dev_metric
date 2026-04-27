@@ -234,4 +234,39 @@ export const slotConfigAPI = {
   deleteRelation: (id) => api.delete(`/nlp/slot-relations/${id}`)
 }
 
+// 触发规则配置 API
+export const triggerConfigAPI = {
+  list: (params) => api.get('/nlp/trigger-configs', { params }),
+  get: (id) => api.get(`/nlp/trigger-configs/${id}`),
+  create: (data) => api.post('/nlp/trigger-configs', data),
+  update: (id, data) => api.put(`/nlp/trigger-configs/${id}`, data),
+  delete: (id) => api.delete(`/nlp/trigger-configs/${id}`)
+}
+
+// 触发器开关配置 API
+export const triggerSwitchAPI = {
+  list: (params) => api.get('/nlp/trigger-switches', { params }),
+  get: (type) => api.get(`/nlp/trigger-switches/${type}`),
+  set: (type, data) => api.put(`/nlp/trigger-switches/${type}`, data),
+  delete: (type) => api.delete(`/nlp/trigger-switches/${type}`)
+}
+
+// 输出模板配置 API
+export const outputTemplateAPI = {
+  list: (params) => api.get('/nlp/output-templates', { params }),
+  get: (id) => api.get(`/nlp/output-templates/${id}`),
+  create: (data) => api.post('/nlp/output-templates', data),
+  update: (id, data) => api.put(`/nlp/output-templates/${id}`, data),
+  delete: (id) => api.delete(`/nlp/output-templates/${id}`)
+}
+
+// 业务维度标签 API
+export const dimensionLabelAPI = {
+  list: (params) => api.get('/nlp/labels', { params }),
+  get: (id) => api.get(`/nlp/labels/${id}`),
+  create: (data) => api.post('/nlp/labels', data),
+  update: (id, data) => api.put(`/nlp/labels/${id}`, data),
+  delete: (id) => api.delete(`/nlp/labels/${id}`)
+}
+
 export default api

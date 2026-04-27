@@ -1180,7 +1180,7 @@ NL2Structure Prompt 用于将用户自然语言转换为结构化数据，输出
             except Exception:
                 yield "LLM 调用出错: (编码错误无法显示)"
 
-    async def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 4000) -> str:
+    async def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 4000, system_prompt: str = None) -> str:
         """
         非流式 LLM 调用（一次性返回完整结果）
 
@@ -1188,23 +1188,29 @@ NL2Structure Prompt 用于将用户自然语言转换为结构化数据，输出
             prompt: 提示词
             temperature: 温度参数
             max_tokens: 最大 token 数
+            system_prompt: 系统提示词（可选）
 
         Returns:
             str: LLM 返回的完整文本
         """
+        import traceback
         try:
+            logger.info(f"[LLMEngine.generate] 开始调用, model={self.model}, temperature={temperature}")
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            try:
-                logger.info(f"[LLMEngine] LLM 调用失败: {e}")
-            except Exception:
-                pass
+            logger.error(f"[LLMEngine.generate] LLM 调用失败: {type(e).__name__}: {e}")
+            logger.error(f"[LLMEngine.generate] 配置: model={self.model}, base_url={getattr(self.client, '_base_url', 'N/A')}")
+            logger.error(f"[LLMEngine.generate] 异常堆栈: {traceback.format_exc()}")
             raise e
 
 

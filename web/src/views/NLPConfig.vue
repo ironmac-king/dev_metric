@@ -166,6 +166,123 @@
           </div>
         </el-tab-pane>
 
+        <!-- 下钻配置 -->
+        <el-tab-pane label="下钻配置" name="drilldown">
+          <div class="drilldown-config">
+            <!-- 左侧类目导航 -->
+            <div class="drilldown-sidebar">
+              <div
+                v-for="cat in drilldownCategories"
+                :key="cat.id"
+                class="category-item"
+                :class="{ active: activeDrilldownCategory === cat.id }"
+                @click="activeDrilldownCategory = cat.id"
+              >
+                <span class="category-icon">{{ cat.icon }}</span>
+                <span class="category-label">{{ cat.label }}</span>
+              </div>
+            </div>
+
+            <!-- 右侧配置面板 -->
+            <div class="drilldown-main">
+              <div class="section-header">
+                <h2 class="section-title">
+                  {{ getCurrentCategoryLabel() }} - SQL 模板配置
+                </h2>
+                <el-button type="primary" class="btn-primary" @click="addDrilldownTemplate">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M7 3V11M3 7H11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                  </svg>
+                  添加模板
+                </el-button>
+              </div>
+
+              <!-- 模板列表 -->
+              <div class="drilldown-templates">
+                <div
+                  v-for="(tpl, idx) in currentDrilldownTemplates"
+                  :key="tpl.id || idx"
+                  class="template-card"
+                >
+                  <div class="template-header">
+                    <el-input
+                      v-model="tpl.template_name"
+                      class="template-name-input"
+                      placeholder="模板名称，如：基础指标、同环比"
+                    />
+                    <el-input
+                      v-model.number="tpl.template_order"
+                      type="number"
+                      class="template-order-input"
+                      placeholder="排序"
+                    />
+                    <el-button link class="delete-btn" @click="removeDrilldownTemplate(idx)">
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <path d="M10.5 3.5L3.5 10.5M3.5 3.5L10.5 10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                      </svg>
+                    </el-button>
+                  </div>
+
+                  <div class="template-body">
+                    <div class="form-label">SQL 模板</div>
+                    <el-input
+                      v-model="tpl.sql_template"
+                      type="textarea"
+                      :rows="4"
+                      placeholder="SELECT 销售额, 订单量, 客单价 FROM sales WHERE FDATE >= '{start_date}' AND FDATE <= '{end_date}'"
+                    />
+
+                    <div class="form-label" style="margin-top: 12px;">关联指标</div>
+                    <el-select
+                      v-model="tpl.metric_names"
+                      multiple
+                      filterable
+                      allow-create
+                      default-first-option
+                      placeholder="选择或输入指标名称"
+                      style="width: 100%"
+                    >
+                      <el-option
+                        v-for="m in availableMetrics"
+                        :key="m.metric_code"
+                        :label="m.name"
+                        :value="m.name"
+                      />
+                    </el-select>
+                  </div>
+
+                  <div class="template-footer">
+                    <el-switch
+                      v-model="tpl.status"
+                      :active-value="1"
+                      :inactive-value="0"
+                    />
+                    <span class="status-label">{{ tpl.status === 1 ? '启用' : '禁用' }}</span>
+                    <el-button
+                      v-if="tpl.id"
+                      type="primary"
+                      link
+                      @click="saveDrilldownTemplate(tpl)"
+                    >
+                      保存
+                    </el-button>
+                  </div>
+                </div>
+
+                <!-- 空状态 -->
+                <div v-if="currentDrilldownTemplates.length === 0" class="empty-state">
+                  <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                    <rect x="8" y="12" width="32" height="24" rx="4" stroke="#D1D5DB" stroke-width="2"/>
+                    <path d="M16 20H32M16 26H26" stroke="#D1D5DB" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                  <p>暂无模板配置</p>
+                  <el-button type="primary" @click="addDrilldownTemplate">添加第一个模板</el-button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
+
         <!-- 公式语法配置 -->
         <el-tab-pane label="公式语法" name="formula">
           <div class="section">
@@ -307,6 +424,34 @@
                   prefix-icon="Search"
                   clearable
                   class="search-input"
+                />
+                <el-button @click="downloadTermTemplate" class="btn-default">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M7 3V11M7 11L4 8M7 11L10 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M2 11V12C2 12.5523 2.44772 13 3 13H11C11.5523 13 12 12.5523 12 12V11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                  </svg>
+                  下载模板
+                </el-button>
+                <el-button @click="exportTerms" class="btn-default">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M7 3V11M7 3L4 6M7 3L10 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M2 11V12C2 12.5523 2.44772 13 3 13H11C11.5523 13 12 12.5523 12 12V11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                  </svg>
+                  导出
+                </el-button>
+                <el-button @click="triggerImport" class="btn-default">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <path d="M7 3V11M3 7H7M7 7H11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M2 11V12C2 12.5523 2.44772 13 3 13H11C11.5523 13 12 12.5523 12 12V11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                  </svg>
+                  导入
+                </el-button>
+                <input
+                  ref="termImportInput"
+                  type="file"
+                  accept=".xlsx,.xls"
+                  style="display:none"
+                  @change="handleTermImport"
                 />
                 <el-button type="primary" class="btn-primary" @click="showTermDialog('create')">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -1302,6 +1447,7 @@ const termForm = ref({
 const editingTermId = ref(null)
 const dimensionFieldOptions = ref([])
 const dimensionValueOptions = ref([])
+const termImportInput = ref(null)
 
 async function loadDimensionFields() {
   try {
@@ -1325,6 +1471,95 @@ function loadDimensionValues(dimField) {
       .map(t => t.dimension_value)
   )]
   dimensionValueOptions.value = values
+}
+
+// 导出业务术语
+async function exportTerms() {
+  try {
+    ElMessage.info('正在导出...')
+    const response = await fetch('/api/v1/metadata/terms/export')
+    if (!response.ok) {
+      throw new Error('导出失败')
+    }
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `business_terms_${new Date().toISOString().slice(0, 10)}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+    ElMessage.success('导出成功')
+  } catch (e) {
+    console.error('导出失败:', e)
+    ElMessage.error('导出失败')
+  }
+}
+
+// 下载导入模板
+async function downloadTermTemplate() {
+  try {
+    const response = await fetch('/api/v1/metadata/terms/export-template')
+    if (!response.ok) {
+      throw new Error('下载模板失败')
+    }
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `business_terms_template_${new Date().toISOString().slice(0, 10)}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+    ElMessage.success('模板下载成功')
+  } catch (e) {
+    console.error('下载模板失败:', e)
+    ElMessage.error('下载模板失败')
+  }
+}
+
+// 触发导入文件选择
+function triggerImport() {
+  termImportInput.value?.click()
+}
+
+// 处理术语导入
+async function handleTermImport(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+
+  const formData = new FormData()
+  formData.append('file', file)
+
+  try {
+    ElMessage.info('正在导入...')
+    const response = await fetch('/api/v1/metadata/terms/import', {
+      method: 'POST',
+      body: formData
+    })
+    const data = await response.json()
+    if (data.code === 0 || data.code === undefined) {
+      const success = data.data?.success || 0
+      const errors = data.data?.errors || []
+      if (errors.length > 0) {
+        ElMessage.warning(`导入完成：成功${success}条，部分失败`)
+        console.warn('导入错误:', errors)
+      } else {
+        ElMessage.success(`导入成功：${success}条`)
+      }
+      loadData()
+    } else {
+      ElMessage.error(data.message || '导入失败')
+    }
+  } catch (e) {
+    console.error('导入失败:', e)
+    ElMessage.error('导入失败')
+  }
+
+  // 清空文件输入，允许重新选择同一文件
+  event.target.value = ''
 }
 
 async function loadData() {
@@ -2079,6 +2314,140 @@ async function rebuildMetricEmbeddings() {
   }
 }
 
+// ==================== 下钻配置 ====================
+
+// 下钻类目定义
+const drilldownCategories = [
+  { id: 'sales', label: '销售经营', icon: '📊' },
+  { id: 'ad', label: '广告投放', icon: '📢' },
+  { id: 'inventory', label: '库存供应链', icon: '📦' },
+  { id: 'cost', label: '成本毛利', icon: '💰' }
+]
+
+const activeDrilldownCategory = ref('sales')
+const drilldownTemplates = ref([])  // 所有下钻模板（按 category 过滤后展示）
+
+// 可用指标列表（用于选择关联指标）
+const availableMetrics = computed(() => {
+  return metricsList.value.map(m => ({
+    metric_code: m.metric_code,
+    name: m.name,
+    unit: m.unit
+  }))
+})
+
+// 当前类目下的模板
+const currentDrilldownTemplates = computed(() => {
+  return drilldownTemplates.value.filter(t => t.drilldown_category === activeDrilldownCategory.value)
+})
+
+// 获取当前类目标签
+function getCurrentCategoryLabel() {
+  const cat = drilldownCategories.find(c => c.id === activeDrilldownCategory.value)
+  return cat ? cat.label : ''
+}
+
+// 加载下钻模板
+async function loadDrilldownTemplates() {
+  try {
+    const res = await fetch('/api/v1/nlp/sql-templates?template_type=drilldown')
+    const data = await res.json()
+    drilldownTemplates.value = data.data || []
+  } catch (e) {
+    console.error('加载下钻模板失败:', e)
+  }
+}
+
+// 添加新模板
+function addDrilldownTemplate() {
+  drilldownTemplates.value.push({
+    id: null,
+    drilldown_category: activeDrilldownCategory.value,
+    template_name: '',
+    template_order: currentDrilldownTemplates.value.length + 1,
+    sql_template: '',
+    metric_names: [],
+    template_type: 'drilldown',
+    status: 1
+  })
+}
+
+// 删除模板
+function removeDrilldownTemplate(index) {
+  const tpl = currentDrilldownTemplates.value[index]
+  if (!tpl) return
+
+  if (tpl.id) {
+    // 已保存的模板需要确认删除
+    ElMessageBox.confirm('确定删除这个模板吗？', '提示', { type: 'warning' })
+      .then(async () => {
+        try {
+          await fetch(`/api/v1/nlp/sql-templates/${tpl.id}`, { method: 'DELETE' })
+          ElMessage.success('删除成功')
+          await loadDrilldownTemplates()
+        } catch (e) {
+          ElMessage.error('删除失败')
+        }
+      })
+      .catch(() => {})
+  } else {
+    // 本地模板直接移除
+    const localIndex = drilldownTemplates.value.findIndex(t => !t.id && t.drilldown_category === activeDrilldownCategory.value)
+    if (localIndex !== -1) {
+      drilldownTemplates.value.splice(localIndex, 1)
+    }
+  }
+}
+
+// 保存模板
+async function saveDrilldownTemplate(tpl) {
+  if (!tpl.template_name) {
+    ElMessage.warning('请输入模板名称')
+    return
+  }
+  if (!tpl.sql_template) {
+    ElMessage.warning('请输入 SQL 模板')
+    return
+  }
+
+  try {
+    const payload = {
+      drilldown_category: tpl.drilldown_category,
+      template_name: tpl.template_name,
+      template_order: tpl.template_order || 0,
+      sql_template: tpl.sql_template,
+      metric_names: tpl.metric_names || [],
+      template_type: 'drilldown',
+      status: tpl.status
+    }
+
+    if (tpl.id) {
+      await fetch(`/api/v1/nlp/sql-templates/${tpl.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      ElMessage.success('保存成功')
+    } else {
+      await fetch('/api/v1/nlp/sql-templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      ElMessage.success('创建成功')
+    }
+    await loadDrilldownTemplates()
+  } catch (e) {
+    console.error('保存失败:', e)
+    ElMessage.error('保存失败')
+  }
+}
+
+// 监听下钻类目切换，重新加载该类目的模板
+watch(activeDrilldownCategory, () => {
+  // 模板已全部加载，只需本地过滤
+})
+
 onMounted(() => {
   loadData()
 })
@@ -2093,6 +2462,9 @@ watch(activeTab, (tab) => {
   }
   if (tab === 'slots' && slotDefinitions.value.length === 0) {
     loadSlotDefinitions()
+  }
+  if (tab === 'drilldown' && drilldownTemplates.value.length === 0) {
+    loadDrilldownTemplates()
   }
 })
 </script>
@@ -2483,6 +2855,26 @@ watch(activeTab, (tab) => {
   gap: 6px;
   border-radius: var(--radius-sm);
   font-weight: 500;
+}
+
+.btn-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--radius-lg);
+  font-weight: 500;
+  font-size: 14px;
+  padding: 10px 20px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  transition: all 0.25s ease;
+}
+
+.btn-default:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-glow);
 }
 
 :deep(.el-switch.is-checked .el-switch__core) {
@@ -3137,5 +3529,139 @@ watch(activeTab, (tab) => {
 
 .table-pagination .el-pagination {
   font-size: 12px;
+}
+
+/* ==================== 下钻配置 ==================== */
+.drilldown-config {
+  display: flex;
+  gap: 20px;
+  min-height: 500px;
+}
+
+.drilldown-sidebar {
+  width: 180px;
+  flex-shrink: 0;
+  background: #f9fafb;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.category-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 4px;
+}
+
+.category-item:hover {
+  background: #e5e7eb;
+}
+
+.category-item.active {
+  background: #6366f1;
+  color: #fff;
+}
+
+.category-icon {
+  font-size: 18px;
+}
+
+.category-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.drilldown-main {
+  flex: 1;
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.drilldown-templates {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.template-card {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 16px;
+  transition: all 0.2s;
+}
+
+.template-card:hover {
+  border-color: #6366f1;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.1);
+}
+
+.template-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.template-name-input {
+  flex: 1;
+}
+
+.template-order-input {
+  width: 80px;
+}
+
+.delete-btn {
+  color: #9ca3af;
+  padding: 4px;
+}
+
+.delete-btn:hover {
+  color: #ef4444;
+}
+
+.template-body {
+  margin-bottom: 12px;
+}
+
+.form-label {
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.template-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.status-label {
+  font-size: 12px;
+  color: #6b7280;
+  flex: 1;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: #9ca3af;
+  gap: 12px;
+}
+
+.empty-state p {
+  font-size: 14px;
+  margin: 0;
 }
 </style>

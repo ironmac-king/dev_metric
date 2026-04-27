@@ -54,7 +54,7 @@ func InitWithSeed(cfg *config.DatabaseConfig) error {
 
 func autoMigrate() error {
 	return db.AutoMigrate(
-		&model.Metric{},
+		// NOTE: model.Metric 已包含 164 条生产数据，不再自动迁移，避免 ALTER TABLE 锁表
 		&model.AlertRule{},
 		&model.AlertRecord{},
 		&model.LLMConfig{},

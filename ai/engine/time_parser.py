@@ -8,7 +8,7 @@
 """
 import re
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 class TimeParser:
@@ -46,7 +46,12 @@ class TimeParser:
 
         text = text.strip()
 
-        # 1. 带年份的绝对月份: "2024年7月"
+        # 0. 财务术语 YTD/MTD/WTD（需优先检查）
+        result = self._parse_financial_term(text)
+        if result:
+            return result
+
+        # 1. 带年份的绝对月份: "2024年7月" 或 "23年7月"
         result = self._parse_year_month(text)
         if result:
             return result
@@ -83,14 +88,80 @@ class TimeParser:
 
         return None
 
+    def _parse_financial_term(self, text: str) -> Optional[Dict[str, Any]]:
+        """解析财务术语: YTD/MTD/WTD"""
+        today = datetime.now()
+        yesterday = today - timedelta(days=1)
+
+        # YTD: Year to Date，年初至今
+        if re.search(r"YTD|年初至今", text, re.IGNORECASE):
+            return {
+                "type": "financial_term",
+                "start": f"{today.year}-01-01",
+                "end": yesterday.strftime("%Y-%m-%d"),
+                "original": text,
+                "has_explicit_year": True,
+                "time_key": f"YTD_{today.year}"
+            }
+
+        # MTD: Month to Date，月初至今
+        if re.search(r"MTD|月初至今", text, re.IGNORECASE):
+            return {
+                "type": "financial_term",
+                "start": f"{today.year}-{today.month:02d}-01",
+                "end": yesterday.strftime("%Y-%m-%d"),
+                "original": text,
+                "has_explicit_year": True,
+                "time_key": f"MTD_{today.year}_{today.month:02d}"
+            }
+
+        # WTD: Week to Date，周初至今
+        if re.search(r"WTD|周初至今", text, re.IGNORECASE):
+            days_since_monday = today.weekday()
+            week_start = today - timedelta(days=days_since_monday)
+            return {
+                "type": "financial_term",
+                "start": week_start.strftime("%Y-%m-%d"),
+                "end": yesterday.strftime("%Y-%m-%d"),
+                "original": text,
+                "has_explicit_year": True,
+                "time_key": f"WTD_{today.year}_{today.month:02d}_{today.day}"
+            }
+
+        return None
+
     def _parse_year_month(self, text: str) -> Optional[Dict[str, Any]]:
-        """解析带年份的月份: 2024年7月"""
+        """解析带年份的月份: 2024年7月、23年7月"""
+        # 四位数年份: 2024年7月
         match = re.search(r"(\d{4})年(\d{1,2})月", text)
         if match:
             year = int(match.group(1))
             month = int(match.group(2))
             if 1 <= month <= 12:
                 return self._build_month_result(year, month, match.group(0), has_explicit_year=True)
+
+        # 两位数年份: 23年7月、24年
+        match = re.search(r"(\d{2})年(\d{1,2})?月?", text)
+        if match:
+            year_short = int(match.group(1))
+            # 补全为四位数: 23 -> 2023, 24 -> 2024
+            year = 2000 + year_short if year_short < 100 else year_short
+            month_str = match.group(2)
+            if month_str:
+                month = int(month_str)
+                if 1 <= month <= 12:
+                    return self._build_month_result(year, month, match.group(0), has_explicit_year=True)
+            else:
+                # 只有年份没有月份: 23年 -> 2023年全年
+                return {
+                    "type": "year_short",
+                    "start": f"{year}-01-01",
+                    "end": f"{year}-12-31",
+                    "original": match.group(0),
+                    "has_explicit_year": True,
+                    "time_key": f"{year}",
+                    "year": year
+                }
         return None
 
     def _parse_month_only(self, text: str) -> Optional[Dict[str, Any]]:
@@ -307,17 +378,134 @@ class TimeParser:
 
     def _parse_relative(self, text: str) -> Optional[Dict[str, Any]]:
         """解析相对时间（保留原有逻辑）"""
+        from calendar import monthrange
+
+        # 特殊时间词处理（需优先于 fixed_time_map 检查，避免子串匹配问题）
+        special_time_map = {
+            r"上上月|上上个月|上上个月份": ("last_month", -2, 0),  # 上上月 = 上上个月
+        }
+
+        for pattern, (time_key, year_offset, month_offset) in special_time_map.items():
+            match = re.search(pattern, text)
+            if match:
+                current_month_index = (self.current_year * 12 + datetime.now().month) - 1
+                target_month_index = current_month_index + year_offset + month_offset
+                target_year = (target_month_index + 1) // 12
+                actual_month = (target_month_index % 12) + 1
+                if actual_month == 0:
+                    actual_month = 12
+                    target_year -= 1
+                start, end = self._get_date_range(time_key, target_year, actual_month)
+                return {
+                    "type": "relative",
+                    "start": start,
+                    "end": end,
+                    "original": match.group(0),
+                    "has_explicit_year": True,
+                    "time_key": time_key
+                }
+
+        # ===== 日级特殊处理（必须用 timedelta，不能用 year_offset）=====
+        today = datetime.now()
+        if re.search(r"昨天|昨日", text):
+            day = today - timedelta(days=1)
+            return {"type": "relative", "start": day.strftime("%Y-%m-%d"), "end": day.strftime("%Y-%m-%d"), "original": text, "has_explicit_year": True, "time_key": "yesterday"}
+        if re.search(r"今天|今日|本日|今儿", text):
+            return {"type": "relative", "start": today.strftime("%Y-%m-%d"), "end": today.strftime("%Y-%m-%d"), "original": text, "has_explicit_year": True, "time_key": "today"}
+        if re.search(r"明天|明日|明儿", text):
+            day = today + timedelta(days=1)
+            return {"type": "relative", "start": day.strftime("%Y-%m-%d"), "end": day.strftime("%Y-%m-%d"), "original": text, "has_explicit_year": True, "time_key": "tomorrow"}
+        if re.search(r"前日|前天|昨儿", text):
+            day = today - timedelta(days=2)
+            return {"type": "relative", "start": day.strftime("%Y-%m-%d"), "end": day.strftime("%Y-%m-%d"), "original": text, "has_explicit_year": True, "time_key": "day_before_yesterday"}
+        if re.search(r"后天|后日", text):
+            day = today + timedelta(days=2)
+            return {"type": "relative", "start": day.strftime("%Y-%m-%d"), "end": day.strftime("%Y-%m-%d"), "original": text, "has_explicit_year": True, "time_key": "day_after_tomorrow"}
+        if re.search(r"大前天|大前日", text):
+            day = today - timedelta(days=3)
+            return {"type": "relative", "start": day.strftime("%Y-%m-%d"), "end": day.strftime("%Y-%m-%d"), "original": text, "has_explicit_year": True, "time_key": "three_days_ago"}
+        if re.search(r"大后天|大后日", text):
+            day = today + timedelta(days=3)
+            return {"type": "relative", "start": day.strftime("%Y-%m-%d"), "end": day.strftime("%Y-%m-%d"), "original": text, "has_explicit_year": True, "time_key": "three_days_later"}
+
+        # 星期几处理: 周一、周五（表示本周的星期几）
+        weekday_map = {
+            r"周一|星期一": 0,  # Monday
+            r"周二|星期二": 1,
+            r"周三|星期三": 2,
+            r"周四|星期四": 3,
+            r"周五|星期五": 4,
+            r"周六|星期六": 5,
+            r"周日|星期日|周末": 6,  # Python 中 Sunday = 6
+        }
+        for pattern, target_weekday in weekday_map.items():
+            if re.search(pattern, text):
+                today = datetime.now()
+                days_since_target = (today.weekday() - target_weekday) % 7
+                target_date = today - timedelta(days=days_since_target)
+                return {
+                    "type": "relative",
+                    "start": target_date.strftime("%Y-%m-%d"),
+                    "end": target_date.strftime("%Y-%m-%d"),
+                    "original": text,
+                    "has_explicit_year": True,
+                    "time_key": f"this_week_{pattern.split('|')[0]}"
+                }
+
+        # 季度特殊处理（不能用 month_offset，会算错）
+        today = datetime.now()
+        current_quarter = (today.month - 1) // 3 + 1
+
+        if "本季度" in text or "本季" in text:
+            q_start_month = (current_quarter - 1) * 3 + 1
+            _, q_end_day = monthrange(today.year, q_start_month + 2)
+            start = f"{today.year}-{q_start_month:02d}-01"
+            end = f"{today.year}-{q_start_month+2:02d}-{q_end_day}"
+            return {"type": "relative", "start": start, "end": end, "original": text, "has_explicit_year": True, "time_key": "this_quarter"}
+
+        if "上季度" in text:
+            if current_quarter == 1:
+                # Q1的上季度是去年Q4
+                start = f"{today.year-1}-10-01"
+                end = f"{today.year-1}-12-31"
+            else:
+                q_start_month = (current_quarter - 2) * 3 + 1
+                _, q_end_day = monthrange(today.year, q_start_month + 2)
+                start = f"{today.year}-{q_start_month:02d}-01"
+                end = f"{today.year}-{q_start_month+2:02d}-{q_end_day}"
+            return {"type": "relative", "start": start, "end": end, "original": text, "has_explicit_year": True, "time_key": "last_quarter"}
+
+        if "下季度" in text:
+            if current_quarter == 4:
+                # Q4的下季度是明年Q1
+                start = f"{today.year+1}-01-01"
+                end = f"{today.year+1}-03-31"
+            else:
+                q_start_month = current_quarter * 3 + 1
+                _, q_end_day = monthrange(today.year, q_start_month + 2)
+                start = f"{today.year}-{q_start_month:02d}-01"
+                end = f"{today.year}-{q_start_month+2:02d}-{q_end_day}"
+            return {"type": "relative", "start": start, "end": end, "original": text, "has_explicit_year": True, "time_key": "next_quarter"}
+
         # 固定时间词
         fixed_time_map = {
-            r"昨天|昨日": ("yesterday", -1, 0),
-            r"今天|今日|本日": ("today", 0, 0),
-            r"明天|明日": ("tomorrow", 1, 0),
-            r"本周|这周": ("this_week", 0, 0),
+            # 周
+            r"本周|这周|这个礼拜": ("this_week", 0, 0),
+            r"上周|上一周|上个礼拜": ("last_week", -1, 0),
+            r"上上周": ("week_before_last", -2, 0),
+            r"下周|下个礼拜": ("next_week", 1, 0),
+            r"下下周": ("week_after_next", 2, 0),
+            # 月
             r"本月|当月|这月": ("this_month", 0, 0),
-            r"上周|上一周": ("last_week", -1, 0),
             r"上月|上一月|上个月|上个月份": ("last_month", -1, 0),
+            r"下月": ("next_month", 1, 0),
+            r"下下月": ("month_after_next", 2, 0),
+            # 年（季度已在上方单独处理）
             r"去年|上年": ("last_year", -1, 0),
             r"本年|今年": ("this_year", 0, 0),
+            r"明年": ("next_year", 1, 0),
+            r"前年": ("year_before_last", -2, 0),
+            r"后年": ("year_after_next", 2, 0),
         }
 
         for pattern, (time_key, year_offset, month_offset) in fixed_time_map.items():
@@ -357,7 +545,6 @@ class TimeParser:
         # 如果直接让正则匹配"年"模式，会错误地把"半年"解析为1年
         match = re.search(r"近(半|半年)年|过去(半|半年)年", text)
         if match:
-            from datetime import timedelta
             today = datetime.now()
             start = (today - timedelta(days=180)).strftime("%Y-%m-%d")
             end = today.strftime("%Y-%m-%d")
@@ -402,7 +589,6 @@ class TimeParser:
                     num = 6
                 time_key = template.format(int(num))
 
-                from datetime import timedelta
                 today = datetime.now()
                 if unit == "days":
                     start = (today - timedelta(days=num)).strftime("%Y-%m-%d")
@@ -471,20 +657,17 @@ class TimeParser:
         from calendar import monthrange
 
         if time_key == "yesterday":
-            from datetime import timedelta
             yesterday = datetime.now() - timedelta(days=1)
             return (yesterday.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"))
         elif time_key == "today":
             today = datetime.now()
             return (today.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
         elif time_key == "this_week":
-            from datetime import timedelta
             today = datetime.now()
             yesterday = today - timedelta(days=1)
             start = today - timedelta(days=today.weekday())
             return (start.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"))
         elif time_key == "this_month":
-            from datetime import timedelta
             yesterday = datetime.now() - timedelta(days=1)
             _, last_day = monthrange(year, month)
             month_end = datetime(year, month, last_day)
@@ -492,7 +675,6 @@ class TimeParser:
             end_date = min(month_end, yesterday)
             return (f"{year}-{month:02d}-01", end_date.strftime("%Y-%m-%d"))
         elif time_key == "last_week":
-            from datetime import timedelta
             today = datetime.now()
             start = today - timedelta(days=7)
             return (start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
@@ -505,10 +687,91 @@ class TimeParser:
         elif time_key == "last_year":
             return (f"{year-1}-01-01", f"{year-1}-12-31")
         elif time_key == "this_year":
-            from datetime import timedelta
             today = datetime.now()
             yesterday = today - timedelta(days=1)
             return (f"{today.year}-01-01", yesterday.strftime("%Y-%m-%d"))
+        # ===== 新增：其他相对日期 =====
+        elif time_key == "day_before_yesterday":
+            day = datetime.now() - timedelta(days=2)
+            return (day.strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))
+        elif time_key == "day_after_tomorrow":
+            day = datetime.now() + timedelta(days=2)
+            return (day.strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))
+        elif time_key == "three_days_ago":
+            day = datetime.now() - timedelta(days=3)
+            return (day.strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))
+        elif time_key == "three_days_later":
+            day = datetime.now() + timedelta(days=3)
+            return (day.strftime("%Y-%m-%d"), day.strftime("%Y-%m-%d"))
+        # ===== 新增：周级别 =====
+        elif time_key == "week_before_last":
+            today = datetime.now()
+            days_since_monday = today.weekday()
+            this_monday = today - timedelta(days=days_since_monday)
+            last_monday = this_monday - timedelta(days=14)
+            last_sunday = last_monday + timedelta(days=6)
+            return (last_monday.strftime("%Y-%m-%d"), last_sunday.strftime("%Y-%m-%d"))
+        elif time_key == "next_week":
+            today = datetime.now()
+            days_since_monday = today.weekday()
+            this_monday = today - timedelta(days=days_since_monday)
+            next_monday = this_monday + timedelta(days=7)
+            next_sunday = next_monday + timedelta(days=6)
+            return (next_monday.strftime("%Y-%m-%d"), next_sunday.strftime("%Y-%m-%d"))
+        elif time_key == "week_after_next":
+            today = datetime.now()
+            days_since_monday = today.weekday()
+            this_monday = today - timedelta(days=days_since_monday)
+            next_monday = this_monday + timedelta(days=14)
+            next_sunday = next_monday + timedelta(days=6)
+            return (next_monday.strftime("%Y-%m-%d"), next_sunday.strftime("%Y-%m-%d"))
+        # ===== 新增：月级别 =====
+        elif time_key == "next_month":
+            if month == 12:
+                return (f"{year+1}-01-01", f"{year+1}-01-31")
+            else:
+                _, last_day = monthrange(year, month + 1)
+                return (f"{year}-{month+1:02d}-01", f"{year}-{month+1:02d}-{last_day}")
+        elif time_key == "month_after_next":
+            if month == 11:
+                return (f"{year+1}-01-01", f"{year+1}-01-31")
+            elif month == 12:
+                return (f"{year+1}-02-01", f"{year+1}-02-28")
+            else:
+                _, last_day = monthrange(year, month + 2)
+                return (f"{year}-{month+2:02d}-01", f"{year}-{month+2:02d}-{last_day}")
+        # ===== 新增：季度级别 =====
+        elif time_key == "this_quarter":
+            current_quarter = (datetime.now().month - 1) // 3 + 1
+            start_month = (current_quarter - 1) * 3 + 1
+            from calendar import monthrange
+            _, last_day = monthrange(year, start_month + 2)
+            return (f"{year}-{start_month:02d}-01", f"{year}-{start_month+2:02d}-{last_day}")
+        elif time_key == "last_quarter":
+            current_quarter = (datetime.now().month - 1) // 3 + 1
+            if current_quarter == 1:
+                return (f"{year-1}-10-01", f"{year-1}-12-31")
+            else:
+                start_month = (current_quarter - 2) * 3 + 1
+                from calendar import monthrange
+                _, last_day = monthrange(year, start_month + 2)
+                return (f"{year}-{start_month:02d}-01", f"{year}-{start_month+2:02d}-{last_day}")
+        elif time_key == "next_quarter":
+            current_quarter = (datetime.now().month - 1) // 3 + 1
+            if current_quarter == 4:
+                return (f"{year+1}-01-01", f"{year+1}-03-31")
+            else:
+                start_month = current_quarter * 3 + 1
+                from calendar import monthrange
+                _, last_day = monthrange(year, start_month + 2)
+                return (f"{year}-{start_month:02d}-01", f"{year}-{start_month+2:02d}-{last_day}")
+        # ===== 新增：年级别 =====
+        elif time_key == "next_year":
+            return (f"{year+1}-01-01", f"{year+1}-12-31")
+        elif time_key == "year_before_last":
+            return (f"{year-2}-01-01", f"{year-2}-12-31")
+        elif time_key == "year_after_next":
+            return (f"{year+2}-01-01", f"{year+2}-12-31")
 
         return (None, None)
 
@@ -550,8 +813,6 @@ class TimeParser:
                 "comparison_end": "2025-04-01",     # 对比日期终点（用于SQL查询）
             }
         """
-        from datetime import datetime, timedelta
-
         # T+1数据：今天只能查到昨天
         today = datetime.now()
         yesterday = today - timedelta(days=1)

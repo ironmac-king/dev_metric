@@ -4,8 +4,6 @@ import (
 	"dev_metric/config"
 	"dev_metric/internal/api/handler"
 	"dev_metric/internal/api/middleware"
-	"dev_metric/internal/repository/postgres"
-	"log"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -89,6 +87,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.GET("/history", handler.GetAskHistory)
 			ask.POST("/clear", handler.ClearSession)
 			ask.GET("/suggest", handler.GetAskSuggest)
+			ask.GET("/suggest-v2", handler.GetV2InitialSuggestions)
 			ask.POST("/feedback", handler.SubmitFeedback)
 			ask.POST("/drill_down", handler.DrillDownQuestion)
 			ask.POST("/messages", handler.SaveMessage)
@@ -100,6 +99,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.GET("/dashboard/stats", handler.GetDashboardStats)
 			ask.GET("/sessions", handler.GetSessions)
 			ask.PUT("/sessions/:id/star", handler.StarSession)
+			ask.DELETE("/sessions/:id", handler.DeleteSession)
+			ask.POST("/sessions", handler.SaveSession)
 			ask.GET("/favorites", handler.GetFavorites)
 			ask.POST("/favorites", handler.AddFavorite)
 			ask.DELETE("/favorites/:id", handler.DeleteFavorite)
@@ -112,6 +113,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			ask.POST("/shortcuts", handler.CreateShortcut)
 			ask.PUT("/shortcuts/:id", handler.UpdateShortcut)
 			ask.DELETE("/shortcuts/:id", handler.DeleteShortcut)
+		}
+
+		// LLM.V2 智能问数 API（转发到 Python AI）
+		llmAsk := v1.Group("/llm-ask")
+		{
+			llmAsk.POST("/v2/stream", handler.LLMAskV2Stream)
 		}
 
 		// 问数分析 API（需要认证）
@@ -137,12 +144,14 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		internalAskAnalysis := v1.Group("/internal/ask-analysis")
 		{
 			internalAskAnalysis.POST("/logs", handler.CreateAnalysisLog)
+			internalAskAnalysis.POST("/logs/v2", handler.CreateV2Log)
 		}
 
 		// 内部智能问数 API（不需要认证，供前端调用）
 		internalAsk := v1.Group("/internal/ask")
 		{
 			internalAsk.POST("/clear", handler.ClearSessionInternal)
+			internalAsk.GET("/suggest-v2", handler.GetV2InitialSuggestions)
 		}
 
 		// 指标元数据 API（供 AI 服务调用）
@@ -155,6 +164,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			metadata.POST("/terms", handler.CreateTerm)
 			metadata.PUT("/terms/:id", handler.UpdateTerm)
 			metadata.DELETE("/terms/:id", handler.DeleteTerm)
+			metadata.GET("/terms/export", handler.ExportTerms)
+			metadata.POST("/terms/import", handler.ImportTerms)
+			metadata.GET("/terms/export-template", handler.ExportTermsTemplate)
 		}
 
 		// LLM 配置管理
@@ -216,6 +228,33 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			nlp.GET("/slot-relations", handler.ListSlotRelations)
 			nlp.POST("/slot-relations", handler.CreateSlotRelation)
 			nlp.DELETE("/slot-relations/:id", handler.DeleteSlotRelation)
+
+			// 触发规则配置
+			nlp.GET("/trigger-configs", handler.ListTriggerConfigs)
+			nlp.GET("/trigger-configs/:id", handler.GetTriggerConfig)
+			nlp.POST("/trigger-configs", handler.CreateTriggerConfig)
+			nlp.PUT("/trigger-configs/:id", handler.UpdateTriggerConfig)
+			nlp.DELETE("/trigger-configs/:id", handler.DeleteTriggerConfig)
+
+			// 触发器开关配置
+			nlp.GET("/trigger-switches", handler.ListTriggerSwitches)
+			nlp.GET("/trigger-switches/:type", handler.GetTriggerSwitch)
+			nlp.PUT("/trigger-switches/:type", handler.SetTriggerSwitch)
+			nlp.DELETE("/trigger-switches/:type", handler.DeleteTriggerSwitch)
+
+			// 输出模板配置
+			nlp.GET("/output-templates", handler.ListOutputTemplates)
+			nlp.GET("/output-templates/:id", handler.GetOutputTemplate)
+			nlp.POST("/output-templates", handler.CreateOutputTemplate)
+			nlp.PUT("/output-templates/:id", handler.UpdateOutputTemplate)
+			nlp.DELETE("/output-templates/:id", handler.DeleteOutputTemplate)
+
+			// 业务维度标签
+			nlp.GET("/labels", handler.ListDimensionLabels)
+			nlp.GET("/labels/:id", handler.GetDimensionLabel)
+			nlp.POST("/labels", handler.CreateDimensionLabel)
+			nlp.PUT("/labels/:id", handler.UpdateDimensionLabel)
+			nlp.DELETE("/labels/:id", handler.DeleteDimensionLabel)
 		}
 
 		// 意图反馈
@@ -327,11 +366,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// 当前用户菜单权限（需要认证）
 		v1.GET("/my-menus", handler.GetCurrentUserMenus)
-	}
-
-	// 初始化数据库
-	if err := postgres.InitWithSeed(&cfg.Database); err != nil {
-		log.Printf("警告: 数据库连接失败: %v", err)
 	}
 
 	return r

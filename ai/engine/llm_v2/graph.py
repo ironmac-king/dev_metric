@@ -111,6 +111,11 @@ async def intent_router(state: V2State):
             if result.get("source"):
                 state.source = result["source"]
 
+            # 保存 drilldown_type（用于四类下钻）
+            if result.get("drilldown_type"):
+                state.context_cache["drilldown_type"] = result["drilldown_type"]
+                logger.info(f"[intent_router] 保存 drilldown_type: {result['drilldown_type']}")
+
             # 处理泛指维度 vs 真正追问的区分
             if result.get("needs_clarification"):
                 # 泛指维度 or 真正追问：都中断流程，返回追问让用户选择
@@ -241,11 +246,15 @@ async def mql_generator(state: V2State) -> V2State:
         # 获取 RAG 上下文
         rag_context = state.context_cache.get("similar_cases", [])
 
+        # 当 intent_router 本地模型成功识别时，传入已生成的 MQL 跳过 LLM 调用
+        intent_router_mql = state.mql if getattr(state, 'source', '') == 'local_model' else None
+
         # 生成 MQL
         mql = await generator.generate(
             question=state.question,
             rag_context=rag_context,
             inherited_mql=state.inherited_mql,
+            intent_router_mql=intent_router_mql,
         )
 
         # 保存到历史栈
@@ -323,7 +332,7 @@ async def mql_generator(state: V2State) -> V2State:
                 logger.info(f"[mql_generator] 恢复 comparison from intent_router: types={inherited_comparison.types}, enabled={inherited_comparison.enabled}")
             # 如果有 comparison 但没有 calculation_patterns，根据 comparison.types 转换
             if mql.comparison and mql.comparison.enabled and not mql.calculation_patterns:
-                from ..schema import CalculationPattern
+                from .schema import CalculationPattern
                 for ctype in (mql.comparison.types or []):
                     if ctype in ["同比", "yoy"]:
                         mql.calculation_patterns.append(CalculationPattern.YOY)
@@ -344,7 +353,9 @@ async def mql_generator(state: V2State) -> V2State:
         )
 
     except Exception as e:
-        logger.error(f"[mql_generator] 错误: {e}")
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"[mql_generator] 错误: {e}\n{tb}")
         state.error =str(e)
         state.add_thinking_step(
             "mql_generator",
@@ -645,9 +656,366 @@ async def data_quality_checker(state: V2State) -> V2State:
     return state
 
 
+def _calc_previous_period(mql) -> tuple:
+    """根据 MQL time 计算上一期的开始/结束日期
+
+    支持：
+    - 季度：Q1 2026 (2026-01-01~2026-03-31) → Q4 2025 (2025-10-01~2025-12-31)
+    - 月份：2026-01 (2026-01-01~2026-01-31) → 2025-12 (2025-12-01~2025-12-31)
+    - 年份：2026 → 2025
+    """
+    if not mql or not mql.time:
+        return None, None
+
+    t = mql.time
+    start_str = t.start or ""
+    end_str = t.end or ""
+
+    import re
+    from datetime import datetime, timedelta
+    import calendar
+
+    month_match = re.match(r"(\d{4})-(\d{2})-(\d{2})", start_str)
+    if not month_match:
+        return None, None
+
+    year = int(month_match.group(1))
+    month = int(month_match.group(2))
+    day = int(month_match.group(3))
+
+    # 季度判断：day=1 且月份是 1/4/7/10
+    if day == 1 and month in [1, 4, 7, 10]:
+        # 季度 → 上一季度（Q1→Q4上年, Q2→Q1, Q3→Q2, Q4→Q3）
+        quarter_to_prev = {
+            1: (year - 1, 10, 1, 12, 31),   # Q1 → Q4 of prev year (Oct1-Dec31)
+            4: (year, 1, 1, 3, 31),          # Q2 → Q1 (Jan1-Mar31)
+            7: (year, 4, 1, 6, 30),          # Q3 → Q2 (Apr1-Jun30)
+            10: (year, 7, 1, 9, 30),         # Q4 → Q3 (Jul1-Sep30)
+        }
+        if month in quarter_to_prev:
+            py, pm, pd, qe_month, qe_day = quarter_to_prev[month]
+            prev_start = f"{py}-{pm:02d}-{pd:02d}"
+            prev_end = f"{py}-{qe_month:02d}-{qe_day:02d}"
+            logger.info(f"[_calc_previous_period] 季度 {year}-Q{(month-1)//3+1 if month != 1 else 4} → prev {prev_start}~{prev_end}")
+            return prev_start, prev_end
+
+    # 月份判断：start 是月首
+    if day == 1:
+        max_day = calendar.monthrange(year, month)[1]
+        if end_str == f"{year}-{month:02d}-{max_day:02d}":
+            # 完整月 → 上一完整月
+            if month == 1:
+                prev_year, prev_month = year - 1, 12
+            else:
+                prev_year, prev_month = year, month - 1
+            prev_max_day = calendar.monthrange(prev_year, prev_month)[1]
+            prev_start = f"{prev_year}-{prev_month:02d}-01"
+            prev_end = f"{prev_year}-{prev_month:02d}-{prev_max_day:02d}"
+            logger.info(f"[_calc_previous_period] 完整月 {year}-{month:02d} → {prev_year}-{prev_month:02d}")
+            return prev_start, prev_end
+
+        # partial month（当月未结束，如 4月1-26）：对齐到上月同期同天数
+        # 例如 4月1-26 vs 3月1-26，保证口径一致
+        current_max_day = calendar.monthrange(year, month)[1]
+        is_partial = end_str != f"{year}-{month:02d}-{current_max_day:02d}"
+        if is_partial:
+            # 提取 end 的 day 作为对比基准
+            end_match = re.match(r"(\d{4})-(\d{2})-(\d{2})", end_str)
+            if end_match:
+                end_day = int(end_match.group(3))
+                if month == 1:
+                    prev_year, prev_month = year - 1, 12
+                else:
+                    prev_year, prev_month = year, month - 1
+                prev_max_day = calendar.monthrange(prev_year, prev_month)[1]
+                prev_start = f"{prev_year}-{prev_month:02d}-01"
+                prev_end = f"{prev_year}-{prev_month:02d}-{min(end_day, prev_max_day):02d}"
+                logger.info(f"[_calc_previous_period] partial月 {year}-{month:02d}(day={end_day}) → {prev_year}-{prev_month:02d}(day={min(end_day, prev_max_day)})")
+                return prev_start, prev_end
+
+    return None, None
+
+
+async def trigger_analyzer(state: V2State) -> V2State:
+    """
+    步骤 10: 触发分析智能体
+    - 检查是否需要触发分析
+    - 生成 AnalysisOutput
+    """
+    from .nodes.trigger_analyzer import TriggerAnalyzer, TriggerResult, AnalysisOutput
+
+    start_time = time.time()
+    state.current_step = "trigger_analyzer"
+
+    try:
+        analyzer = TriggerAnalyzer()
+
+        logger.info(f"[trigger_analyzer] ENTRY: sql_result={'exists' if state.sql_result else 'None'}, data={'exists' if state.sql_result and state.sql_result.data else 'None'}")
+
+        # 构建 result dict（从 sql_result 提取）
+        result_dict = {
+            "data": state.sql_result.data if state.sql_result else [],
+            "mom_change": None,  # None = 没有 MoM 数据
+            "yoy_change": None,  # None = 没有 YoY 数据
+            "current_value": 0,
+        }
+
+        # 尝试从数据中提取 mom/yoy（支持多种字段名）
+        if state.sql_result and state.sql_result.data:
+            first_row = state.sql_result.data[0]
+            logger.info(f"[trigger_analyzer] first_row keys: {list(first_row.keys())}")
+            # mom_change: 优先使用 mom_change（MoM SQL 才会有），不接受 change_rate
+            mom_val = first_row.get("mom_change") or first_row.get("环比变化") or first_row.get("环比")
+            if mom_val is not None:
+                try:
+                    # 处理百分比字符串（如 "-17.01%" 或 "17.01%"）
+                    mom_str = str(mom_val).replace("%", "").replace(",", "")
+                    result_dict["mom_change"] = float(mom_str)
+                except (ValueError, TypeError):
+                    result_dict["mom_change"] = float(mom_val or 0)
+            # yoy_change: 优先 yoy_change，其次 change_rate（YoY SQL 返回的字段名）
+            yoy_val = first_row.get("yoy_change") or first_row.get("change_rate") or first_row.get("同比变化") or first_row.get("同比")
+            if yoy_val is not None:
+                try:
+                    yoy_str = str(yoy_val).replace("%", "").replace(",", "")
+                    result_dict["yoy_change"] = float(yoy_str)
+                except (ValueError, TypeError):
+                    result_dict["yoy_change"] = float(yoy_val or 0)
+            # current_value: 优先使用 current_val（SQL 别名），然后是 value
+            if "current_val" in first_row:
+                result_dict["current_value"] = float(first_row.get("current_val") or 0)
+            elif "value" in first_row:
+                result_dict["current_value"] = float(first_row.get("value") or 0)
+
+        logger.info(f"[trigger_analyzer] result_dict: mom_change={result_dict['mom_change']}, yoy_change={result_dict['yoy_change']}, current_value={result_dict['current_value']}")
+
+        # 如果有 YoY 数据但没有 MoM 数据，自动查环比（上一期）
+        # 条件：calculation_patterns 包含 mom（用户明确要环比）但 SQL 没有返回
+        def _has_mom_pattern(mql) -> bool:
+            if not mql or not mql.calculation_patterns:
+                return False
+            for p in mql.calculation_patterns:
+                v = p.value if hasattr(p, 'value') else str(p)
+                if v == "mom":
+                    return True
+            return False
+
+        if (result_dict["yoy_change"] is not None and result_dict["mom_change"] is None
+                and result_dict["current_value"] > 0 and _has_mom_pattern(state.mql)):
+            logger.info(f"[trigger_analyzer] 自动计算MoM: yoy={result_dict['yoy_change']}, current={result_dict['current_value']}")
+            try:
+                prev_start, prev_end = _calc_previous_period(state.mql)
+                logger.info(f"[trigger_analyzer] _calc_previous_period: prev_start={prev_start}, prev_end={prev_end}")
+                if prev_start and prev_end:
+                    # 从 MQL metric 提取 starrocks_sql，解析出表名和字段
+                    metric_name = state.mql.metric.name if state.mql and state.mql.metric else ""
+                    starrocks_sql = (state.mql.metric.starrocks_sql or "") if state.mql and state.mql.metric else ""
+                    logger.info(f"[trigger_analyzer] starrocks_sql: {starrocks_sql[:100]}")
+                    # 提取 SUM(字段名)
+                    import re
+                    sum_match = re.search(r"SUM\s*\(\s*([A-Z_]+)\s*\)", starrocks_sql or "", re.IGNORECASE)
+                    if sum_match:
+                        metric_field = sum_match.group(1)
+                        table_match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", starrocks_sql, re.IGNORECASE)
+                        table_name = table_match.group(1) if table_match else "ids.IDS_AMZ_COMPREHENSIVE_DI"
+                        prev_sql = f"SELECT SUM({metric_field}) AS prev_val FROM {table_name} WHERE FDATE >= '{prev_start}' AND FDATE <= '{prev_end}'"
+                        logger.info(f"[trigger_analyzer] 查环比上一期: {prev_start}~{prev_end}, SQL={prev_sql}")
+                        # 通过 Go API 执行
+                        import httpx
+                        async with httpx.AsyncClient(timeout=30) as client:
+                            resp = await client.post(
+                                "http://localhost:8080/api/v1/query/execute",
+                                json={"sql": prev_sql, "timeout": 30},
+                            )
+                            data = resp.json()
+                            logger.info(f"[trigger_analyzer] 环比查询返回: code={data.get('code')}, data={str(data.get('data',''))[:100]}")
+                            # Go API 返回结构: {"code": 0, "data": {"cached": true, "count": 1, "data": [...]}}
+                            if data.get("code") == 0 and data.get("data"):
+                                # 兼容两层嵌套结构
+                                inner_data = data["data"]
+                                rows = inner_data.get("data") if isinstance(inner_data, dict) else inner_data
+                                if rows and len(rows) > 0:
+                                    prev_val = float(rows[0].get("prev_val") or 0)
+                                    if prev_val > 0:
+                                        mom = (result_dict["current_value"] - prev_val) / prev_val * 100
+                                        result_dict["mom_change"] = round(mom, 2)
+                                        logger.info(f"[trigger_analyzer] MoM 计算成功: current={result_dict['current_value']}, prev={prev_val}, mom={result_dict['mom_change']}%")
+                                    else:
+                                        logger.info(f"[trigger_analyzer] 上一期数据为0，无法计算MoM")
+                            else:
+                                logger.warning(f"[trigger_analyzer] 查询上一期失败: {data.get('message')}")
+                    else:
+                        logger.warning(f"[trigger_analyzer] 无法从starrocks_sql提取metric_field: {starrocks_sql[:50]}")
+            except Exception as e:
+                logger.warning(f"[trigger_analyzer] 计算MoM失败: {e}")
+
+        # P0-3 fix: 设置 session_state 用于 ContextTrigger
+        if state.mql and state.mql.metric:
+            state.context_cache["session_state"] = {
+                "last_query_type": "metric",
+                "last_metric": state.mql.metric.name if hasattr(state.mql.metric, 'name') else None,
+                "last_metric_code": state.mql.metric.code if hasattr(state.mql.metric, 'code') else None,
+                "last_time": state.mql.time.original if state.mql.time and hasattr(state.mql.time, 'original') else None,
+                "last_dimensions": [d.type for d in state.mql.dimensions] if state.mql.dimensions else [],
+            }
+
+        # 获取会话状态（用于 ContextTrigger）
+        session_state = state.context_cache.get("session_state", {})
+
+        # 传递 drilldown_type 到 trigger_analyzer
+        drilldown_type = state.context_cache.get("drilldown_type")
+        if drilldown_type:
+            session_state["drilldown_type"] = drilldown_type
+            # 设置多指标模式标记，用于后续 ReportGeneratorNode 调用
+            state.context_cache["multi_metric_mode"] = True
+            state.context_cache["drilldown_category"] = drilldown_type
+            logger.info(f"[trigger_analyzer] 多指标下钻模式: category={drilldown_type}")
+
+        # ============================================================
+        # 多指标下钻模式：调用 ReportGeneratorNode 生成分析报告
+        # ============================================================
+        if state.context_cache.get("multi_metric_mode"):
+            from .nodes.report_generator import ReportGeneratorNode
+            try:
+                report_gen = ReportGeneratorNode()
+
+                # 1. 执行该 category 下所有模板，合并结果
+                merged_data = await report_gen.execute_all_templates(
+                    category=state.context_cache.get("drilldown_category"),
+                    time_range={
+                        "start": state.mql.time.start if state.mql and state.mql.time else "",
+                        "end": state.mql.time.end if state.mql and state.mql.time else "",
+                    }
+                )
+
+                if not merged_data:
+                    logger.warning(f"[trigger_analyzer] 多指标下钻模式: 未获取到数据")
+                    state.analysis = None
+                    state.multi_metric_data = []
+                    state.dimensional_data = {}
+                    state.category = state.context_cache.get("drilldown_category")
+                else:
+                    # 2. LLM 生成分析报告
+                    analysis = await report_gen.generate_analysis(
+                        multi_metric_data=merged_data,
+                        category=state.context_cache.get("drilldown_category"),
+                        time_range={
+                            "start": state.mql.time.start if state.mql and state.mql.time else "",
+                            "end": state.mql.time.end if state.mql and state.mql.time else "",
+                        }
+                    )
+
+                    # 3. 格式化多指标数据
+                    multi_metric_data = report_gen.format_multi_metric_data(merged_data)
+                    dimensional_data = report_gen.get_dimensional_data(merged_data)
+
+                    state.analysis = analysis
+                    state.multi_metric_data = multi_metric_data
+                    state.dimensional_data = dimensional_data
+                    state.category = state.context_cache.get("drilldown_category")
+
+                    logger.info(
+                        f"[trigger_analyzer] 多指标下钻分析完成: "
+                        f"category={state.category}, "
+                        f"metrics={len(multi_metric_data)}, "
+                        f"issues={len(analysis.get('issues', []))}"
+                    )
+
+                state.add_thinking_step(
+                    "trigger_analyzer",
+                    status="completed",
+                    content=f"多指标下钻分析: {state.context_cache.get('drilldown_category')}",
+                    llm_used=True,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                )
+                return state
+
+            except Exception as e:
+                import traceback
+                logger.error(f"[trigger_analyzer] 多指标下钻分析失败: {e}")
+                logger.error(f"[trigger_analyzer] 堆栈: {traceback.format_exc()}")
+                state.analysis = None
+                state.multi_metric_data = []
+                state.dimensional_data = {}
+                state.category = state.context_cache.get("drilldown_category")
+                state.add_thinking_step(
+                    "trigger_analyzer",
+                    status="completed",
+                    content=f"多指标下钻分析失败: {str(e)}",
+                    llm_used=True,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                )
+                return state
+
+        # ============================================================
+        # 普通触发分析模式
+        # ============================================================
+
+        # 检查触发器
+        trigger_result = await analyzer.check_triggers(
+            mql=state.mql,
+            result=result_dict,
+            state=session_state
+        )
+
+        if trigger_result.should_analyze:
+            # 生成 AnalysisOutput
+            try:
+                logger.info(f"[trigger_analyzer] CALLING generate_output, trigger_result type={type(trigger_result)}, is_TriggerResult={isinstance(trigger_result, TriggerResult)}, mql type={type(state.mql)}")
+                analysis_output = await analyzer.generate_output(
+                    trigger_result=trigger_result,
+                    mql=state.mql,
+                    result=result_dict
+                )
+                logger.info(f"[trigger_analyzer] analysis_output type: {type(analysis_output)}")
+                logger.info(f"[trigger_analyzer] analysis_output fields: {analysis_output.__dataclass_fields__.keys() if hasattr(analysis_output, '__dataclass_fields__') else 'N/A'}")
+                # 直接调用 to_dict 方法
+                state.analysis = analysis_output.to_dict()
+                logger.info(f"[trigger_analyzer] analysis_output.to_dict() success")
+            except Exception as e:
+                import traceback
+                logger.error(f"[trigger_analyzer] 生成分析输出失败: {e}")
+                logger.error(f"[trigger_analyzer] 堆栈: {traceback.format_exc()}")
+                state.analysis = None
+
+            state.add_thinking_step(
+                "trigger_analyzer",
+                status="completed",
+                content=f"触发分析: {trigger_result.trigger_type.value if trigger_result.trigger_type else 'unknown'} - {trigger_result.trigger_reason}",
+                llm_used=False,
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+            logger.info(f"[trigger_analyzer] 触发分析命中: {trigger_result.trigger_type}")
+        else:
+            state.analysis = None
+            state.add_thinking_step(
+                "trigger_analyzer",
+                status="completed",
+                content="无触发分析",
+                llm_used=False,
+                duration_ms=int((time.time() - start_time) * 1000),
+            )
+            logger.info("[trigger_analyzer] 无触发分析")
+
+    except Exception as e:
+        import traceback
+        logger.error(f"[trigger_analyzer] 错误: {e}")
+        logger.error(f"[trigger_analyzer] 堆栈: {traceback.format_exc()}")
+        state.analysis = None
+        state.add_thinking_step(
+            "trigger_analyzer",
+            status="completed",
+            content=f"触发分析跳过: {str(e)}",
+            llm_used=False,
+            duration_ms=int((time.time() - start_time) * 1000),
+        )
+
+    return state
+
+
 async def result_analyzer(state: V2State) -> V2State:
     """
-    步骤 10: 结果分析智能体
+    步骤 11: 结果分析智能体
     - 分析查询结果，生成回答
     """
     from .nodes.result_analyzer import ResultAnalyzer
@@ -664,6 +1032,7 @@ async def result_analyzer(state: V2State) -> V2State:
             is_generic_result=state.is_generic_result,
             clarification_message=state.context_cache.get("clarification_message", ""),
             clarification_options=state.context_cache.get("clarification_options", []),
+            analysis=state.analysis,
         )
 
         state.answer = result.get("answer", "")
@@ -775,16 +1144,16 @@ def route_after_auditor(state: V2State) -> Literal["sql_executor", "error"]:
     return "sql_executor"
 
 
-def route_after_quality(state: V2State) -> Literal["result_analyzer", "mql_generator"]:
+def route_after_quality(state: V2State) -> Literal["trigger_analyzer", "mql_generator"]:
     """
     数据质量检查后的路由
-    - 检查通过 → result_analyzer
+    - 检查通过 → trigger_analyzer → result_analyzer
     - 检查失败 → 回 mql_generator 重试
     """
     if state.error == "data_quality_error":
         return "mql_generator"
 
-    return "result_analyzer"
+    return "trigger_analyzer"
 
 
 # ==================== 构建 Graph ====================
@@ -816,6 +1185,7 @@ def create_v2_graph():
     builder.add_node("sql_security_auditor", sql_security_auditor)
     builder.add_node("sql_executor", sql_executor)
     builder.add_node("data_quality_checker", data_quality_checker)
+    builder.add_node("trigger_analyzer", trigger_analyzer)
     builder.add_node("result_analyzer", result_analyzer)
     builder.add_node("state_manager", state_manager)
 
@@ -880,11 +1250,14 @@ def create_v2_graph():
         route_after_quality,
         {
             "mql_generator": "mql_generator",
-            "result_analyzer": "result_analyzer",
+            "trigger_analyzer": "trigger_analyzer",
         }
     )
 
-    # 12. result_analyzer → state_manager
+    # 12. trigger_analyzer → result_analyzer
+    builder.add_edge("trigger_analyzer", "result_analyzer")
+
+    # 13. result_analyzer → state_manager
     builder.add_edge("result_analyzer", "state_manager")
 
     # 13. state_manager → END
@@ -1015,6 +1388,9 @@ class V2Graph:
                 state = await sql_executor(state)
             return state
 
+        # 触发分析
+        state = await trigger_analyzer(state)
+
         state = await result_analyzer(state)
         state = await state_manager(state)
 
@@ -1101,6 +1477,10 @@ class V2Graph:
                 state = await sql_executor(state)
             yield state
             return
+
+        # 触发分析
+        state = await trigger_analyzer(state)
+        yield state
 
         state = await result_analyzer(state)
         yield state

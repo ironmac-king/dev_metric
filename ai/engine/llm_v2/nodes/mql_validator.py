@@ -238,6 +238,10 @@ class MQLSemanticValidator:
                 if metric_info.get("starrocks_field"):
                     metric.field = metric_info.get("starrocks_field", "")
                 logger.info(f"[_validate_metric] 通过 name 填充: name={metric.name}, code={metric.code}, field={metric.field}")
+            else:
+                # 找不到指标，清空错误的 name，防止下游误用
+                logger.warning(f"[_validate_metric] 指标名'{metric.name}'在数据库中不存在，清空该字段")
+                metric.name = ""
 
         # 如果 starrocks_sql 存在，验证 SQL 是否有效
         if metric.starrocks_sql:
@@ -398,20 +402,66 @@ class MQLSemanticValidator:
                 if value_str:
                     # 如果 filter 是从指标名中校正得到的（source="corrected"），跳过"紧跟维度关键词"检查
                     # 如果 filter 来自 intent_router 本地模型（source="user"），也跳过检查，因为本地模型已验证过
-                    if f.source not in ("corrected", "user"):
+                    # 如果 source 为 None（mql_generator 创建时未设置），也跳过检查，因为 mql_generator 已做验证
+                    if f.source and f.source not in ("corrected", "user"):
                         # 检查是否紧跟维度关键词（说明用户明确指定了过滤）
                         # 例如："自然渠道" → 值"自然"前面有"渠道" → 有效
                         # 例如："自然订单量" → 值"自然"前面没有维度关键词 → 无效（是指标名的一部分）
                         is_valid_filter = False
+                        # 获取同义词映射（用于检查值本身或其同义词是否在问题中出现）
+                        synonym_map = {}
+                        try:
+                            from ai.client.metric_client import MetricClient
+                            client = MetricClient()
+                            terms = client.get_business_terms()
+                            for t in terms:
+                                synonyms = t.get("synonyms") or []
+                                if isinstance(synonyms, str):
+                                    synonyms = [s.strip().strip('"') for s in synonyms.strip("{}").split(",") if s.strip()]
+                                dim_value = t.get("dimension_value", "")
+                                if dim_value and synonyms:
+                                    for syn in synonyms:
+                                        synonym_map[syn] = dim_value
+                        except Exception:
+                            pass
+
+                        # 检查值本身或同义词是否在问题中出现
+                        all_values_to_check = {value_str}
+                        normalized_value = synonym_map.get(value_str, value_str)
+                        all_values_to_check.add(normalized_value)
+                        # 添加所有同义词
+                        for syn, canon in synonym_map.items():
+                            if canon == normalized_value or canon == value_str:
+                                all_values_to_check.add(syn)
+
                         for kw in dimension_keywords:
                             # 检查 value_str 是否紧跟在 kw 后面（中间无其他字符）
-                            pattern = kw + value_str
-                            if pattern in original_question:
-                                is_valid_filter = True
+                            for v in all_values_to_check:
+                                pattern = kw + v
+                                if pattern in original_question:
+                                    is_valid_filter = True
+                                    break
+                            if is_valid_filter:
+                                break
+                            # 也检查值本身是否在问题中（不一定要紧跟维度关键词）
+                            for v in all_values_to_check:
+                                if v in original_question:
+                                    is_valid_filter = True
+                                    break
+                            if is_valid_filter:
                                 break
 
+                        # 详细调试：打印所有检查的值
+                        logger.warning(f"[_validate_filters] 验证filter: field={f.field}, value={f.value}, source={f.source}")
+                        logger.warning(f"[_validate_filters]   all_values_to_check={all_values_to_check}")
+                        for kw in dimension_keywords:
+                            for v in all_values_to_check:
+                                pattern = kw + v
+                                in_question = pattern in original_question
+                                if in_question:
+                                    logger.warning(f"[_validate_filters]   命中: kw+v='{pattern}' in question=True")
                         if not is_valid_filter:
-                            logger.warning(f"[_validate_filters] filter值不是紧跟维度关键词，可能是指标名的一部分，已丢弃: field={f.field}, value={f.value}, question={original_question}")
+                            logger.warning(f"[_validate_filters] filter验证失败，已丢弃: field={f.field}, value={f.value}, question={original_question[:50]}")
                             continue
 
             valid_filters.append(f)

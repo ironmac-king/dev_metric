@@ -519,6 +519,11 @@ class V2State:
     answer: str = ""                   # 最终回答
     error: str = ""                    # 错误信息
 
+    # ===== 触发分析结果 =====
+    analysis: Optional[Dict[str, Any]] = None  # 触发分析输出（AnalysisOutput.to_dict()）
+    multi_metric_data: List[Dict[str, Any]] = field(default_factory=list)  # 多指标下钻数据
+    category: str = ""  # 下钻类别 (sales/ad/inventory/cost)
+
     # ===== 思考过程 =====
     thinking_steps: List[ThinkingStep] = field(default_factory=list)
 

@@ -2445,4 +2445,29 @@ function exportResult() {
   background: rgba(30, 64, 175, 0.03);
   border-radius: 12px;
 }
+
+/* ========================================
+   Responsive Design - Mobile Adaptation
+   ======================================== */
+
+@media (max-width: 768px) {
+  .analysis-container {
+    flex-direction: column;
+    padding: 70px 12px 12px;
+    gap: 12px;
+    height: auto;
+    min-height: calc(100vh - 60px);
+  }
+
+  .chat-panel {
+    width: 100%;
+    flex-shrink: unset;
+    max-height: 50vh;
+  }
+
+  .result-panel {
+    flex: 1;
+    min-height: 300px;
+  }
+}
 </style>

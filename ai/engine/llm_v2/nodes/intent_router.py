@@ -13,6 +13,7 @@ from ai.config.logging_config import get_logger
 from ai.engine.prompt_manager import get_prompt_manager
 from ai.engine.llm import get_llm_engine
 from ..schema import V2State, MQLSchema, MQLIntent, MQLDimension, TimeRange, TimeType
+from ai.engine.time_parser import TimeParser
 
 logger = get_logger("ai.llm_v2.intent_router")
 
@@ -25,16 +26,48 @@ ENTITY_TYPE_TO_DIM_COLUMN = {
 
 # 时间表达式映射（简单场景用，复杂场景交给 LLM）
 TIME_EXPRESSION_MAP = {
-    '今日': '本月',
+    # 日期
+    '今日': '今日',
     '昨日': '昨日',
+    '前日': '前日',
+    '前天': '前日',
+    '明天': '明日',
+    '明日': '明日',
+    '后天': '后天',
+    # 周
     '本周': '本周',
     '上周': '上周',
+    '上上周': '上上周',
+    '下周': '下周',
+    '下下周': '下下周',
+    # 月
     '本月': '本月',
     '上月': '上月',
+    '上上月': '上上月',
+    '上上个月': '上上月',
+    '下月': '下月',
+    '下下月': '下下月',
+    # 季度
     '本季度': '本季度',
     '上季度': '上季度',
+    '下季度': '下季度',
+    'Q1': 'Q1',
+    'Q2': 'Q2',
+    'Q3': 'Q3',
+    'Q4': 'Q4',
+    '一季度': '一季度',
+    '二季度': '二季度',
+    '三季度': '三季度',
+    '四季度': '四季度',
+    # 年
     '本年': '本年',
+    '今年': '本年',
     '去年': '去年',
+    '明年': '明年',
+    '前年': '前年',
+    '后年': '后年',
+    # 滚动窗口（近N天、近N个月等由 TimeParser 处理）
+    # 此处仅作快速匹配备用
 }
 
 
@@ -162,6 +195,10 @@ class IntentRouter:
         """
         logger.info(f"[IntentRouter] 路由问题: {question[:50]}...")
 
+        # 0. 下钻特殊处理：识别 __DRILLDOWN__:xxx__ 格式
+        if question.startswith("__DRILLDOWN__:"):
+            return self._handle_drilldown(question)
+
         # 1. 寒暄处理
         if self._is_greeting(question):
             return self._handle_greeting()
@@ -175,7 +212,10 @@ class IntentRouter:
 
     def _is_short_followup(self, question: str) -> bool:
         """判断是否为短追问或维度选择"""
-        short_keywords = ["呢", "呢？", "？", "啊", "哦", "嗯", "再", "还", "环比呢", "同比呢", "趋势呢"]
+        # 单独的 "？" 不算短追问（可能是完整问题的结尾）
+        if question.strip() == "？" or question.strip() == "？":
+            return False
+        short_keywords = ["呢", "呢？", "啊", "哦", "嗯", "再", "还有", "还要", "还在", "环比呢", "同比呢", "趋势呢"]
         if any(kw in question for kw in short_keywords):
             return True
 
@@ -306,6 +346,7 @@ class IntentRouter:
         2. 查 dim_value_mapping 确认候选是否为具体维度值
         3. 精确匹配到唯一结果 → 纠正 dimension type
         4. 候选词模糊（< 3字符）且匹配到多个结果 → 不纠正，让追问处理
+        5. 候选词是已知维度类型（如"三级品类"）→ 直接设置 type，不追问
 
         注意：此方法处理所有维度类型，不仅限于泛指类型。
         当 LLM 返回泛指类型（如 PRODUCT_LINE）但实际是具体值（如"智能云存储"）时，
@@ -317,14 +358,27 @@ class IntentRouter:
         if not dim_service:
             return mql
 
-        # 从问题中提取所有候选维度值
-        candidates = self._extract_dimension_candidates(question, "")
-        if not candidates:
-            return mql
+        # 从问题中提取所有候选维度值（包含维度类型，已在 _extract_dimension_candidates 中从维表动态获取）
+        candidates = self._extract_dimension_candidates(question, "", dim_service)
 
         logger.info(f"[_validate_generic_dimensions] 提取到的候选维度值: {candidates}")
 
         for candidate in candidates:
+            # ========== 新增：优先检查候选词是否是已知维度类型 ==========
+            # 已知维度类型：一级品类/二级品类/三级品类/四级品类/品牌/平台/店铺等
+            if dim_service:
+                col_from_type = dim_service.find_column_by_type(candidate)
+                if col_from_type:
+                    logger.info(f"[_validate_generic_dimensions] 候选 '{candidate}' 是已知维度类型 -> column={col_from_type}，直接设置")
+                    for dim in mql.dimensions:
+                        if not dim.column or not dim.type:
+                            dim.type = candidate
+                            dim.column = col_from_type
+                            # value 保持为空，表示这是按该维度聚合
+                    # 不需要追问，直接返回
+                    return mql
+            # ============================================================
+
             # 查 dim_value_mapping（limit=10 返回多个结果用于判断模糊度）
             search_results = dim_service.search_by_value(candidate, limit=10)
             if not search_results:
@@ -377,14 +431,24 @@ class IntentRouter:
 
         return mql
 
-    def _extract_dimension_candidates(self, question: str, dim_type: str) -> List[str]:
+    def _extract_dimension_candidates(self, question: str, dim_type: str, dim_service) -> List[str]:
         """
         从问题中提取候选维度值。
         例如："智能云存储今年业绩" + dim_type="品类"
         → 提取 "智能云存储"（去掉 "品类" 相关词）
+
+        同时也从维表动态获取所有维度类型，检查问题中是否包含。
         """
         import re
         candidates = []
+
+        # 0. 从维表获取所有维度类型，检查问题中是否包含（这是动态的，不是硬编码）
+        if dim_service:
+            all_types = dim_service.get_all_types()
+            for type_info in all_types:
+                dim_type_str = type_info.get("dimension_type", "")
+                if dim_type_str and dim_type_str in question and dim_type_str not in candidates:
+                    candidates.append(dim_type_str)
 
         # 1. 检查 "X的品类/Y" 模式：X 是维度值
         category_words = ['品类', '类目', '商品类', '产品类']
@@ -518,6 +582,19 @@ class IntentRouter:
 
         # 根据追问内容更新意图
         from ..schema import ComparisonSpec
+        # 检查是否是新的独立问题（不应该继承上轮指标）
+        new_question_keywords = ["多少", "总额", "金额", "抽走", "赚了", "亏了", "收入", "支出", "利润", "成本"]
+        is_new_question = any(kw in question for kw in new_question_keywords)
+
+        if is_new_question:
+            # 新问题：不继承指标，让后续 LLM 识别新指标
+            logger.info(f"[IntentRouter] 检测到新问题（{question[:20]}...），不继承上轮指标")
+            return {
+                "mql": mql,
+                "needs_clarification": False,
+                "source": "llm",  # 改为 llm，让系统重新识别
+            }
+
         if "环比" in question:
             mql.intent = MQLIntent.QUERY_COMPARISON
             mql.comparison = inherited_mql.comparison if inherited_mql.comparison else ComparisonSpec()
@@ -531,10 +608,10 @@ class IntentRouter:
         elif "趋势" in question:
             mql.intent = MQLIntent.QUERY_TREND
         else:
-            # 继承上轮意图
+            # 继承上轮意图（仅当确实是追问时）
             mql.intent = inherited_mql.intent
 
-        # 继承指标和时间
+        # 继承指标和时间（仅当不是新问题时）
         mql.metric = inherited_mql.metric
         mql.metrics = inherited_mql.metrics
         mql.time = inherited_mql.time
@@ -558,6 +635,34 @@ class IntentRouter:
             "mql": mql,
             "needs_clarification": False,
             "source": "followup",
+        }
+
+    def _handle_drilldown(self, question: str) -> Dict[str, Any]:
+        """处理四类下钻特殊格式 __DRILLDOWN__:xxx__
+
+        解析 __DRILLDOWN__:sales__ 格式，直接设置 drilldown_type，
+        让后续 trigger_analyzer 返回对应的分析结果。
+        """
+        # 解析格式：__DRILLDOWN__:sales__
+        try:
+            drilldown_type = question.replace("__DRILLDOWN__:", "").replace("__", "").strip()
+            logger.info(f"[_handle_drilldown] 解析下钻类型: {drilldown_type}")
+        except Exception as e:
+            logger.warning(f"[_handle_drilldown] 解析失败: {e}")
+            drilldown_type = None
+
+        mql = MQLSchema()
+        mql.intent = MQLIntent.QUERY_VALUE  # 假装是查询值，实际 trigger_analyzer 会处理
+        mql.confidence = 1.0
+        mql.original_question = question
+        mql.resolved_question = question
+
+        # drilldown_type 会传递给 trigger_analyzer
+        return {
+            "mql": mql,
+            "needs_clarification": False,
+            "source": "drilldown",
+            "drilldown_type": drilldown_type,  # 关键字段
         }
 
     async def _local_then_llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
@@ -588,6 +693,26 @@ class IntentRouter:
             if local_result['match_success']:
                 mql = self._build_mql_from_local(local_result, question)
                 logger.info(f"[IntentRouter] 本地模型精准匹配成功，跳过 LLM: intent={mql.intent.value}")
+
+                # ===== 本地模型匹配成功后：检测同比/环比关键词 =====
+                # 注意：这些关键词在实体中被识别为 TIME，需要在这里补充检测并设置 comparison
+                if "环比" in question or "同比" in question:
+                    from ..schema import ComparisonSpec
+                    comparison_types = []
+                    if "环比" in question:
+                        comparison_types.append("环比")
+                    if "同比" in question:
+                        comparison_types.append("同比")
+                    mql.comparison = ComparisonSpec(
+                        enabled=True,
+                        types=comparison_types,
+                        compare_period_start="",
+                        compare_period_end="",
+                    )
+                    # 如果没有设置 intent 为 QUERY_COMPARISON，改为 QUERY_COMPARISON
+                    if mql.intent.value not in ("query_comparison", "query_trend"):
+                        mql.intent = MQLIntent.QUERY_COMPARISON
+                    logger.info(f"[IntentRouter] 本地模型检测到对比关键词: {comparison_types}")
 
                 # 检查是否有泛指维度 → 触发追问
                 # ===== 新增：校验泛指维度是否为具体维度值 =====
@@ -650,29 +775,56 @@ class IntentRouter:
         # 指标实体（必须）
         metric_entities = [e for e in entities if e['type'] == 'METRIC']
         if metric_entities:
-            # 主指标：取第一个 METRIC 实体
-            metric_text = metric_entities[0]['text']
-            mql.metric = MQLMetric(
-                code="",  # 本地模型不返回 code，让后续节点通过 metric_client 查询
-                name=metric_text,
-                table="",
-                field="",
-                unit="",
-            )
-            logger.info(f"[IntentRouter] 本地模型提取主指标: {metric_text}")
+            # 先检查所有 METRIC 实体是否可能是 business_terms 维度值同义词
+            # 例如"美国站"被识别为 METRIC，但实际上是维度值
+            dim_service = self._get_dimension_service()
+            real_metric_entities = []
+            if dim_service:
+                for me in metric_entities:
+                    metric_text = me['text']
+                    dim_info = dim_service.find_dimension_info(metric_text)
+                    # 如果 find_dimension_info 返回了结果且不是泛指，说明它更可能是维度值而不是指标
+                    if dim_info and not dim_info.get('is_generic'):
+                        # 这是维度值同义词，添加到 dimensions 而不是 metrics
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_info.get('dimension_type', ''),
+                            column=dim_info.get('column_name', ''),
+                            field="",
+                            value=dim_info.get('dimension_value', metric_text),
+                        ))
+                        logger.info(f"[IntentRouter] METRIC实体'{metric_text}'实为维度值同义词，转换: {dim_info}")
+                    else:
+                        real_metric_entities.append(me)
+            else:
+                real_metric_entities = metric_entities
 
-            # 多指标：其余 METRIC 实体加入 metrics 列表
-            if len(metric_entities) > 1:
-                for extra_metric in metric_entities[1:]:
-                    extra_name = extra_metric['text']
-                    mql.metrics.append(MQLMetric(
-                        code="",
-                        name=extra_name,
-                        table="",
-                        field="",
-                        unit="",
-                    ))
-                logger.info(f"[IntentRouter] 本地模型提取多指标: {[m.name for m in mql.metrics]}")
+            # 用过滤后的实体来处理指标
+            metric_entities = real_metric_entities
+
+            if metric_entities:
+                # 主指标：取第一个 METRIC 实体
+                metric_text = metric_entities[0]['text']
+                mql.metric = MQLMetric(
+                    code="",  # 本地模型不返回 code，让后续节点通过 metric_client 查询
+                    name=metric_text,
+                    table="",
+                    field="",
+                    unit="",
+                )
+                logger.info(f"[IntentRouter] 本地模型提取主指标: {metric_text}")
+
+                # 多指标：其余 METRIC 实体加入 metrics 列表
+                if len(metric_entities) > 1:
+                    for extra_metric in metric_entities[1:]:
+                        extra_name = extra_metric['text']
+                        mql.metrics.append(MQLMetric(
+                            code="",
+                            name=extra_name,
+                            table="",
+                            field="",
+                            unit="",
+                        ))
+                    logger.info(f"[IntentRouter] 本地模型提取多指标: {[m.name for m in mql.metrics]}")
 
         # 时间实体
         time_entities = [e for e in entities if e['type'] == 'TIME']
@@ -685,26 +837,65 @@ class IntentRouter:
                 end="",
                 original=time_original,
             )
-            logger.info(f"[IntentRouter] 本地模型提取时间: {time_text} -> {time_original}")
+            # 转换相对时间为绝对日期
+            if time_original:
+                time_parser = TimeParser()
+                parsed = time_parser.parse(time_original)
+                if parsed:
+                    mql.time.start = parsed.get("start", "")
+                    mql.time.end = parsed.get("end", "")
+                    if parsed.get("type"):
+                        try:
+                            mql.time.type = TimeType(parsed["type"])
+                        except ValueError:
+                            pass
+            logger.info(f"[IntentRouter] 本地模型提取时间: {time_text} -> {time_original}, start={mql.time.start}, end={mql.time.end}")
 
         # 维度实体（类型 + 值）
         dim_entities = [e for e in entities if e['type'] == 'DIM']
         dim_value_entities = [e for e in entities if e['type'] == 'DIM_VALUE']
 
-        # 简单场景：直接组合维度类型和值
-        if dim_entities and dim_value_entities:
-            for i, dim_entity in enumerate(dim_entities):
-                if i < len(dim_value_entities):
-                    dim_type = dim_entity['text']
-                    dim_value = dim_value_entities[i]['text']
-                    # 简单映射，实际维度代码由后续节点解析
+        # 通过 dimension_service 反查 column_name（复用 853-898 行的逻辑）
+        if dim_value_entities:
+            dim_service = self._get_dimension_service()
+            if dim_service and not self._dimension_type_mappings:
+                self._load_dimension_mappings()
+            column_to_dim_name = {}
+            if self._dimension_type_mappings:
+                for m in self._dimension_type_mappings:
+                    col = m.get("column_name", "") or ""
+                    dim_name = m.get("dimension_name", "") or m.get("dimension_type", "") or ""
+                    if col and dim_name:
+                        column_to_dim_name[col.upper()] = dim_name
+
+            for dv_entity in dim_value_entities:
+                dim_value = dv_entity['text']
+                if not dim_service:
+                    logger.warning(f"[IntentRouter] 无法处理 DIM_VALUE '{dim_value}'：DimensionService 不可用")
+                    continue
+                dim_info = dim_service.find_dimension_info(dim_value)
+                if dim_info is None:
+                    logger.warning(f"[IntentRouter] DimensionService 无法找到 '{dim_value}' 对应的维度信息")
+                    continue
+
+                if dim_info["is_generic"]:
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_info["dimension_type"],
+                        column=dim_info.get("column_name", ""),
+                        field="",
+                        value=None,
+                    ))
+                    logger.info(f"[IntentRouter] 检测到泛指维度: {dim_info['dimension_type']}")
+                else:
+                    column_name = dim_info["column_name"]
+                    dim_type = column_to_dim_name.get(column_name.upper(), dim_info["dimension_type"])
                     mql.dimensions.append(MQLDimension(
                         type=dim_type,
-                        column="",
+                        column=column_name,
                         field="",
                         value=dim_value,
                     ))
-                    logger.info(f"[IntentRouter] 本地模型提取维度: {dim_type} = {dim_value}")
+                    logger.info(f"[IntentRouter] 本地模型提取维度值: {dim_type}({column_name}) = {dim_value}")
 
         # 单独 DIM_VALUE（无对应 DIM 类型）：通过 dimension_service 反查 column_name
         if dim_value_entities and not dim_entities:
@@ -753,6 +944,65 @@ class IntentRouter:
                     ))
                     logger.info(f"[IntentRouter] 本地模型提取维度值(DIM_VALUE 反查): {dim_type}({column_name}) = {dim_value}")
 
+        # 单独 DIM 实体（无对应 DIM_VALUE）：查找 column_name 并加入 dimensions
+        # 例如：用户问"销售额排名前三的站点" → BERT 识别到 DIM='站点' 但没有 DIM_VALUE
+        # 此时 '站点' 应该作为分组维度，需要通过 dimension_mappings 反查列名
+        if dim_entities:
+            dim_service = self._get_dimension_service()
+            if dim_service and not self._dimension_type_mappings:
+                self._load_dimension_mappings()
+            column_to_dim_name = {}
+            if self._dimension_type_mappings:
+                for m in self._dimension_type_mappings:
+                    col = m.get("column_name", "") or ""
+                    dim_name = m.get("dimension_name", "") or m.get("dimension_type", "") or ""
+                    if col and dim_name:
+                        column_to_dim_name[col.upper()] = dim_name
+
+            for dim_entity in dim_entities:
+                dim_text = dim_entity['text']
+                # 跳过已配对的 DIM（那些有对应 DIM_VALUE 的）
+                paired = False
+                for dv_entity in dim_value_entities:
+                    dv_text = dv_entity['text']
+                    if dim_service:
+                        dim_info = dim_service.find_dimension_info(dv_text)
+                        if dim_info and dim_info.get("dimension_type") == dim_text:
+                            paired = True
+                            break
+                if paired:
+                    continue
+
+                # 独立 DIM 实体：通过 dimension_mappings 反查列名
+                if not self._dimension_type_mappings:
+                    continue
+                target_col = None
+                for m in self._dimension_type_mappings:
+                    d_name = m.get("dimension_name", "") or m.get("dimension_type", "") or ""
+                    if d_name == dim_text:
+                        col = m.get("column_name", "")
+                        if col:
+                            target_col = col
+                            break
+                if target_col:
+                    dim_type = column_to_dim_name.get(target_col.upper(), dim_text)
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_type,
+                        column=target_col,
+                        field="",
+                        value=None,
+                    ))
+                    logger.info(f"[IntentRouter] 本地模型提取分组维度(独立DIM): {dim_text} → {target_col}")
+                else:
+                    # 查不到列名，尝试用泛指维度处理
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_text,
+                        column="",
+                        field="",
+                        value=None,
+                    ))
+                    logger.info(f"[IntentRouter] 本地模型提取泛指分组维度(独立DIM): {dim_text}")
+
         # 检查是否有对比意图（环比/同比关键词）
         if any(kw in question for kw in ['环比', '同比', '增长', '下降', '变化']):
             mql.comparison = ComparisonSpec(
@@ -765,13 +1015,32 @@ class IntentRouter:
         # 检查是否有排名意图
         if any(kw in question for kw in ['排名', '前几', '最高', '最低', '最好', '最差']):
             mql.intent = MQLIntent.QUERY_RANKING
-            # 提取排名数量
+            # 提取排名数量（支持阿拉伯数字和中文数字）
             import re
-            match = re.search(r'前(\d+)', question)
-            if match:
-                mql.top_n = int(match.group(1))
+            # 中文数字映射
+            CN_NUM_MAP = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+            def parse_chinese_num(s):
+                if s in CN_NUM_MAP:
+                    return CN_NUM_MAP[s]
+                try:
+                    return int(s)
+                except:
+                    return None
+            # 优先匹配中文数字 "前三"、"前五" 等
+            cn_match = re.search(r'前([一二三四五六七八九十]+)', question)
+            if cn_match:
+                top_n = parse_chinese_num(cn_match.group(1))
+                if top_n:
+                    mql.top_n = top_n
+                else:
+                    mql.top_n = 10
             else:
-                mql.top_n = 10
+                # 阿拉伯数字 "前10"、"前3"
+                digit_match = re.search(r'前(\d+)', question)
+                if digit_match:
+                    mql.top_n = int(digit_match.group(1))
+                else:
+                    mql.top_n = 10
 
         # 纯文本检测：BERT 没有输出 DIM 实体，但问题包含泛指维度关键词
         # 例如"本月各品类销售额" → BERT 没有识别到 DIM/DIM_VALUE，但文本里有"品类"
@@ -828,6 +1097,45 @@ class IntentRouter:
                         ))
                         logger.info(f"[IntentRouter] 数字兜底查到维度: {num_value} -> {dim_type}({column_name})")
                         break  # 只取第一个匹配
+
+        # ========== 占比模式检测（本地模型匹配成功后补充检测）==========
+        # 本地模型可能把 "XX在YY中的占比" 识别为 query_value，
+        # 需要在此补充检测并修正为 QUERY_RATIO
+        if mql.metric and ('占比' in question or '比重' in question or '比例' in question):
+            import re
+            # 模式1: "XX在YY中的占比" 或 "XX在YY中的比重"
+            match1 = re.search(r'([^\s，。,.！!？?在]+?)在([^\s，。,.！!？?中的]+?)中的[比]?占比', question)
+            # 模式2: "XX占YY的占比" 或 "XX占YY比重"
+            match2 = re.search(r'([^\s，。,.！!？?在]+?)占([^\s，。,.！!？?的]+?)[比]?占比', question)
+            # 模式3: "XX在YY中的比例"
+            match3 = re.search(r'([^\s，。,.！!？?在]+?)在([^\s，。,.！!？?中的]+?)中的比例', question)
+
+            ratio_match = match1 or match2 or match3
+            if ratio_match:
+                molecule_text = ratio_match.group(1).strip()
+                denominator_text = ratio_match.group(2).strip()
+
+                # 排除明显不是指标的词（如"亚马逊"、"各站点"）
+                skip_words = ['亚马逊', '各站点', '各平台', '各渠道', '各品类', '各品牌', '美国站', '中国站']
+                if molecule_text not in skip_words and denominator_text not in skip_words:
+                    from ..schema import CalculationPattern
+                    mql.intent = MQLIntent.QUERY_RATIO
+                    mql.calculation_patterns = [CalculationPattern.PERCENTAGE]
+                    mql.molecule_metric = MQLMetric(
+                        name=molecule_text,
+                        code="",
+                        table="",
+                        field="",
+                        unit="",
+                    )
+                    mql.denominator_metric = MQLMetric(
+                        name=denominator_text,
+                        code="",
+                        table="",
+                        field="",
+                        unit="",
+                    )
+                    logger.info(f"[IntentRouter] 占比模式检测成功: 分子={molecule_text}, 分母={denominator_text}")
 
         return mql
 
@@ -986,6 +1294,21 @@ class IntentRouter:
                 end=time_data.get("end", ""),
                 original=original,
             )
+            # 如果 start/end 为空，调用 TimeParser 将 original 转换为绝对日期
+            if not mql.time.start or not mql.time.end:
+                time_parser = TimeParser()
+                parsed = time_parser.parse(original)
+                if parsed:
+                    if not mql.time.start:
+                        mql.time.start = parsed.get("start", "")
+                    if not mql.time.end:
+                        mql.time.end = parsed.get("end", "")
+                    if parsed.get("type"):
+                        try:
+                            mql.time.type = TimeType(parsed["type"])
+                        except ValueError:
+                            pass
+            logger.info(f"[IntentRouter] LLM nl2structure 时间解析: original={original}, start={mql.time.start}, end={mql.time.end}")
 
         # 解析维度（支持 dimensions 数组 和 dimension 单个值两种格式）
         dim_type_map = {
@@ -1060,13 +1383,26 @@ class IntentRouter:
         if mql.intent == MQLIntent.QUERY_RANKING:
             top_n = result.get("top_n")
             if top_n is None or top_n == 0:
-                # LLM 返回 0 或 None 时，从问题文本中提取数字
+                # LLM 返回 0 或 None 时，从问题文本中提取数字（支持中文数字和阿拉伯数字）
                 import re
-                match = re.search(r'前(\d+)', question)
-                if match:
-                    top_n = int(match.group(1))
+                CN_NUM_MAP = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+                def parse_cn_num(s):
+                    if s in CN_NUM_MAP:
+                        return CN_NUM_MAP[s]
+                    try:
+                        return int(s)
+                    except:
+                        return None
+                cn_match = re.search(r'前([一二三四五六七八九十]+)', question)
+                if cn_match:
+                    parsed = parse_cn_num(cn_match.group(1))
+                    top_n = parsed if parsed else 10
                 else:
-                    top_n = 10  # 默认 Top 10
+                    digit_match = re.search(r'前(\d+)', question)
+                    if digit_match:
+                        top_n = int(digit_match.group(1))
+                    else:
+                        top_n = 10  # 默认 Top 10
             mql.top_n = top_n
 
         # 解析排序方向（最少/最小 → ASC；最多/最大 → DESC）
@@ -1090,8 +1426,14 @@ class IntentRouter:
         return mql
 
     def _get_default_intent_prompt(self) -> str:
-        """默认意图识别 prompt（精简版）"""
-        return """【角色】
+        """默认意图识别 prompt（精简版）- 动态注入实际指标和维度"""
+        from ai.engine.prompt_metadata_loader import get_prompt_metadata_loader
+        loader = get_prompt_metadata_loader()
+
+        metric_names_str = loader.build_metric_names_section(max_count=80)
+        dim_mappings_str = loader.build_dimension_mappings_section()
+
+        prompt = """【角色】
 你是一个业务指标查询助手，擅长从用户问题中识别查询意图。
 
 【任务】
@@ -1126,10 +1468,12 @@ class IntentRouter:
 - query_metadata: 查口径（业务口径、技术口径）
 - greeting/thanks/bye: 寒暄
 
-【维度映射】
-店铺=SHOP, 平台=PLATFORM, 品类=CATEGORY, 渠道=CHANNEL, 品牌=BRAND, 产品线=PRODUCT_LINE, 广告类型=AD_TYPE, 站点=SITE, 国家=COUNTRY, 地区=REGION
+【系统实际指标名称（按此识别）】
+{METRIC_NAMES}
+
+【系统实际维度类型映射（按此映射）】
+{DIMENSION_MAPPINGS}
 每天/按天=DAY, 每周/按周=WEEK, 每月/按月=MONTH, 每年/按年=YEAR
-一级品类=GROUP_1, 二级品类=GROUP_2, 三级品类=GROUP_3, 四级品类=GROUP_4
 
 【约束】
 1. 只输出JSON 2. confidence<0.4用unknown 3. query_ranking必须返回top_n 4. query_comparison必须返回comparison.types
@@ -1141,3 +1485,7 @@ class IntentRouter:
 {question}
 
 请输出JSON："""
+
+        prompt = prompt.replace("{METRIC_NAMES}", metric_names_str)
+        prompt = prompt.replace("{DIMENSION_MAPPINGS}", dim_mappings_str)
+        return prompt

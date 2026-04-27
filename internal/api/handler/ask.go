@@ -640,6 +640,38 @@ func GetAskSuggest(c *gin.Context) {
 	response.Success(c, []string{})
 }
 
+// GetV2InitialSuggestions 获取 V2 初始快捷提问建议
+func GetV2InitialSuggestions(c *gin.Context) {
+	// 返回适合 LLMAskV2A.vue 的快捷提问
+	suggestions := []map[string]interface{}{
+		{
+			"title": "本月各品类销售额",
+			"desc":  "查看各品类的销售数据排名，了解哪些品类表现最好",
+			"icon":  "QueryIcon",
+			"text":  "本月各品类销售额是多少？",
+		},
+		{
+			"title": "近30天用户趋势",
+			"desc":  "分析用户数的变化趋势，发现增长或下降的规律",
+			"icon":  "TrendIcon",
+			"text":  "近30天用户数变化趋势",
+		},
+		{
+			"title": "指标异常检测",
+			"desc":  "自动发现数据中的异常波动，及时预警问题",
+			"icon":  "AlertIcon",
+			"text":  "最近有哪些指标出现异常？",
+		},
+		{
+			"title": "环比数据对比",
+			"desc":  "对比不同周期的数据差异，评估业务变化",
+			"icon":  "ChartIcon",
+			"text":  "对比本月与上月数据差异",
+		},
+	}
+	response.Success(c, suggestions)
+}
+
 // ensureConfigLoaded 确保配置已加载
 func ensureConfigLoaded() {
 	if config.Get() == nil {
@@ -916,5 +948,64 @@ func GetLastResult(c *gin.Context) {
 		"result_data":  resultData,
 		"sql":          lastMsg.SQL,
 		"created_at":   lastMsg.CreatedAt,
+	})
+}
+
+// LLMAskV2Stream LLM.V2 流式问数 - 转发到 Python AI
+func LLMAskV2Stream(c *gin.Context) {
+	var req struct {
+		Question  string `json:"question" binding:"required"`
+		SessionID string `json:"session_id"`
+		UserID    string `json:"user_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"code": 400, "message": "参数错误"})
+		return
+	}
+
+	aiURL := "http://localhost:8081/api/v1/llm-ask/v2/stream"
+
+	payload := map[string]interface{}{
+		"question":   req.Question,
+		"session_id": req.SessionID,
+		"user_id":    req.UserID,
+	}
+	jsonData, _ := json.Marshal(payload)
+
+	httpReq, _ := http.NewRequest("POST", aiURL, bytes.NewBuffer(jsonData))
+	httpReq.Header.Set("Content-Type", "application/json")
+	if auth := c.GetHeader("Authorization"); auth != "" {
+		httpReq.Header.Set("Authorization", auth)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		c.JSON(500, gin.H{"code": 500, "message": "AI 服务暂时不可用"})
+		return
+	}
+	defer resp.Body.Close()
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	c.Stream(func(w io.Writer) bool {
+		buf := make([]byte, 1024)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				if _, err := w.Write(buf[:n]); err != nil {
+					return false
+				}
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			}
+			if err != nil {
+				return false
+			}
+		}
 	})
 }

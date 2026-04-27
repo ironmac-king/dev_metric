@@ -54,53 +54,65 @@ async def _send_log_to_go(
     sql: str,
     mql_json: str,
 ) -> bool:
-    """发送日志到 Go 后端 AskAnalysisLog 表"""
-    try:
-        logger.info(f"[V2 Log] 开始发送日志: question={question[:30] if question else 'empty'}..., answer={answer[:30] if answer else 'empty'}...")
-        # 序列化 thinking_steps
-        steps_json = json.dumps([
-            {
-                "step": s.step,
-                "status": s.status,
-                "content": s.content or "",
-                "timestamp": s.timestamp or "",
-                "llm_used": s.llm_used,
-                "duration_ms": s.duration_ms,
-                "source": s.source,
-                "entities": s.entities,
-                "needs_clarification": s.needs_clarification,
-                "clarification_message": s.clarification_message or "",
-                "clarification_options": s.clarification_options or [],
+    """发送日志到 Go 后端 AskAnalysisLog 表（带重试机制）"""
+    # P2-11 fix: 添加 3 次重试 + 指数退避
+    MAX_RETRIES = 3
+    last_error = None
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            logger.info(f"[V2 Log] 开始发送日志(尝试 {attempt + 1}/{MAX_RETRIES}): question={question[:30] if question else 'empty'}...")
+            # 序列化 thinking_steps
+            steps_json = json.dumps([
+                {
+                    "step": s.step,
+                    "status": s.status,
+                    "content": s.content or "",
+                    "timestamp": s.timestamp or "",
+                    "llm_used": s.llm_used,
+                    "duration_ms": s.duration_ms,
+                    "source": s.source,
+                    "entities": s.entities,
+                    "needs_clarification": s.needs_clarification,
+                    "clarification_message": s.clarification_message or "",
+                    "clarification_options": s.clarification_options or [],
+                }
+                for s in thinking_steps
+            ], ensure_ascii=False)
+
+            payload = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "question": question,
+                "answer": answer,
+                "intent": intent,
+                "success": success,
+                "fail_stage": fail_stage,
+                "fail_reason": fail_reason,
+                "suggestion": "",
+                "thinking_steps": steps_json,
+                "sql": sql,
+                "mql_json": mql_json,
             }
-            for s in thinking_steps
-        ], ensure_ascii=False)
 
-        payload = {
-            "user_id": user_id,
-            "session_id": session_id,
-            "question": question,
-            "answer": answer,
-            "intent": intent,
-            "success": success,
-            "fail_stage": fail_stage,
-            "fail_reason": fail_reason,
-            "suggestion": "",
-            "thinking_steps": steps_json,
-            "sql": sql,
-            "mql_json": mql_json,
-        }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(GO_ASK_ANALYSIS_LOG_URL, json=payload)
+                if response.status_code == 200:
+                    logger.info(f"[V2 Log] 成功发送到 Go API: session_id={session_id}")
+                    return True
+                else:
+                    logger.warning(f"[V2 Log] Go API 返回错误: {response.status_code} {response.text}")
+                    last_error = f"status={response.status_code}"
+        except Exception as e:
+            logger.warning(f"[V2 Log] 发送失败(尝试 {attempt + 1}/{MAX_RETRIES}): {e}")
+            last_error = str(e)
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(GO_ASK_ANALYSIS_LOG_URL, json=payload)
-            if response.status_code == 200:
-                logger.info(f"[V2 Log] 成功发送到 Go API: session_id={session_id}")
-                return True
-            else:
-                logger.warning(f"[V2 Log] Go API 返回错误: {response.status_code} {response.text}")
-                return False
-    except Exception as e:
-        logger.warning(f"[V2 Log] 发送失败: {e}")
-        return False
+        # 指数退避：1s, 2s, 4s
+        if attempt < MAX_RETRIES - 1:
+            await asyncio.sleep(1 * (attempt + 1))
+
+    logger.error(f"[V2 Log] 发送日志失败，已重试 {MAX_RETRIES} 次: {last_error}")
+    return False
 
 
 class AskRequestV2(BaseModel):
@@ -142,6 +154,8 @@ class AskResponseV2(BaseModel):
     result_data: Optional[List[Dict[str, Any]]] = None
     total: int = 0
     metric_name: Optional[str] = None  # 指标名称（用于图表 tooltip）
+    analysis: Optional[Dict[str, Any]] = None  # 触发分析结果
+    mode: Optional[str] = "direct"  # "direct" or "triggered"
 
 
 @router.post("/v2", response_model=AskResponseV2)
@@ -240,6 +254,8 @@ async def ask_question_v2(req: AskRequestV2):
             result_data=result_state.sql_result.data if result_state.sql_result else None,
             total=result_state.sql_result.total if result_state.sql_result else 0,
             metric_name=_get_metric_name(result_state.mql) if result_state.mql else None,
+            analysis=result_state.analysis,
+            mode="triggered" if result_state.analysis else "direct",
         )
 
         duration_ms = int((time.time() - start_time) * 1000)
@@ -445,6 +461,11 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "total": step_state.get("total", 0),
                         "metric_name": step_state.get("metric_name", ""),
                         "metric_names": step_state.get("metric_names", []),
+                        "multi_metric_data": step_state.get("multi_metric_data", []),
+                        "dimensional_data": step_state.get("dimensional_data", {}),
+                        "category": step_state.get("category", ""),
+                        "analysis": step_state.get("analysis"),
+                        "health_score": step_state.get("health_score"),
                     }).to_sse()
 
                 # 发送回答（一旦就绪）
@@ -454,6 +475,11 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "suggestions": step_state.get("suggestions", []),
                         "clarification_options": step_state.get("clarification_options", []),
                         "clarification_message": step_state.get("clarification_message", ""),
+                        "analysis": step_state.get("analysis"),
+                        "mode": step_state.get("mode", "direct"),
+                        "multi_metric_data": step_state.get("multi_metric_data", []),
+                        "dimensional_data": step_state.get("dimensional_data", {}),
+                        "category": step_state.get("category", ""),
                     }).to_sse()
 
             # 发送完成事件
@@ -559,6 +585,10 @@ async def _stream_graph(graph, state: V2State):
                 if hasattr(state_update, 'context_cache') and state_update.context_cache:
                     suggestions = state_update.context_cache.get("suggestions", [])
 
+                # 获取触发分析结果
+                analysis = getattr(state_update, 'analysis', None)
+                mode = "triggered" if analysis else "direct"
+
                 # 检查是否泛指维度需要追问
                 is_generic = getattr(state_update, 'is_generic_result', False)
                 # 从 last_thinking（ThinkingStep 对象）获取追问信息
@@ -595,6 +625,13 @@ async def _stream_graph(graph, state: V2State):
                     "duration_ms": last_thinking.duration_ms if last_thinking and hasattr(last_thinking, 'duration_ms') else 0,
                     "answer": answer,
                     "suggestions": suggestions,
+                    # 传递触发分析结果
+                    "analysis": analysis,
+                    "mode": mode,
+                    # 传递多指标下钻数据（用于报告渲染）
+                    "multi_metric_data": getattr(state_update, 'multi_metric_data', []),
+                    "dimensional_data": getattr(state_update, 'dimensional_data', {}),
+                    "category": getattr(state_update, 'category', ''),
                     # 传递追问信息
                     "needs_clarification": getattr(last_thinking, 'needs_clarification', is_generic),
                     "clarification_message": clarification_message,
@@ -646,6 +683,21 @@ def _get_metric_names(mql) -> list:
     """获取所有指标名称（支持多指标）"""
     if not mql:
         return []
+
+    # ========== 占比查询：返回占比列名而不是单独的指标名 ==========
+    # 当有 molecule_metric 和 denominator_metric 时，说明这是占比查询
+    # SQL 会生成一个占比列，列名是 "退款数量占销量比重"
+    # 不应该返回 ["退款数量", "销量"]，否则前端会错误映射列名
+    molecule_metric = getattr(mql, 'molecule_metric', None)
+    denominator_metric = getattr(mql, 'denominator_metric', None)
+    if molecule_metric and denominator_metric:
+        mol_name = getattr(molecule_metric, 'name', '') or ''
+        den_name = getattr(denominator_metric, 'name', '') or ''
+        if mol_name and den_name:
+            return [f"{mol_name}占{den_name}比重"]
+        elif mol_name:
+            return [f"{mol_name}占比"]
+    # =================================================================
 
     names = []
     # 优先从 mql.metric 获取（单个指标）

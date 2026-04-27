@@ -57,6 +57,57 @@ func CreateAnalysisLog(c *gin.Context) {
 	response.Success(c, log)
 }
 
+// CreateV2Log 创建 LLM.V2 问数日志
+func CreateV2Log(c *gin.Context) {
+	var req struct {
+		UserID       string `json:"user_id"`
+		SessionID    string `json:"session_id"`
+		Question     string `json:"question" binding:"required"`
+		Answer       string `json:"answer"`
+		Intent       string `json:"intent"`
+		Success      bool   `json:"success"`
+		FailStage    string `json:"fail_stage"`
+		FailReason   string `json:"fail_reason"`
+		Suggestion   string `json:"suggestion"`
+		ThinkingSteps string `json:"thinking_steps"`
+		SQL          string `json:"sql"`
+		MQLJSON      string `json:"mql_json"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+
+	if req.UserID == "" {
+		req.UserID = "default"
+	}
+
+	log := model.AskAnalysisLog{
+		UserID:        req.UserID,
+		SessionID:     req.SessionID,
+		Question:      req.Question,
+		Answer:        req.Answer,
+		Intent:        req.Intent,
+		Success:       req.Success,
+		FailStage:     req.FailStage,
+		FailReason:    req.FailReason,
+		Suggestion:    req.Suggestion,
+		ThinkingSteps:  req.ThinkingSteps,
+		EngineType:    "v2",
+		SQL:           req.SQL,
+		MQLJSON:       req.MQLJSON,
+		CreatedAt:     time.Now(),
+	}
+
+	if err := postgres.Get().Create(&log).Error; err != nil {
+		response.Error(c, response.CodeInternalError, "创建日志失败")
+		return
+	}
+
+	response.Success(c, log)
+}
+
 // GetAnalysisLogs 获取日志列表
 func GetAnalysisLogs(c *gin.Context) {
 	// 获取分页参数
@@ -91,6 +142,22 @@ func GetAnalysisLogs(c *gin.Context) {
 			db = db.Where("success = ?", true)
 		} else if successFilter == "false" || successFilter == "0" {
 			db = db.Where("success = ?", false)
+		}
+	}
+
+	// 添加日期范围筛选
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
+	if startDate != "" {
+		t, err := time.Parse("2006-01-02", startDate)
+		if err == nil {
+			db = db.Where("created_at >= ?", t)
+		}
+	}
+	if endDate != "" {
+		t, err := time.Parse("2006-01-02", endDate+" 23:59:59")
+		if err == nil {
+			db = db.Where("created_at <= ?", t)
 		}
 	}
 

@@ -249,6 +249,70 @@
                       class="message-chart"
                     />
 
+                    <!-- 快速下钻 -->
+                    <div v-if="msg.role === 'assistant' && msg.resultData && msg.resultData.length > 0" class="analysis-drilldown">
+                      <div class="drilldown-title">快速下钻</div>
+                      <div class="drilldown-list">
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'sales' })">📊 看销售</button>
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'ad' })">📢 看广告</button>
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'inventory' })">📦 看库存</button>
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'profit' })">💰 看利润</button>
+                      </div>
+                    </div>
+
+                    <!-- 多指标分析报告 - 紧凑卡片样式 -->
+                    <div v-if="msg.analysis" class="chat-report-card" :class="'theme-' + msg.category">
+                      <div class="report-header">
+                        <div class="header-main">
+                          <el-icon class="header-icon"><DataLine /></el-icon>
+                          <span class="summary-text">{{ msg.analysis.summary }}</span>
+                        </div>
+                        <div class="health-badge" :class="getHealthClass(msg.analysis.health_score)">
+                          {{ msg.analysis.health_score }}分
+                        </div>
+                      </div>
+
+                      <div v-if="msg.analysis.top_urgent_action" class="urgent-banner">
+                        <el-icon><WarningFilled /></el-icon>
+                        <span>{{ msg.analysis.top_urgent_action }}</span>
+                      </div>
+
+                      <div class="report-body">
+                        <div v-if="msg.analysis.issues?.length" class="section issues-section">
+                          <div class="section-title text-red">需关注异常</div>
+                          <div v-for="(issue, idx) in msg.analysis.issues" :key="idx" class="data-item">
+                            <div class="item-header">
+                              <span class="tag" :class="issue.priority">{{ issue.priority }}</span>
+                              <span class="metric">{{ issue.metric }}</span>
+                              <span class="value text-red">{{ issue.conclusion }}</span>
+                            </div>
+                            <div class="item-reason">{{ issue.reason }}</div>
+                          </div>
+                        </div>
+
+                        <div v-if="msg.analysis.highlights?.length" class="section highlights-section">
+                          <div class="section-title text-green">业务亮点</div>
+                          <div v-for="(hl, idx) in msg.analysis.highlights" :key="idx" class="data-item">
+                            <div class="item-header">
+                              <span class="metric">{{ hl.metric }}</span>
+                              <span class="value text-green">{{ hl.conclusion }}</span>
+                            </div>
+                            <div class="item-reason">{{ hl.reason }}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div v-if="msg.analysis.action_items?.length" class="action-section">
+                        <div class="action-title">行动建议</div>
+                        <ul class="action-list">
+                          <li v-for="(action, idx) in msg.analysis.action_items" :key="idx">
+                            <span class="bullet" :class="{ 'is-urgent': action.type === 'urgent' }"></span>
+                            {{ action.text }}
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+
                     <!-- 思考过程 -->
                     <div v-if="msg.thinkingSteps && msg.thinkingSteps.length > 0" class="thinking-panel">
                       <button class="thinking-toggle" @click="toggleThinking(idx)">
@@ -717,6 +781,10 @@ async function handleSend() {
   let finalResultData = []
   let finalMetricName = ''
   let finalMetricNames = []
+  let finalAnalysis = null
+  let finalMultiMetricData = []
+  let finalDimensionalData = {}
+  let finalCategory = ''
   let finalSuggest = []
   let finalClarificationOptions = []
   let finalClarificationMessage = ''
@@ -832,11 +900,20 @@ async function handleSend() {
               finalResultData = data.result_data || []
               finalMetricName = data.metric_name || ''
               finalMetricNames = data.metric_names || []
+              finalAnalysis = data.analysis || null
+              finalMultiMetricData = data.multi_metric_data || []
+              finalDimensionalData = data.dimensional_data || {}
+              finalCategory = data.category || ''
             } else if (currentEvent === 'answer_ready') {
               finalAnswer = data.answer
               finalSuggest = data.suggestions || []
               finalClarificationOptions = data.clarification_options || []
               finalClarificationMessage = data.clarification_message || ''
+              // 多指标下钻分析数据
+              if (data.analysis) finalAnalysis = data.analysis
+              if (data.multi_metric_data) finalMultiMetricData = data.multi_metric_data
+              if (data.dimensional_data) finalDimensionalData = data.dimensional_data
+              if (data.category) finalCategory = data.category
             } else if (currentEvent === 'connected') {
               // 保存 session_id 用于多轮对话
               if (data.session_id) {
@@ -935,6 +1012,10 @@ async function handleSend() {
       resultData: finalResultData,
       metricName: finalMetricName,
       metricNames: finalMetricNames,
+      analysis: finalAnalysis,
+      multiMetricData: finalMultiMetricData,
+      dimensionalData: finalDimensionalData,
+      category: finalCategory,
       suggest: finalSuggest,
       needsClarification: finalNeedsClarification || effectiveClarificationOptions.length > 0,
       clarificationOptions: effectiveClarificationOptions,
@@ -1153,6 +1234,26 @@ function handlePlanModify(modifiedPlan) {
   })
 }
 
+// 快速下钻处理
+function handleDrilldown(option) {
+  if (!option || !option.check) return
+  // 构建下钻问题
+  let q = ''
+  if (option.check === 'sales') {
+    q = '__DRILLDOWN__:sales__'
+  } else if (option.check === 'ad') {
+    q = '__DRILLDOWN__:ad__'
+  } else if (option.check === 'inventory' || option.check === 'supply') {
+    q = '__DRILLDOWN__:inventory__'
+  } else if (option.check === 'profit' || option.check === 'cost') {
+    q = '__DRILLDOWN__:cost__'
+  }
+  if (q) {
+    question.value = q
+    handleSend()
+  }
+}
+
 // / 命令面板导航
 function navigateCommand(dir) {
   if (!showCommandPanel.value || !suggestions.value.length) return
@@ -1233,6 +1334,12 @@ function getCurrentTime() {
   const hours = String(now.getHours()).padStart(2, '0')
   const minutes = String(now.getMinutes()).padStart(2, '0')
   return `${hours}:${minutes}`
+}
+
+function getHealthClass(score) {
+  if (score >= 90) return 'health-excellent'
+  if (score >= 70) return 'health-good'
+  return 'health-warning'
 }
 
 async function copyMessage(msg) {
@@ -2008,6 +2115,261 @@ function scrollToBottom() {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
 }
+
+/* 快速下钻 */
+.analysis-drilldown {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: rgba(99, 102, 241, 0.04);
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  border-radius: 12px;
+}
+
+.drilldown-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.drilldown-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.drilldown-btn {
+  padding: 8px 16px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #6366F1;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.drilldown-btn:hover {
+  background: #6366F1;
+  color: white;
+  border-color: #6366F1;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+/* 多指标分析报告 - 紧凑卡片样式 */
+.chat-report-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 13px;
+  color: #374151;
+  width: 100%;
+  max-width: 600px;
+  margin-top: 12px;
+}
+
+/* 主题色：销售 - 蓝色 */
+.chat-report-card.theme-sales {
+  border-color: #3b82f6;
+}
+.chat-report-card.theme-sales .report-header {
+  background-color: #eff6ff;
+  border-bottom-color: #dbeafe;
+}
+.chat-report-card.theme-sales .header-icon {
+  color: #3b82f6;
+}
+
+/* 主题色：广告 - 紫色 */
+.chat-report-card.theme-ad {
+  border-color: #8b5cf6;
+}
+.chat-report-card.theme-ad .report-header {
+  background-color: #f5f3ff;
+  border-bottom-color: #e9d5ff;
+}
+.chat-report-card.theme-ad .header-icon {
+  color: #8b5cf6;
+}
+
+/* 主题色：供应链 - 橙色 */
+.chat-report-card.theme-inventory {
+  border-color: #f97316;
+}
+.chat-report-card.theme-inventory .report-header {
+  background-color: #fff7ed;
+  border-bottom-color: #fed7aa;
+}
+.chat-report-card.theme-inventory .header-icon {
+  color: #f97316;
+}
+
+/* 主题色：成本 - 金色 */
+.chat-report-card.theme-cost {
+  border-color: #0d9488;
+}
+.chat-report-card.theme-cost .report-header {
+  background-color: #f0fdfa;
+  border-bottom-color: #ccfbf1;
+}
+.chat-report-card.theme-cost .header-icon {
+  color: #0d9488;
+}
+
+.report-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 12px 16px;
+  background-color: #f9fafb;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.report-header .header-main {
+  display: flex;
+  gap: 8px;
+  font-weight: 600;
+  line-height: 1.4;
+  flex: 1;
+}
+
+.header-icon {
+  color: #3b82f6;
+  font-size: 16px;
+  margin-top: 2px;
+}
+
+.report-header .summary-text {
+  flex: 1;
+}
+
+.health-badge {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-weight: bold;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.health-excellent { background: #dcfce7; color: #166534; }
+.health-good { background: #fef08a; color: #854d0e; }
+.health-warning { background: #fee2e2; color: #991b1b; }
+
+.urgent-banner {
+  background-color: #fff1f2;
+  color: #e11d48;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  border-bottom: 1px solid #ffe4e6;
+}
+
+.report-body {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+
+.text-red { color: #ef4444; }
+.text-green { color: #10b981; }
+
+.data-item {
+  background: #f9fafb;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+}
+
+.data-item:last-child { margin-bottom: 0; }
+
+.item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.item-header .metric {
+  font-weight: 600;
+  color: #111827;
+}
+
+.item-header .value {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+.item-reason {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tag {
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-weight: bold;
+}
+
+.tag.P0 { background: #fee2e2; color: #ef4444; }
+.tag.P1 { background: #ffedd5; color: #f97316; }
+.tag.P2 { background: #f3f4f6; color: #6b7280; }
+
+.action-section {
+  padding: 12px 16px;
+  background-color: #f8fafc;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.action-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 8px;
+}
+
+.action-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.action-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: #334155;
+  line-height: 1.4;
+}
+
+.bullet {
+  width: 6px;
+  height: 6px;
+  background: #94a3b8;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+
+.bullet.is-urgent { background: #ef4444; }
 
 /* 图表卡片 */
 .message-chart {

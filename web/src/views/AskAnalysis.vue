@@ -241,6 +241,15 @@ async function fetchLogs() {
     if (filterStatus.value !== 'all') {
       params.success = filterStatus.value
     }
+    // 添加日期范围筛选
+    if (timeRange.value) {
+      const days = parseInt(timeRange.value)
+      const end = new Date()
+      const start = new Date()
+      start.setDate(end.getDate() - days)
+      params.start_date = start.toISOString().split('T')[0]
+      params.end_date = end.toISOString().split('T')[0]
+    }
     // 添加当前用户ID筛选
     const userInfo = localStorage.getItem('user_info')
     if (userInfo) {

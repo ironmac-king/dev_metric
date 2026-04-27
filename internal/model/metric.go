@@ -1,11 +1,39 @@
 package model
 
 import (
+	"database/sql/driver"
 	"encoding/json"
 	"time"
 
 	"github.com/lib/pq"
 )
+
+// StringArray 兼容 JSON 数组和 PostgreSQL jsonb 的 string 数组类型
+type StringArray []string
+
+func (a *StringArray) Scan(value interface{}) error {
+	if value == nil {
+		*a = nil
+		return nil
+	}
+	// 从 PostgreSQL jsonb 列扫描（存储为 JSON 数组字节）
+	bytes, ok := value.([]byte)
+	if !ok {
+		return nil
+	}
+	return json.Unmarshal(bytes, a)
+}
+
+func (a StringArray) Value() (driver.Value, error) {
+	if a == nil {
+		return nil, nil
+	}
+	return json.Marshal(a)
+}
+
+func (a *StringArray) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, (*[]string)(a))
+}
 
 // Metric 指标定义表（完整对齐 Excel 的 24 个字段）
 type Metric struct {
@@ -223,10 +251,14 @@ type SQLTemplate struct {
 	Intent      string    `json:"intent" gorm:"size:32"`                 // 适用意图
 	SQLTemplate string    `json:"sql_template" gorm:"type:text"`          // SQL模板（支持占位符）
 	Description string    `json:"description" gorm:"type:text"`           // 说明
-	TemplateType string    `json:"template_type" gorm:"size:32;default:legacy"` // 模板类型: legacy=旧模板 engine=新模板
+	TemplateType string    `json:"template_type" gorm:"size:32;default:legacy"` // 模板类型: legacy=旧模板 drilldown=下钻分析
 	Status      int16     `json:"status" gorm:"default:1"`               // 0=禁用 1=启用
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DrilldownCategory  string         `json:"drilldown_category" gorm:"size:32;index"`          // 下钻类别: sales/ad/inventory/cost
+	MetricNames        StringArray   `json:"metric_names" gorm:"type:jsonb"`                    // 该模板涉及的指标名列表
+	TemplateOrder      int            `json:"template_order" gorm:"default:0"`                   // 同一 category 下的排序
+	TemplateName       string         `json:"template_name" gorm:"size:128"`                    // 模板显示名称
 }
 
 func (SQLTemplate) TableName() string {
@@ -405,6 +437,10 @@ type AskAnalysisLog struct {
 	FailReason   string    `json:"fail_reason" gorm:"type:text"`                // 失败原因
 	Suggestion   string    `json:"suggestion" gorm:"type:text"`                 // 建议解决方案
 	ThinkingSteps string    `json:"thinking_steps" gorm:"type:text"`             // JSON序列化的思考步骤
+	// LLM.V2 扩展字段
+	EngineType   string    `json:"engine_type" gorm:"size:16;default:'v1'"`  // 引擎类型: v1/v2
+	SQL           string    `json:"sql" gorm:"type:text"`                     // 生成的SQL
+	MQLJSON      string    `json:"mql_json" gorm:"type:text"`                // MQL JSON序列化的完整MQL
 	CreatedAt    time.Time `json:"created_at"`
 }
 

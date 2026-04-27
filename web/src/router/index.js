@@ -60,6 +60,11 @@ const routes = [
         component: () => import('../views/NLPConfig.vue')
       },
       {
+        path: 'config-center',
+        name: 'ConfigCenter',
+        component: () => import('../views/ConfigCenter.vue')
+      },
+      {
         path: 'feedback',
         name: 'Feedback',
         component: () => import('../views/FeedbackDashboard.vue')

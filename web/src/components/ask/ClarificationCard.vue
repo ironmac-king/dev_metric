@@ -10,7 +10,7 @@
 
     <div class="clarification-options">
       <div
-        v-for="option in options"
+        v-for="option in normalizedOptions"
         :key="option.id"
         class="clarification-option"
         :class="{ selected: selectedId === option.id }"
@@ -39,7 +39,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
 const props = defineProps({
   options: {
@@ -50,15 +50,25 @@ const props = defineProps({
 
 const emit = defineEmits(['select', 'confirm'])
 
+// 确保每个 option 都有唯一 id
+const normalizedOptions = computed(() => {
+  return props.options.map((opt, idx) => ({
+    ...opt,
+    id: opt.id ?? opt.label ?? `option-${idx}`
+  }))
+})
+
 const selectedId = ref(null)
 
 function handleSelect(option) {
-  selectedId.value = option.id
-  emit('select', option)
+  // 使用规范化后的 option（确保有 id）
+  const normalized = normalizedOptions.value.find(o => o.id === option.id) || option
+  selectedId.value = normalized.id
+  emit('select', normalized)
 }
 
 function handleConfirm() {
-  const selected = props.options.find(o => o.id === selectedId.value)
+  const selected = normalizedOptions.value.find(o => o.id === selectedId.value)
   if (selected) {
     emit('confirm', selected)
   }

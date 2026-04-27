@@ -96,6 +96,59 @@ func StarSession(c *gin.Context) {
 	response.Success(c, session)
 }
 
+// DeleteSession 删除会话
+func DeleteSession(c *gin.Context) {
+	db := postgres.Get()
+	sessionID := c.Param("id")
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
+
+	var session model.AskSessionSummary
+	if err := db.Where("session_id = ? AND user_id = ?", sessionID, userID).First(&session).Error; err != nil {
+		response.Error(c, http.StatusNotFound, "会话不存在或无权限")
+		return
+	}
+
+	// 删除会话摘要
+	db.Delete(&session, "session_id = ?", sessionID)
+
+	// 删除会话消息
+	db.Delete(&model.AskMessage{}, "session_id = ?", sessionID)
+
+	response.SuccessWithMessage(c, "会话已删除", nil)
+}
+
+// SaveSession 保存会话摘要（创建或更新）
+func SaveSession(c *gin.Context) {
+	db := postgres.Get()
+	userID := fmt.Sprintf("%d", GetUserIDFromContext(c))
+	if userID == "0" {
+		userID = "default"
+	}
+
+	var req struct {
+		SessionID     string `json:"session_id" binding:"required"`
+		Title         string `json:"title"`
+		FirstQuestion string `json:"first_question"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, "参数错误")
+		return
+	}
+
+	summary := model.AskSessionSummary{
+		SessionID:     req.SessionID,
+		Title:         req.Title,
+		FirstQuestion: req.FirstQuestion,
+		MessageCount:  1,
+		UserID:        userID,
+		UpdatedAt:     time.Now(),
+	}
+
+	db.Where("session_id = ? AND user_id = ?", req.SessionID, userID).Assign(summary).FirstOrCreate(&model.AskSessionSummary{})
+
+	response.Success(c, summary)
+}
+
 // GetFavorites 获取收藏列表
 func GetFavorites(c *gin.Context) {
 	db := postgres.Get()

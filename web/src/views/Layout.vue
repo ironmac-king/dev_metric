@@ -36,15 +36,6 @@
           </div>
           <span class="nav-text">指标库</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/ai-assistant' }" @click="router.push('/ai-assistant')">
-          <div class="icon-wrap">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M7 10H13M10 7V13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-          </div>
-          <span class="nav-text">AI 问数</span>
-        </div>
         <div class="sidebar-icon" :class="{ active: $route.path === '/llm-ask-v2' }" @click="router.push('/llm-ask-v2')">
           <div class="icon-wrap">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
@@ -53,16 +44,7 @@
               <rect x="14" y="4" width="4" height="14" rx="1" stroke="currentColor" stroke-width="1.5"/>
             </svg>
           </div>
-          <span class="nav-text">LLM.V2</span>
-        </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/ask-analysis' }" @click="router.push('/ask-analysis')">
-          <div class="icon-wrap">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path d="M3 10L7 6L11 9L17 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M3 14L7 10L11 13L17 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
-            </svg>
-          </div>
-          <span class="nav-text">问数分析</span>
+          <span class="nav-text">智能问数</span>
         </div>
         <div class="sidebar-icon" :class="{ active: $route.path === '/analysis' }" @click="router.push('/analysis')">
           <div class="icon-wrap">
@@ -88,23 +70,14 @@
           </div>
           <span class="nav-text">反馈看板</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/alerts' }" @click="router.push('/alerts')">
+        <div class="sidebar-icon" :class="{ active: $route.path === '/ask-analysis' }" @click="router.push('/ask-analysis')">
           <div class="icon-wrap">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path d="M10 2C7.24 2 5 4.24 5 7V10L3 13V14H17V13L15 10V7C15 4.24 12.76 2 10 2Z" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M8 14V15C8 16.1 8.9 17 10 17C11.1 17 12 16.1 12 15V14H8Z" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M3 10L7 6L11 9L17 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M3 14L7 10L11 13L17 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
             </svg>
           </div>
-          <span class="nav-text">告警配置</span>
-        </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-config' }" @click="router.push('/llm-config')">
-          <div class="icon-wrap">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <circle cx="10" cy="10" r="2.5" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M10 2V4.5M10 15.5V18M18 10H15.5M4.5 10H2M15.5 4.5L14 6M6 14L4.5 15.5M15.5 15.5L14 14M6 6L4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-          </div>
-          <span class="nav-text">LLM配置</span>
+          <span class="nav-text">问数分析</span>
         </div>
         <div class="sidebar-icon" :class="{ active: $route.path === '/nlp-config' }" @click="router.push('/nlp-config')">
           <div class="icon-wrap">
@@ -115,26 +88,14 @@
           </div>
           <span class="nav-text">意图配置</span>
         </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/starrocks-config' }" @click="router.push('/starrocks-config')">
+        <div class="sidebar-icon" :class="{ active: $route.path.startsWith('/config-center') }" @click="router.push('/config-center')">
           <div class="icon-wrap">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <ellipse cx="10" cy="6" rx="7" ry="3" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M3 6V12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12V6" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M3 12C3 14.2 6.13 16 10 16C13.87 16 17 14.2 17 12" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 2L18 6V14L10 18L2 14V6L10 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M8 10L10 12L12 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </div>
-          <span class="nav-text">数据源配置</span>
-        </div>
-        <div class="sidebar-icon" :class="{ active: $route.path === '/dimension-config' }" @click="router.push('/dimension-config')">
-          <div class="icon-wrap">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <rect x="3" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-              <rect x="11" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-              <rect x="3" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-              <rect x="11" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-            </svg>
-          </div>
-          <span class="nav-text">维度配置</span>
+          <span class="nav-text">配置中心</span>
         </div>
         <div class="sidebar-icon" :class="{ active: $route.path === '/user-management' }" @click="router.push('/user-management')">
           <div class="icon-wrap">
@@ -262,12 +223,11 @@ const toggleMobileMenu = () => {
 const navItems = [
   { label: '工作台', path: '/dashboard' },
   { label: '指标库', path: '/metrics' },
-  { label: 'AI 问数', path: '/ai-assistant' },
-  { label: 'LLM.V2', path: '/llm-ask-v2' },
+  { label: '智能问数', path: '/llm-ask-v2' },
   { label: '决策分析', path: '/analysis' },
-  { label: '告警配置', path: '/alerts' },
-  { label: 'LLM 配置', path: '/llm-config' },
-  { label: '意图配置', path: '/nlp-config' },
+  { label: '反馈看板', path: '/feedback' },
+  { label: '问数分析', path: '/ask-analysis' },
+  { label: '配置中心', path: '/config-center' },
 ]
 
 const username = computed(() => {

@@ -209,7 +209,45 @@ class DimensionService:
                 "dimension_type": dimension_value,
             }
 
+        # Fallback: 查询 business_terms 同义词（用户可能用了"美国站"而不是"美国亚马逊"）
+        synonym_result = self._find_by_business_terms_synonym(dimension_value)
+        if synonym_result:
+            return synonym_result
+
         return None
+
+    def _find_by_business_terms_synonym(self, dimension_value: str) -> Optional[Dict[str, Any]]:
+        """
+        通过 business_terms 表的同义词找到维度信息。
+        例如："美国站" → "美国亚马逊" → FSITE
+        """
+        try:
+            from ai.client.metric_client import MetricClient
+            client = MetricClient()
+            terms = client.get_business_terms()
+            for t in terms:
+                synonyms = t.get("synonyms") or []
+                if isinstance(synonyms, str):
+                    synonyms = [s.strip().strip('"') for s in synonyms.strip("{}").split(",") if s.strip()]
+                dim_field = t.get("dimension_field", "")
+                canonical = t.get("dimension_value", "")
+                if not canonical or not synonyms:
+                    continue
+                # 检查传入的值是否匹配同义词
+                if dimension_value in synonyms and dim_field:
+                    # 将中文维度类型转换为列名
+                    col_name = self.find_column_by_type(dim_field)
+                    if col_name:
+                        return {
+                            "column_name": col_name,
+                            "dimension_value": canonical,  # 返回标准值
+                            "is_generic": False,
+                            "dimension_type": dim_field,
+                        }
+            return None
+        except Exception as e:
+            logger.warning(f"[_find_by_business_terms_synonym] 查询同义词失败: {e}")
+            return None
 
     def get_values_by_type(self, dimension_type: str) -> List[str]:
         """

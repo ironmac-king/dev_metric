@@ -92,12 +92,22 @@ func DeleteIntentTemplate(c *gin.Context) {
 
 func ListSQLTemplates(c *gin.Context) {
 	var templates []model.SQLTemplate
+	query := postgres.Get()
+
 	templateType := c.Query("type")
+	drilldownCategory := c.Query("drilldown_category")
+
 	if templateType != "" {
-		postgres.Get().Where("template_type = ?", templateType).Find(&templates)
-	} else {
-		postgres.Get().Find(&templates)
+		query = query.Where("template_type = ?", templateType)
 	}
+	if drilldownCategory != "" {
+		query = query.Where("drilldown_category = ?", drilldownCategory)
+	}
+
+	// 按 template_order 排序，支持 drilldown_category 下多模板按顺序执行
+	query = query.Order("drilldown_category, template_order, id")
+
+	query.Find(&templates)
 	response.Success(c, templates)
 }
 
@@ -140,6 +150,19 @@ func UpdateSQLTemplate(c *gin.Context) {
 		return
 	}
 
+	// 手动处理 metric_names 类型转换（JSON 数组 -> StringArray）
+	if mn, ok := updates["metric_names"]; ok {
+		if arr, ok := mn.([]interface{}); ok {
+			sa := make(model.StringArray, len(arr))
+			for i, v := range arr {
+				if s, ok := v.(string); ok {
+					sa[i] = s
+				}
+			}
+			updates["metric_names"] = sa
+		}
+	}
+
 	if err := postgres.Get().Model(&tpl).Updates(updates).Error; err != nil {
 		response.Error(c, response.CodeInternalError, "更新失败")
 		return
@@ -162,20 +185,27 @@ func DeleteSQLTemplate(c *gin.Context) {
 
 // GetAllNLPTemplates 获取所有 NLP 模板（供 AI 服务调用）
 // Query params:
-//   - type: 过滤 sql_templates 类型 (legacy | engine)，不传则返回所有
+//   - type: 过滤 sql_templates 类型 (legacy | drilldown)，不传则返回所有
+//   - drilldown_category: 过滤下钻类别 (sales/ad/inventory/cost)
 func GetAllNLPTemplates(c *gin.Context) {
 	var intentTemplates []model.IntentTemplate
 	var sqlTemplates []model.SQLTemplate
 
 	postgres.Get().Select("*").Where("status = ?", 1).Find(&intentTemplates)
 
-	// 按 template_type 过滤 SQL 模板
+	// 按 template_type 和 drilldown_category 过滤 SQL 模板
+	query := postgres.Get().Where("status = ?", 1)
 	templateType := c.Query("type")
 	if templateType != "" {
-		postgres.Get().Where("status = ? AND template_type = ?", 1, templateType).Find(&sqlTemplates)
-	} else {
-		postgres.Get().Where("status = ?", 1).Find(&sqlTemplates)
+		query = query.Where("template_type = ?", templateType)
 	}
+	drilldownCategory := c.Query("drilldown_category")
+	if drilldownCategory != "" {
+		query = query.Where("drilldown_category = ?", drilldownCategory)
+	}
+	// drilldown 类型按 order 排序
+	query = query.Order("drilldown_category, template_order, id")
+	query.Find(&sqlTemplates)
 
 	response.Success(c, gin.H{
 		"intent_templates": intentTemplates,

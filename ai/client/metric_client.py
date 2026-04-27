@@ -137,10 +137,12 @@ class MetricClient:
                     if name == canonical_name or name_en.lower() == canonical_name.lower():
                         return self._get_metric_with_details(m)
                 # 如果没找到精确匹配，也尝试模糊匹配标准名称
+                # 注意：只允许后缀匹配（指标名以查询词结尾），不允许包含匹配
+                # 否则"佣金"会错误匹配"佣金费率"
                 for m in all_metrics:
                     name = m.get("name", "").lower()
                     name_en = m.get("name_en", "").lower()
-                    if canonical_name.lower() in name or canonical_name.lower() in name_en:
+                    if name.endswith(canonical_name.lower()) or name_en.endswith(canonical_name.lower()):
                         return self._get_metric_with_details(m)
 
             # 3. 业务术语同义词查找（Go 后端 business_terms 表配置的同义词）
@@ -150,17 +152,22 @@ class MetricClient:
                 syns = t.get("synonyms") or []
                 term_name = t.get("term", "")
                 # 检查用户输入是否匹配该 term 的任意 synonyms
+                # 注意：只允许同义词包含查询词，不允许查询词是同义词的子串
+                # 否则"抽水"会错误匹配"佣金费率"的同义词"抽水比例"
                 for syn in syns:
-                    if metric_name_lower == syn.lower() or metric_name_lower in syn.lower():
+                    if metric_name_lower == syn.lower() or syn.lower() in metric_name_lower:
                         # 找到匹配，用 term 标准名称查指标
                         logger.info(f"[get_metric_by_name] 业务术语同义词匹配: '{metric_name}' -> term='{term_name}'")
                         # 用 term_name 做模糊匹配找指标
+                        # 注意：只允许 term_name 作为 name 的后缀匹配，不允许包含匹配
+                        # 否则"佣金"会错误匹配"佣金费率"
                         for m in all_metrics:
                             name = m.get("name", "").lower()
                             name_en = m.get("name_en", "").lower()
                             if term_name.lower() == name or term_name.lower() == name_en:
                                 return self._get_metric_with_details(m)
-                            if term_name.lower() in name or term_name.lower() in name_en:
+                            # 允许后缀匹配（如"销售额"匹配"本月销售额"），不允许包含匹配
+                            if name.endswith(term_name.lower()) or name_en.endswith(term_name.lower()):
                                 return self._get_metric_with_details(m)
                         break
 
@@ -176,8 +183,8 @@ class MetricClient:
                         name_en = m.get("name_en", "").lower()
                         if stripped_name == name or stripped_name == name_en:
                             return self._get_metric_with_details(m)
-                        # 也尝试在名称中包含
-                        if stripped_name in name or stripped_name in name_en:
+                        # 允许后缀匹配，不允许包含匹配
+                        if name.endswith(stripped_name) or name_en.endswith(stripped_name):
                             return self._get_metric_with_details(m)
                     # 也检查业务术语
                     for t in terms:
@@ -238,10 +245,11 @@ class MetricClient:
                 return self._get_metric_with_details(best_match)
 
             # 6. 同义词模糊匹配（用户输入 -> 同义词 -> 指标名 in 同义词）
+            # 注意：只允许同义词包含查询词，不允许查询词是同义词的子串
             for canonical, syn_list in _SYNONYMS.items():
                 for syn in syn_list:
                     syn_lower = syn.lower()
-                    if metric_name_lower == syn_lower or metric_name_lower in syn_lower:
+                    if metric_name_lower == syn_lower or syn_lower in metric_name_lower:
                         # 找到匹配，用 canonical 标准名称查指标
                         for m in all_metrics:
                             name = m.get("name", "").lower()

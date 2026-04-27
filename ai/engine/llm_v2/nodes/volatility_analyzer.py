@@ -278,11 +278,14 @@ class VolatilityAnalyzer:
             return result
 
         except Exception as e:
-            logger.error(f"LLM 根因分析失败: {e}")
+            import traceback
+            logger.error(f"LLM 根因分析失败: {type(e).__name__}: {e}")
+            logger.error(f"LLM 配置信息: use_case=ask, model={getattr(self._llm_engine, 'model', 'N/A')}")
+            logger.error(f"异常堆栈: {traceback.format_exc()}")
             return {
                 "root_cause": "分析失败",
                 "confidence": 0.0,
-                "suggestion": "请稍后重试"
+                "suggestion": f"LLM服务异常: {type(e).__name__}"
             }
 
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
@@ -672,7 +675,10 @@ TOP3 核心品类（贡献度最高）：
             return result
 
         except Exception as e:
-            logger.error(f"LLM 品类分析失败: {e}")
+            import traceback
+            logger.error(f"LLM 品类分析失败: {type(e).__name__}: {e}")
+            logger.error(f"LLM 配置信息: use_case=ask, model={getattr(self._llm_engine, 'model', 'N/A')}")
+            logger.error(f"异常堆栈: {traceback.format_exc()}")
             return {
                 "root_cause": "品类分布分析",
                 "confidence": 0.8,

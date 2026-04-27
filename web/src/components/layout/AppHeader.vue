@@ -214,7 +214,7 @@ function hasMenu(path) {
       return ['/dashboard', '/metrics', '/alerts', '/ai-assistant', '/llm-ask', '/ask-analysis', '/analysis'].includes(path)
     }
     if (userRole.value === 'user') {
-      return ['/dashboard', '/llm-ask', '/analysis'].includes(path)
+      return ['/dashboard', '/llm-ask', '/llm-ask-v2', '/ask-analysis', '/analysis'].includes(path)
     }
     return false
   }

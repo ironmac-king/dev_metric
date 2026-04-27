@@ -125,13 +125,56 @@ class StreamingGenerator:
             "sql": sql,
         })
 
-    def add_result_ready(self, result_data: List[Dict[str, Any]], total: int = 0, metric_name: str = '', metric_names: list = None) -> None:
-        """添加结果就绪事件"""
+    def add_result_ready(
+        self,
+        result_data: List[Dict[str, Any]] = None,
+        total: int = 0,
+        metric_name: str = '',
+        metric_names: list = None,
+        multi_metric_data: List[Dict[str, Any]] = None,
+        dimensional_data: Dict[str, List[Dict[str, Any]]] = None,
+        category: str = '',
+        analysis: Dict[str, Any] = None,
+        **kwargs
+    ) -> None:
+        """
+        添加结果就绪事件
+
+        Args:
+            result_data: SQL 查询结果
+            total: 总条数
+            metric_name: 指标名称
+            metric_names: 指标名称列表
+            multi_metric_data: 多指标下钻数据列表
+            dimensional_data: 维度下钻数据（站点/品类/平台/ASIN 排名）
+            category: 下钻类别 (sales/ad/inventory/cost)
+            analysis: 分析报告内容
+        """
+        if result_data is None:
+            result_data = []
+        if multi_metric_data is None:
+            multi_metric_data = []
+        if metric_names is None:
+            metric_names = []
+        if dimensional_data is None:
+            dimensional_data = {}
+
+        # 从 analysis 中提取 health_score
+        health_score = None
+        if analysis and isinstance(analysis, dict):
+            health_score = analysis.get("health_score")
+
         self.add_event(SSSEvent.RESULT_READY, {
             "result_data": result_data[:20] if result_data else [],  # 限制返回条数
             "total": total,
             "metric_name": metric_name,
-            "metric_names": metric_names or [],
+            "metric_names": metric_names,
+            "multi_metric_data": multi_metric_data,
+            "dimensional_data": dimensional_data,
+            "category": category,
+            "analysis": analysis,
+            "health_score": health_score,
+            **kwargs
         })
 
     def add_answer_ready(self, answer: str, suggestions: List[str] = None) -> None:
