@@ -22,6 +22,7 @@ ENTITY_TYPE_TO_DIM_COLUMN = {
     'DIM': 'DIM',           # 通用维度类型
     'DIM_VALUE': 'DIM_VALUE',  # 维度值
     'SKU_VALUE': 'SKU',     # SKU 编码
+    'ASIN_VALUE': 'ASIN',   # ASIN 编码
 }
 
 # 时间表达式映射（简单场景用，复杂场景交给 LLM）
@@ -197,7 +198,7 @@ class IntentRouter:
 
         # 0. 下钻特殊处理：识别 __DRILLDOWN__:xxx__ 格式
         if question.startswith("__DRILLDOWN__:"):
-            return self._handle_drilldown(question)
+            return self._handle_drilldown(question, inherited_mql)
 
         # 1. 寒暄处理
         if self._is_greeting(question):
@@ -637,11 +638,12 @@ class IntentRouter:
             "source": "followup",
         }
 
-    def _handle_drilldown(self, question: str) -> Dict[str, Any]:
+    def _handle_drilldown(self, question: str, inherited_mql: Optional[MQLSchema] = None) -> Dict[str, Any]:
         """处理四类下钻特殊格式 __DRILLDOWN__:xxx__
 
         解析 __DRILLDOWN__:sales__ 格式，直接设置 drilldown_type，
         让后续 trigger_analyzer 返回对应的分析结果。
+        继承 inherited_mql 的 time 和 dimensions 上下文。
         """
         # 解析格式：__DRILLDOWN__:sales__
         try:
@@ -656,6 +658,19 @@ class IntentRouter:
         mql.confidence = 1.0
         mql.original_question = question
         mql.resolved_question = question
+
+        # 继承 inherited_mql 的上下文（时间、维度、指标等）
+        if inherited_mql:
+            logger.info(f"[_handle_drilldown] 继承上下文: metric={inherited_mql.metric.name if inherited_mql.metric else None}, time={inherited_mql.time}, dimensions={inherited_mql.dimensions}")
+            # 继承指标
+            if inherited_mql.metric:
+                mql.metric = inherited_mql.metric
+            if inherited_mql.time:
+                mql.time = inherited_mql.time
+            if inherited_mql.dimensions:
+                mql.dimensions = inherited_mql.dimensions
+            if inherited_mql.filters:
+                mql.filters = inherited_mql.filters
 
         # drilldown_type 会传递给 trigger_analyzer
         return {
@@ -779,18 +794,27 @@ class IntentRouter:
             # 例如"美国站"被识别为 METRIC，但实际上是维度值
             dim_service = self._get_dimension_service()
             real_metric_entities = []
+            seen_dims_local = set()  # 去重
             if dim_service:
                 for me in metric_entities:
                     metric_text = me['text']
                     dim_info = dim_service.find_dimension_info(metric_text)
                     # 如果 find_dimension_info 返回了结果且不是泛指，说明它更可能是维度值而不是指标
                     if dim_info and not dim_info.get('is_generic'):
+                        # 去重
+                        dim_type = dim_info.get('dimension_type', '')
+                        dim_val = dim_info.get('dimension_value', metric_text)
+                        dim_key = (dim_type, dim_val)
+                        if dim_key in seen_dims_local:
+                            logger.warning(f"[IntentRouter] 维度同义词重复，跳过: {dim_info}")
+                            continue
+                        seen_dims_local.add(dim_key)
                         # 这是维度值同义词，添加到 dimensions 而不是 metrics
                         mql.dimensions.append(MQLDimension(
-                            type=dim_info.get('dimension_type', ''),
+                            type=dim_type,
                             column=dim_info.get('column_name', ''),
                             field="",
-                            value=dim_info.get('dimension_value', metric_text),
+                            value=dim_val,
                         ))
                         logger.info(f"[IntentRouter] METRIC实体'{metric_text}'实为维度值同义词，转换: {dim_info}")
                     else:
@@ -1004,7 +1028,8 @@ class IntentRouter:
                     logger.info(f"[IntentRouter] 本地模型提取泛指分组维度(独立DIM): {dim_text}")
 
         # 检查是否有对比意图（环比/同比关键词）
-        if any(kw in question for kw in ['环比', '同比', '增长', '下降', '变化']):
+        # 注意：不能仅凭"变化"判断对比，"趋势变化"只是时间序列查询
+        if any(kw in question for kw in ['环比', '同比']):
             mql.comparison = ComparisonSpec(
                 enabled=True,
                 types=["环比"] if "环比" in question else ["同比"],
@@ -1192,9 +1217,18 @@ class IntentRouter:
             clarification_message = ""
 
             # 1. 检查意图是否未知
+            # ✶ 修复：当 metric 已识别但 intent=unknown 时，默认设置为 query_value 而非追问
+            # 因为 LLM 可能正确识别了 metric 但 intent 解析失败
             if mql.intent == MQLIntent.UNKNOWN or mql.confidence < 0.4:
-                needs_clarification = True
-                clarification_message = "抱歉，我没有理解您的问题，请换一种方式描述？"
+                if mql.metric and mql.metric.name:
+                    # metric 已识别，默认意图为 query_value，继续流程
+                    mql.intent = MQLIntent.QUERY_VALUE
+                    mql.confidence = 0.7
+                    logger.info(f"[IntentRouter] LLM intent=unknown 但 metric={mql.metric.name} 已识别，默认设置 intent=query_value")
+                else:
+                    # metric 也未识别，才追问
+                    needs_clarification = True
+                    clarification_message = "抱歉，我没有理解您的问题，请换一种方式描述？"
 
             # 2. 检查是否有泛指维度需要追问（返回兜底数据 + 引导细化）
             # ===== 新增：校验泛指维度是否为具体维度值 =====
@@ -1336,6 +1370,7 @@ class IntentRouter:
 
         # 优先解析 dimensions 数组格式
         dimensions_list = result.get("dimensions", [])
+        seen_dims = set()  # 去重：(type, value) 组合
         if dimensions_list:
             for dim_obj in dimensions_list:
                 if isinstance(dim_obj, dict):
@@ -1346,6 +1381,12 @@ class IntentRouter:
                     dim_value = None
                 if dim_type:
                     mapped_type = dim_type_map.get(dim_type, dim_type.upper())
+                    # 去重
+                    dim_key = (mapped_type, dim_value)
+                    if dim_key in seen_dims:
+                        logger.warning(f"[IntentRouter] 维度重复，跳过: type={mapped_type}, value={dim_value}")
+                        continue
+                    seen_dims.add(dim_key)
                     mql.dimensions.append(MQLDimension(
                         type=mapped_type,
                         column="",
