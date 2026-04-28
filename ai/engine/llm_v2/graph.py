@@ -246,8 +246,10 @@ async def mql_generator(state: V2State) -> V2State:
         # 获取 RAG 上下文
         rag_context = state.context_cache.get("similar_cases", [])
 
-        # 当 intent_router 本地模型成功识别时，传入已生成的 MQL 跳过 LLM 调用
-        intent_router_mql = state.mql if getattr(state, 'source', '') == 'local_model' else None
+        # 当 intent_router 本地模型成功识别或下钻时，传入已生成的 MQL 跳过 LLM 调用
+        source = getattr(state, 'source', '')
+        logger.info(f"[mql_generator] state.source={source!r}, state.mql.metric.name={state.mql.metric.name if state.mql and state.mql.metric else None}")
+        intent_router_mql = state.mql if source in ('local_model', 'drilldown') else None
 
         # 生成 MQL
         mql = await generator.generate(
@@ -885,15 +887,25 @@ async def trigger_analyzer(state: V2State) -> V2State:
                     time_range={
                         "start": state.mql.time.start if state.mql and state.mql.time else "",
                         "end": state.mql.time.end if state.mql and state.mql.time else "",
-                    }
+                    },
+                    inherited_mql=state.inherited_mql,
                 )
 
-                if not merged_data:
-                    logger.warning(f"[trigger_analyzer] 多指标下钻模式: 未获取到数据")
+                # 检查是否有有意义的维度数据
+                dim_data = merged_data.get("dimensional_data", {})
+                has_meaningful_dim_data = any(
+                    dim_data.get(key) for key in ["by_site", "by_category", "by_platform", "by_asin"]
+                )
+                scalar_metrics = merged_data.get("scalar_metrics", {})
+
+                if not merged_data or (not has_meaningful_dim_data and not scalar_metrics):
+                    # 没有获取到有意义的分析数据，不调用 LLM 生成报告（避免幻觉）
+                    logger.warning(f"[trigger_analyzer] 多指标下钻模式: 未获取到有意义的数据，跳过综合分析")
                     state.analysis = None
                     state.multi_metric_data = []
                     state.dimensional_data = {}
-                    state.category = state.context_cache.get("drilldown_category")
+                    # ✶ 修复：仍然设置 category，让前端能显示下钻按钮
+                    state.category = state.context_cache.get("drilldown_category") or ""
                 else:
                     # 2. LLM 生成分析报告
                     analysis = await report_gen.generate_analysis(
@@ -972,6 +984,16 @@ async def trigger_analyzer(state: V2State) -> V2State:
                 # 直接调用 to_dict 方法
                 state.analysis = analysis_output.to_dict()
                 logger.info(f"[trigger_analyzer] analysis_output.to_dict() success")
+
+                # ✶ 修复：设置 state.category 让前端能显示下钻按钮
+                # 从 drilldown_options 中提取 category（格式：{"label": "📊 看销售", "action": "drilldown", "params": {"check": "sales"}}）
+                if trigger_result.drilldown_options:
+                    first_option = trigger_result.drilldown_options[0]
+                    params = first_option.get("params", {})
+                    if "check" in params:
+                        state.category = params["check"]
+                        logger.info(f"[trigger_analyzer] 设置 category={state.category} 来自 drilldown_options")
+
             except Exception as e:
                 import traceback
                 logger.error(f"[trigger_analyzer] 生成分析输出失败: {e}")

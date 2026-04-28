@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sync"
 	"time"
 
@@ -241,9 +242,70 @@ func QueryAlertRule(ctx context.Context, sqlStr string, ruleID uint) (*QueryResu
 	return result, nil
 }
 
+// QueryResultWithColumns 查询结果（带列信息）
+type QueryResultWithColumns struct {
+	Columns []string               // 列名数组（中文别名），顺序与SQL SELECT一致
+	Rows    []map[string]interface{} // 数据行
+}
+
 // QueryRaw 执行查询（不走缓存，用于测试连接等）
 func QueryRaw(sqlStr string) ([]map[string]interface{}, error) {
 	return QueryRawWithRetry(sqlStr, 1)
+}
+
+// QueryRawWithColumns 执行查询并返回列信息
+func QueryRawWithColumns(sqlStr string) (*QueryResultWithColumns, error) {
+	rows, err := QueryRawWithRetry(sqlStr, 1)
+	if err != nil {
+		return nil, err
+	}
+	// 从 SQL 解析 SELECT 列顺序（AS 别名），而不是依赖 map 遍历顺序
+	columns := extractSelectAliases(sqlStr)
+	// 如果解析失败（为空），则从第一行 fallback
+	if len(columns) == 0 && len(rows) > 0 {
+		for k := range rows[0] {
+			columns = append(columns, k)
+		}
+	}
+	return &QueryResultWithColumns{
+		Columns: columns,
+		Rows:    rows,
+	}, nil
+}
+
+// extractSelectAliases 从 SELECT 语句中提取 AS 别名顺序
+// 支持格式: SELECT a.col AS "中文名", b.col AS '中文名', SUM(x) AS `别名`, a.col AS 别名
+// 返回别名数组
+func extractSelectAliases(sqlStr string) []string {
+	var columns []string
+	// 按优先级匹配：双引号 > 单引号 > 反引号 > 无引号
+	reDouble := regexp.MustCompile(`(?i)\s+AS\s+"([^"]+)"`)
+	reSingle := regexp.MustCompile(`(?i)\s+AS\s+'([^']+)'`)
+	reBacktick := regexp.MustCompile(`(?i)\s+AS\s+` + "`" + `([^` + "`" + `]+)` + "`")
+	rePlain := regexp.MustCompile(`(?i)\s+AS\s+([A-Za-z_][A-Za-z0-9_]*)`)
+
+	patterns := []struct {
+		re    *regexp.Regexp
+		group int
+	}{
+		{reDouble, 1},   // 双引号
+		{reSingle, 1},   // 单引号
+		{reBacktick, 1}, // 反引号
+		{rePlain, 1},    // 无引号英文别名
+	}
+
+	for _, p := range patterns {
+		matches := p.re.FindAllStringSubmatch(sqlStr, -1)
+		if len(matches) > 0 {
+			for _, match := range matches {
+				if len(match) > p.group {
+					columns = append(columns, match[p.group])
+				}
+			}
+			break // 匹配到一个就停止
+		}
+	}
+	return columns
 }
 
 // QueryRawWithRetry 执行查询，失败时自动重连重试

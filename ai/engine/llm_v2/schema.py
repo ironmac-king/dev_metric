@@ -464,6 +464,7 @@ class SQLResult:
     executed: bool = False             # 是否已执行
     execution_time_ms: int = 0         # 执行耗时
     data: List[Dict[str, Any]] = field(default_factory=list)  # 结果数据
+    columns: List[str] = field(default_factory=list)  # 列名数组（中文别名），顺序与SQL SELECT一致
     total: int = 0                     # 总记录数
     error: str = ""                    # 错误信息
 

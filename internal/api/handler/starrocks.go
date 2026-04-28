@@ -178,21 +178,23 @@ func ExecuteQuery(c *gin.Context) {
 	// 尝试从缓存获取
 	ctx := c.Request.Context()
 	var cachedResult struct {
-		Data  interface{} `json:"data"`
-		Count int         `json:"count"`
+		Data    interface{} `json:"data"`
+		Columns []string   `json:"columns"`
+		Count   int        `json:"count"`
 	}
 	if err := cache.GetJSON(ctx, cacheKey, &cachedResult); err == nil {
 		// 缓存命中
 		response.Success(c, gin.H{
-			"data":  cachedResult.Data,
-			"count": cachedResult.Count,
-			"cached": true,
+			"data":    cachedResult.Data,
+			"columns": cachedResult.Columns,
+			"count":   cachedResult.Count,
+			"cached":  true,
 		})
 		return
 	}
 
-	// 执行查询
-	result, err := starrocks.QueryRaw(req.SQL)
+	// 执行查询（带列信息）
+	queryResult, err := starrocks.QueryRawWithColumns(req.SQL)
 	if err != nil {
 		response.Error(c, response.CodeInternalError, fmt.Sprintf("查询失败: %v", err))
 		return
@@ -200,19 +202,21 @@ func ExecuteQuery(c *gin.Context) {
 
 	// 写入缓存，TTL 5分钟
 	cacheResult := gin.H{
-		"data":  result,
-		"count": len(result),
+		"data":    queryResult.Rows,
+		"columns": queryResult.Columns,
+		"count":   len(queryResult.Rows),
 	}
 	if err := cache.SetJSON(ctx, cacheKey, cacheResult, 5*time.Minute); err != nil {
 		fmt.Printf("[ExecuteQuery] 缓存写入失败: %v\n", err)
 	} else {
-		fmt.Printf("[ExecuteQuery] 缓存写入成功, key: %s, count: %d\n", cacheKey, len(result))
+		fmt.Printf("[ExecuteQuery] 缓存写入成功, key: %s, count: %d\n", cacheKey, len(queryResult.Rows))
 	}
 
 	response.Success(c, gin.H{
-		"data":  result,
-		"count": len(result),
-		"cached": false,
+		"data":    queryResult.Rows,
+		"columns": queryResult.Columns,
+		"count":   len(queryResult.Rows),
+		"cached":  false,
 	})
 }
 

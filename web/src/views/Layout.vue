@@ -106,9 +106,21 @@
           </div>
           <span class="nav-text">用户管理</span>
         </div>
-        <div class="user-avatar" @click="handleUserClick">
-          {{ username ? username.charAt(0).toUpperCase() : 'U' }}
-        </div>
+        <el-dropdown trigger="click" @command="handleUserCommand">
+          <div class="user-avatar">
+            {{ username ? username.charAt(0).toUpperCase() : 'U' }}
+          </div>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="settings">
+                <el-icon><Setting /></el-icon> 账号设置
+              </el-dropdown-item>
+              <el-dropdown-item command="logout" divided>
+                <el-icon><SwitchButton /></el-icon> 退出登录
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </aside>
 
@@ -208,6 +220,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { SwitchButton, Setting } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const $route = useRoute()
@@ -242,8 +255,14 @@ const username = computed(() => {
   return ''
 })
 
-function handleUserClick() {
-  showSettings.value = true
+function handleUserCommand(command) {
+  if (command === 'logout') {
+    ElMessage.success('已退出登录')
+    localStorage.removeItem('access_token')
+    window.location.href = '/login'
+  } else if (command === 'settings') {
+    showSettings.value = true
+  }
 }
 
 const selectedAvatar = ref('')

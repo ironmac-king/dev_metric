@@ -86,7 +86,11 @@ class VolatilityTrigger(BaseTrigger):
 
     DEFAULT_RULES = {
         # key 为指标中文名，与 MQL.metric.name 对应
+        # threshold_type: "normal"=宽松(-10%/-15%), "strict"=严格(-5%/-8%)
+        # mom/yoy: 环比/同比波动阈值（负值表示下跌预警，正值表示上涨预警）
+        # None 表示不监控该周期
         "销售额": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
+        "GMV": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
         "订单量": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
         "转化率": {"mom": -5, "yoy": -8, "threshold_type": "strict"},
         "点击转化率": {"mom": -5, "yoy": -8, "threshold_type": "strict"},
@@ -94,6 +98,24 @@ class VolatilityTrigger(BaseTrigger):
         "ROAS": {"mom": -15, "yoy": -20, "threshold_type": "normal"},
         "广告产出比": {"mom": -15, "yoy": -20, "threshold_type": "normal"},
         "广告花费": {"mom": 20, "yoy": None, "threshold_type": "normal"},
+        "毛利率": {"mom": -3, "yoy": -5, "threshold_type": "strict"},
+        "净利率": {"mom": -3, "yoy": -5, "threshold_type": "strict"},
+        "客单价": {"mom": -5, "yoy": -8, "threshold_type": "normal"},
+        "曝光量": {"mom": -15, "yoy": -20, "threshold_type": "normal"},
+        "点击量": {"mom": -15, "yoy": -20, "threshold_type": "normal"},
+        "会话量": {"mom": -15, "yoy": -20, "threshold_type": "normal"},
+        "ACOS": {"mom": 20, "yoy": None, "threshold_type": "normal"},
+        "CPC": {"mom": 15, "yoy": None, "threshold_type": "normal"},
+        "CTR": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
+        "业绩": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
+        "利润": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
+        "利润额": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
+        "成本": {"mom": 15, "yoy": None, "threshold_type": "normal"},
+        "广告点击": {"mom": -15, "yoy": -20, "threshold_type": "normal"},
+        "广告曝光": {"mom": -15, "yoy": -20, "threshold_type": "normal"},
+        "智能云存储销售额": {"mom": -10, "yoy": -15, "threshold_type": "normal"},
+        "智能云存储毛利": {"mom": -3, "yoy": -5, "threshold_type": "strict"},
+        "智能云存储毛利率": {"mom": -3, "yoy": -5, "threshold_type": "strict"},
     }
 
     CAMPAIGN_BUFFERS = {

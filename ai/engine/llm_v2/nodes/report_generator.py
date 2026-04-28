@@ -7,11 +7,13 @@ Report Generator Node - 多指标下钻分析报告生成器
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from ai.engine.llm import get_llm_engine
 from ai.engine.llm_v2.nodes.sql_executor import SQLExecutor
 from ai.engine.prompt_manager import get_prompt_manager
+from ai.engine.llm_v2.schema import MQLFilter, OperatorType
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +119,11 @@ class ReportGeneratorNode:
             if not isinstance(data.get("action_items"), list):
                 data["action_items"] = []
 
-            # 确保 health_score 存在
-            if "health_score" not in data:
-                data["health_score"] = 50  # 默认值
+            # 重新计算 health_score（基于 issues 和 highlights）
+            data["health_score"] = self._calculate_health_score(
+                data.get("issues", []),
+                data.get("highlights", [])
+            )
 
             return data
 
@@ -139,6 +143,43 @@ class ReportGeneratorNode:
                 {"text": "查看各指标明细数据", "priority": "P1", "type": "normal"}
             ],
         }
+
+    def _calculate_health_score(self, issues: List[Dict], highlights: List[Dict]) -> int:
+        """
+        根据 issues 和 highlights 量化计算 health_score。
+
+        规则：
+        - 基础分：80分
+        - 每个P0问题扣20分
+        - 每个P1问题扣10分
+        - 每个P2问题扣5分
+        - 每个亮点加5分（最多加10分）
+        - 最低0分，最高100分
+        - 最终得分取整数
+        """
+        # 统计各优先级 issues 数量
+        p0_count = sum(1 for i in issues if i.get("priority") == "P0")
+        p1_count = sum(1 for i in issues if i.get("priority") == "P1")
+        p2_count = sum(1 for i in issues if i.get("priority") == "P2")
+
+        # 计算扣分
+        deductions = p0_count * 20 + p1_count * 10 + p2_count * 5
+
+        # 计算加分（亮点最多加10分）
+        highlight_bonus = min(len(highlights) * 5, 10)
+
+        # 最终得分
+        score = 80 - deductions + highlight_bonus
+
+        # 限制范围
+        score = max(0, min(100, score))
+
+        logger.info(
+            f"[ReportGenerator] health_score计算: 基础80 - P0({p0_count})*20 - P1({p1_count})*10 - P2({p2_count})*5 "
+            f"+ 亮点({len(highlights)})*5 = {score}"
+        )
+
+        return score
 
     async def _load_drilldown_templates(self, category: str) -> List[Dict]:
         """
@@ -194,7 +235,7 @@ class ReportGeneratorNode:
             return []
 
     async def generate_drilldown_sqls(
-        self, category: str, time_range: Dict[str, str]
+        self, category: str, time_range: Dict[str, str], inherited_mql: Optional[Any] = None
     ) -> List[Dict[str, Any]]:
         """
         生成下钻 SQL 语句列表。
@@ -202,6 +243,7 @@ class ReportGeneratorNode:
         Args:
             category: 下钻类别
             time_range: 时间范围 {"start": "2024-01-01", "end": "2024-01-31"}
+            inherited_mql: 继承的 MQL（包含 filters 和 dimensions）
 
         Returns:
             SQL 配置列表 [{"sql": "...", "template_name": "...", "metric_names": [...]}]
@@ -211,17 +253,72 @@ class ReportGeneratorNode:
             logger.warning(f"[ReportGenerator] No templates found for category: {category}")
             return []
 
+        # 从 inherited_mql 构建维度 filter 字符串
+        dim_filter = ""
+        if inherited_mql:
+            filter_conditions = []
+            seen = set()
+            # 从 filters 提取
+            if hasattr(inherited_mql, 'filters') and inherited_mql.filters:
+                for f in inherited_mql.filters:
+                    field = getattr(f, 'field', None)
+                    value = getattr(f, 'value', None)
+                    operator = getattr(f.operator, 'value', 'eq') if hasattr(f, 'operator') else 'eq'
+                    if not field or value is None:
+                        continue
+                    key = f"{field}:{value}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    op_str = "=" if operator == "eq" else operator
+                    filter_conditions.append(f"{field} {op_str} '{value}'")
+            # 从 dimensions 提取
+            if hasattr(inherited_mql, 'dimensions') and inherited_mql.dimensions:
+                for d in inherited_mql.dimensions:
+                    if getattr(d, 'value', None) and getattr(d, 'column', None):
+                        key = f"{d.column}:{d.value}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        filter_conditions.append(f"{d.column} = '{d.value}'")
+            if filter_conditions:
+                dim_filter = " AND ".join(filter_conditions)
+                logger.info(f"[ReportGenerator] 维度 filter: {dim_filter}")
+
         results = []
         for tpl in templates:
             sql = tpl.get("sql_template", "")
             start = time_range.get("start", "")
             end = time_range.get("end", "")
-            # 处理 ''{start_date}'' 格式（数据库模板中使用了双单引号）
-            sql = sql.replace("''{start_date}''", f"'{start}'")
-            sql = sql.replace("''{end_date}''", f"'{end}'")
-            # 同时处理普通格式 {start_date}
-            sql = sql.replace("{start_date}", start)
-            sql = sql.replace("{end_date}", end)
+
+            # ✶ 修复日期替换：匹配模板实际格式
+            # 数据库模板使用双引号格式: "{start_date}" 和 "{end_date}"
+            # 先去掉已有的引号，再添加正确的单引号
+            start_clean = start.strip("'\"") if start else ""
+            end_clean = end.strip("'\"") if end else ""
+
+            # 替换双引号格式 (模板实际格式)
+            sql = sql.replace('"{start_date}"', f"'{start_clean}'")
+            sql = sql.replace('"{end_date}"', f"'{end_clean}'")
+            # 替换单引号转义格式 (以防万一)
+            sql = sql.replace("''{start_date}''", f"'{start_clean}'")
+            sql = sql.replace("''{end_date}''", f"'{end_clean}'")
+            # 替换无引号格式
+            sql = sql.replace("{start_date}", f"'{start_clean}'")
+            sql = sql.replace("{end_date}", f"'{end_clean}'")
+
+            # ✶ 修复：替换维度 filter 占位符
+            # 模板格式: WHERE FDATE >= "{start_date}" AND FDATE <= "{end_date}" AND\n   {dimension_filter}\n
+            # 当 dim_filter 为空时，完整移除 "AND\n   {dimension_filter}" 及后续换行
+            if dim_filter:
+                sql = sql.replace("{dimension_filter}", dim_filter)
+            else:
+                # 移除 " AND\n   {dimension_filter}" 及其后面的换行符
+                # 使用正则处理各种空白字符组合
+                import re
+                # 匹配 " AND" 后面跟各种空白字符，然后是 {dimension_filter}，最后是换行
+                sql = re.sub(r' AND\s+\{dimension_filter\}\s*\n', '\n', sql)
+                sql = re.sub(r' AND\s+\{dimension_filter\}', '', sql)
 
             raw_metric_names = tpl.get("metric_names")
             metric_names = raw_metric_names if isinstance(raw_metric_names, list) else (raw_metric_names or [])
@@ -237,8 +334,86 @@ class ReportGeneratorNode:
         logger.info(f"[ReportGenerator] Generated {len(results)} SQLs for category: {category}")
         return results
 
+    def _inject_filters_to_cte_sql(self, sql: str, filters: List[Any]) -> str:
+        """将 filters 注入到 CTE SQL 的每个 TABLE WHERE 子句
+
+        对于 CTE 模板（如 base_data, mom, yoy），每个 FROM ... WHERE 后面都需要加 filter。
+        """
+        if not filters:
+            logger.info(f"[_inject_filters_to_cte_sql] 无 filters，直接返回原始 SQL")
+            return sql
+
+        # 构建 filter 条件字符串（去重）
+        filter_conditions = []
+        seen_filters = set()
+        for f in filters:
+            field = f.field if hasattr(f, 'field') else None
+            value = f.value if hasattr(f, 'value') else None
+            operator = f.operator.value if hasattr(f, 'operator') and hasattr(f.operator, 'value') else 'eq'
+            if not field or value is None:
+                continue
+            # 去重
+            filter_key = f"{field}:{value}"
+            if filter_key in seen_filters:
+                continue
+            seen_filters.add(filter_key)
+            op_str = "=" if operator == "eq" else operator
+            filter_conditions.append(f"{field} {op_str} '{value}'")
+
+        if not filter_conditions:
+            logger.info(f"[_inject_filters_to_cte_sql] 无有效 filter 条件，直接返回原始 SQL")
+            return sql
+
+        filter_clause = " AND ".join(filter_conditions)
+        logger.info(f"[_inject_filters_to_cte_sql] 原始 SQL:\n{sql}\n{'='*80}")
+        logger.info(f"[_inject_filters_to_cte_sql] 注入 filter: {filter_clause}")
+
+        import re
+
+        # 策略：找到每个 CTE 的 ) 括号，在它前面插入 AND filter
+        # 匹配 CTE 结束括号前的位置：\n  ) 或 \n)
+        result = sql
+
+        # 找所有 CTE 定义块，在其结束 ) 前插入 filter
+        # 匹配模式：\n  GROUP BY ...\n) 或 \n  WHERE ...\n)
+        # 注意：括号前可能有空格，也可能没有
+
+        def replace_cte_end(match):
+            """在 CTE 结束括号前插入 filter"""
+            before_paren = match.group(1)  # CTE 块的内容
+            paren = match.group(2)  # 括号及前面可能的空格
+            # 在结束括号前插入 filter
+            return before_paren + " AND " + filter_clause + paren
+
+        # 匹配：WHERE 或 GROUP BY 行，在其结束位置（换行符前）插入 filter
+        # 问题：对于 "WHERE FDATE >= ... GROUP BY ASIN" 这种单行 WHERE，
+        # 原正则会错误匹配到 GROUP BY 行
+        # 解决：分别处理 WHERE 和 GROUP BY，只在 WHERE 行末尾添加
+
+        # 先处理 WHERE 行：在 WHERE ... 换行之前插入 AND filter
+        result = re.sub(
+            r'(\bWHERE\b[^\n]*)(\n)',
+            lambda m: m.group(1) + " AND " + filter_clause + m.group(2),
+            result,
+            flags=re.IGNORECASE
+        )
+
+        # 再处理 GROUP BY 行前面的 WHERE 块结束位置（如果有换行分隔的话）
+        # 使用非贪婪匹配在 GROUP BY 前的第一个 ) 之前插入
+        # 但要避免重复注入（检查是否已有 filter）
+        if filter_clause not in result:
+            result = re.sub(
+                r'(\n\s*(?:WHERE|GROUP BY).*?)(\n\s*\))',
+                replace_cte_end,
+                result,
+                flags=re.IGNORECASE | re.DOTALL
+            )
+
+        logger.info(f"[_inject_filters_to_cte_sql] 注入后 SQL:\n{result}\n{'='*80}")
+        return result
+
     async def execute_all_templates(
-        self, category: str, time_range: Dict[str, str]
+        self, category: str, time_range: Dict[str, str], inherited_mql: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         并行执行该 category 下所有模板，返回结构化数据。
@@ -246,6 +421,7 @@ class ReportGeneratorNode:
         Args:
             category: 下钻类别
             time_range: 时间范围
+            inherited_mql: 继承的 MQL（包含 filters 等上下文）
 
         Returns:
             结构化数据，包含基础指标和维度下钻数据
@@ -257,14 +433,17 @@ class ReportGeneratorNode:
                 "by_asin": [...]       # ASIN 维度
             }
         """
-        sql_configs = await self.generate_drilldown_sqls(category, time_range)
+        sql_configs = await self.generate_drilldown_sqls(category, time_range, inherited_mql)
         if not sql_configs:
             return {}
 
         async def execute_single(item: Dict[str, Any]) -> Dict[str, Any]:
             """执行单个 SQL 模板，返回全部数据行"""
             try:
-                result = await self._sql_executor.execute(item["sql"])
+                sql = item["sql"]
+                # {dimension_filter} 已在 generate_drilldown_sqls 中替换
+                logger.info(f"[ReportGenerator] 执行 SQL:\n{sql}\n{'='*80}")
+                result = await self._sql_executor.execute(sql)
                 if result and result.data:
                     return {
                         "template_name": item["template_name"],
@@ -273,7 +452,7 @@ class ReportGeneratorNode:
                 return {"template_name": item["template_name"], "rows": []}
             except Exception as e:
                 logger.warning(
-                    f"[ReportGenerator] SQL execution failed: {item['sql'][:100]}... Error: {e}"
+                    f"[ReportGenerator] SQL execution failed: {item['sql'][:500]}... Error: {e}"
                 )
                 return {"template_name": item["template_name"], "rows": []}
 
@@ -373,6 +552,7 @@ class ReportGeneratorNode:
             data_parts.append("【基础指标】\n" + "\n".join(base_lines))
 
         # 2. 维度下钻数据（带列名表头，便于LLM读表格）
+        # 硬编码列顺序，与SQL模板的SELECT顺序保持一致
         dim_labels = {
             "by_site": "站点",
             "by_category": "一级品类",
@@ -380,16 +560,22 @@ class ReportGeneratorNode:
             "by_asin": "ASIN",
         }
 
+        # 每个维度类型的固定列顺序（与SQL模板SELECT顺序一致）
+        # 注意：第一个是维度名称列，后面是指标列
+        dim_col_order = {
+            "by_site": ["站点", "站点编码", "销售额", "销售额占比", "总订单数", "订单量", "B2B订单量", "总销量", "退款量", "国内收入", "跨境收入", "客单价", "销售额_mom_rate", "订单量_mom_rate", "销售额_yoy_rate", "订单量_yoy_rate"],
+            "by_category": ["一级品类", "销售额", "销售额占比", "总订单数", "订单量", "B2B订单量", "国内收入", "跨境收入", "国内收入占比", "跨境收入占比", "客单价", "销售额_mom_rate", "订单量_mom_rate", "销售额_yoy_rate", "订单量_yoy_rate"],
+            "by_platform": ["平台", "销售额", "销售额占比", "总订单数", "订单量", "B2B订单量", "国内收入", "跨境收入", "客单价", "销售额_mom_rate", "订单量_mom_rate", "销售额_yoy_rate", "订单量_yoy_rate"],
+            "by_asin": ["ASIN", "销售额", "销售额占比", "总订单数", "订单量", "退款量", "客单价", "退款率", "销售额_mom_rate", "订单量_mom_rate", "销售额_yoy_rate", "订单量_yoy_rate"],
+        }
+
         for dim_key, dim_label in dim_labels.items():
             rows = dimensional_data.get(dim_key, [])
             if rows:
-                # 提取所有列名（排除维度名称列本身）
-                dim_col_names = [k for k in rows[0].keys() if k not in (
-                    "FSITE", "FSITECODE", "站点", "站点编码",
-                    "GROUP_1", "一级品类",
-                    "PLATFORM", "平台",
-                    "ASIN", "SKU"
-                )]
+                # 使用预定义的列顺序
+                dim_col_names = dim_col_order.get(dim_key, [])
+                # 过滤出实际存在于行数据中的列
+                dim_col_names = [c for c in dim_col_names if c in rows[0].keys()]
                 # 表头
                 header = "  " + " | ".join([dim_label] + dim_col_names)
                 sep = "  " + " | ".join(["-" * max(4, len(dim_label))] + ["-" * max(6, len(c)) for c in dim_col_names])
@@ -398,7 +584,7 @@ class ReportGeneratorNode:
                     vals = [str(row.get(c, "-")) for c in dim_col_names]
                     # 取前5个维度展示（避免太长）
                     if i <= 5:
-                        lines.append(f"  {row.get(list(rows[0].keys())[0], '')} | " + " | ".join(vals))
+                        lines.append(f"  {row.get(dim_col_names[0], '')} | " + " | ".join(vals))
                 if len(rows) > 5:
                     lines.append(f"  ... (共{len(rows)}个，仅展示TOP5)")
                 data_parts.append("\n".join(lines))

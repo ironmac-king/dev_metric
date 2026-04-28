@@ -158,6 +158,86 @@ class AskResponseV2(BaseModel):
     mode: Optional[str] = "direct"  # "direct" or "triggered"
 
 
+# ==================== 会话落库辅助函数 ====================
+
+def _save_v2_session_to_db(
+    session_id: str,
+    user_id: str,
+    question: str,
+    answer: str,
+    sql: str,
+    result_data: Any,
+    comparison_results: Any,
+) -> None:
+    """
+    将 V2 会话保存到 PostgreSQL（ask_session_summaries + ask_messages 表）
+    """
+    try:
+        import psycopg2
+        import json
+
+        conn = psycopg2.connect(
+            host="192.168.1.225",
+            port=5432,
+            database="dev_metric",
+            user="postgres",
+            password="admin123",
+        )
+
+        now = datetime.now()
+
+        # 序列化 result_data
+        result_data_str = ""
+        if result_data is not None:
+            try:
+                result_data_str = json.dumps(result_data, ensure_ascii=False, default=str)
+            except Exception:
+                result_data_str = ""
+
+        # 序列化 comparison_results
+        comparison_str = ""
+        if comparison_results is not None:
+            try:
+                comparison_str = json.dumps(comparison_results, ensure_ascii=False, default=str)
+            except Exception:
+                comparison_str = ""
+
+        with conn:
+            with conn.cursor() as cur:
+                # Upsert ask_session_summaries
+                cur.execute("""
+                    INSERT INTO ask_session_summaries (session_id, title, first_question, message_count, starred, user_id, created_at, updated_at)
+                    VALUES (%s, %s, %s, 2, false, %s, %s, %s)
+                    ON CONFLICT (session_id) DO UPDATE SET
+                        updated_at = EXCLUDED.updated_at,
+                        message_count = ask_session_summaries.message_count + 2
+                """, (
+                    session_id,
+                    question[:128] if question else "",
+                    question,
+                    user_id,
+                    now,
+                    now,
+                ))
+
+                # 插入用户消息
+                cur.execute("""
+                    INSERT INTO ask_messages (session_id, role, content, sql, result_data, comparison_results, created_at)
+                    VALUES (%s, 'user', %s, '', '', '', %s)
+                """, (session_id, question, now))
+
+                # 插入助手消息
+                cur.execute("""
+                    INSERT INTO ask_messages (session_id, role, content, sql, result_data, comparison_results, created_at)
+                    VALUES (%s, 'assistant', %s, %s, %s, %s, %s)
+                """, (session_id, answer, sql or "", result_data_str, comparison_str, now))
+
+        conn.close()
+        logger.info(f"[_save_v2_session_to_db] 会话已保存: session_id={session_id}")
+    except Exception as e:
+        logger.warning(f"[_save_v2_session_to_db] 保存失败: {e}")
+
+
 @router.post("/v2", response_model=AskResponseV2)
 async def ask_question_v2(req: AskRequestV2):
     """
@@ -281,8 +361,21 @@ async def ask_question_v2(req: AskRequestV2):
         _saved_session_info = f"session_id={session_id}, keys={list(v2_session_mql.keys())}"
         if result_state and result_state.mql:
             v2_session_mql[session_id] = result_state.mql
-            _saved_session_info = f"session_id={session_id}, saved_metric={result_state.mql.metric.name if result_state.mql.metric else None}, saved_dims={[(d.type, d.value) for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}"
+            _saved_filters = [(f.field, f.value) for f in result_state.mql.filters] if result_state.mql.filters else []
+            _saved_session_info = f"session_id={session_id}, saved_metric={result_state.mql.metric.name if result_state.mql.metric else None}, saved_dims={[(d.type, d.value) for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}, saved_filters={_saved_filters}"
             logger.info(f"[V2] 保存 MQL 到 session: {_saved_session_info}")
+
+        # 保存会话到 PostgreSQL（ask_session_summaries + ask_messages）
+        if result_state and result_state.answer:
+            _save_v2_session_to_db(
+                session_id=session_id,
+                user_id=req.user_id,
+                question=req.question,
+                answer=result_state.answer or "",
+                sql=result_state.sql or "",
+                result_data=result_state.sql_result.data if result_state.sql_result else None,
+                comparison_results=result_state.context_cache.get("comparison_results") if result_state.context_cache else None,
+            )
 
         # 发送日志到 Go 后端
         try:
@@ -461,6 +554,7 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "total": step_state.get("total", 0),
                         "metric_name": step_state.get("metric_name", ""),
                         "metric_names": step_state.get("metric_names", []),
+                        "columns": step_state.get("columns", []),
                         "multi_metric_data": step_state.get("multi_metric_data", []),
                         "dimensional_data": step_state.get("dimensional_data", {}),
                         "category": step_state.get("category", ""),
@@ -543,6 +637,25 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 except Exception as log_err:
                     logger.warning(f"[V2 Stream] 发送日志失败: {log_err}")
 
+            # 保存会话到 PostgreSQL
+            if state and answer:
+                try:
+                    sql_result = getattr(state, 'sql_result', None)
+                    result_data = sql_result.data if sql_result and hasattr(sql_result, 'data') else None
+                    context_cache = getattr(state, 'context_cache', None)
+                    comparison_results = context_cache.get("comparison_results") if context_cache else None
+                    _save_v2_session_to_db(
+                        session_id=session_id,
+                        user_id=req.user_id,
+                        question=req.question,
+                        answer=answer,
+                        sql=sql,
+                        result_data=result_data,
+                        comparison_results=comparison_results,
+                    )
+                except Exception as db_err:
+                    logger.warning(f"[V2 Stream] 保存会话到数据库失败: {db_err}")
+
             # 清理流式生成器
             clear_streaming_generator(session_id)
 
@@ -577,6 +690,7 @@ async def _stream_graph(graph, state: V2State):
 
                 sql_result = getattr(state_update, 'sql_result', None)
                 result_data = sql_result.data if sql_result and hasattr(sql_result, 'data') else None
+                columns = sql_result.columns if sql_result and hasattr(sql_result, 'columns') else []
                 total = sql_result.total if sql_result and hasattr(sql_result, 'total') else 0
 
                 # 获取 answer 和 suggestions
@@ -621,6 +735,7 @@ async def _stream_graph(graph, state: V2State):
                     "source": last_thinking.source if last_thinking and hasattr(last_thinking, 'source') else None,
                     "sql": getattr(state_update, 'sql', '') or '',
                     "result_data": result_data,
+                    "columns": columns,
                     "total": total,
                     "duration_ms": last_thinking.duration_ms if last_thinking and hasattr(last_thinking, 'duration_ms') else 0,
                     "answer": answer,
@@ -800,6 +915,97 @@ async def clear_cache():
     cache._l1.clear()
     cache._l2.clear()
     return {"message": "缓存已清除"}
+
+
+# ==================== 会话历史接口 ====================
+
+@router.get("/history/{session_id}")
+async def get_v2_history(session_id: str):
+    """
+    获取 V2 会话历史
+
+    从 PostgreSQL 读取 ask_session_summaries 和 ask_messages 表
+    """
+    try:
+        import psycopg2
+        import json
+
+        conn = psycopg2.connect(
+            host="192.168.1.225",
+            port=5432,
+            database="dev_metric",
+            user="postgres",
+            password="admin123",
+        )
+
+        # 1. 查会话摘要
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT session_id, title, first_question, message_count, starred, user_id, created_at, updated_at "
+                "FROM ask_session_summaries WHERE session_id = %s",
+                (session_id,)
+            )
+            row = cur.fetchone()
+            session_meta = None
+            if row:
+                session_meta = {
+                    "session_id": row[0],
+                    "title": row[1],
+                    "first_question": row[2],
+                    "message_count": row[3],
+                    "starred": row[4],
+                    "user_id": row[5],
+                    "created_at": row[6].isoformat() if row[6] else None,
+                    "updated_at": row[7].isoformat() if row[7] else None,
+                }
+
+        # 2. 查消息列表
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, content, sql, result_data, comparison_results, created_at "
+                "FROM ask_messages WHERE session_id = %s ORDER BY created_at ASC",
+                (session_id,)
+            )
+            rows = cur.fetchall()
+            messages = []
+            for r in rows:
+                result_data = None
+                if r[3]:
+                    try:
+                        result_data = json.loads(r[3])
+                    except:
+                        pass
+                comparison_results = None
+                if r[4]:
+                    try:
+                        comparison_results = json.loads(r[4])
+                    except:
+                        pass
+                messages.append({
+                    "role": r[0],
+                    "content": r[1],
+                    "sql": r[2],
+                    "result_data": result_data,
+                    "comparison_results": comparison_results,
+                    "created_at": r[5].isoformat() if r[5] else None,
+                })
+
+        conn.close()
+
+        return {
+            "sessions": [session_meta] if session_meta else [],
+            "session_id": session_id,
+            "messages": messages,
+        }
+
+    except Exception as e:
+        logger.error(f"[get_v2_history] 获取会话历史失败: {e}")
+        return {
+            "sessions": [],
+            "session_id": session_id,
+            "messages": [],
+            "error": str(e),
+        }
 
 
 # ==================== 波动分析接口 ====================

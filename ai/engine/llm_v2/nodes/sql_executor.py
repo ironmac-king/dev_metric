@@ -65,6 +65,7 @@ class SQLExecutor:
             if response.get("code") == 0:
                 data = response.get("data", {})
                 result.data = data.get("data", [])
+                result.columns = data.get("columns", [])
                 result.total = data.get("count", len(result.data))
                 result.executed = True
                 result.execution_time_ms = int((time.time() - start_time) * 1000)

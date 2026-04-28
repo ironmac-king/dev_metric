@@ -462,10 +462,14 @@ class MQLGenerator:
         # 多指标支持（如"销售额及销量"）
         metrics_data = result.get("metrics", [])
         if metrics_data:
+            seen_metric_names = set()
+            # 先记录主指标名，避免重复添加
+            if mql.metric and mql.metric.name:
+                seen_metric_names.add(mql.metric.name)
             for metric_item in metrics_data:
                 metric_name = metric_item.get("name", "")
-                if metric_name and (not mql.metric or mql.metric.name != metric_name):
-                    # 跳过与主指标相同的项，避免重复
+                if metric_name and metric_name not in seen_metric_names:
+                    seen_metric_names.add(metric_name)
                     mql.metrics.append(MQLMetric(
                         code="",
                         name=metric_name,
@@ -576,8 +580,11 @@ class MQLGenerator:
                 dim_type_map[k] = v
 
         # 维度 - 不从 LLM 提取 column，避免幻觉，使用 sql_generator 的映射
+        # 注意：去重防止 LLM 返回重复的 dimensions（如两个 GROUP_2）
+        seen_dim_types = set()  # 用于去重 (type, value) 组合
         for dim_data in result.get("dimensions", []):
             dim_type = dim_data.get("type", "")
+            dim_value = dim_data.get("value")
             # 转换为英文
             mapped_type = dim_type_map.get(dim_type, dim_type.upper() if dim_type else "")
 
@@ -585,11 +592,18 @@ class MQLGenerator:
             # 例如用户说"三级品类"但 LLM 返回 GROUP_1，需要纠正
             mapped_type = self._correct_category_level(mapped_type, question)
 
+            # 去重：用原始 dim_type 去重（存储的是原始值）
+            dim_key = (dim_type, dim_value)
+            if dim_key in seen_dim_types:
+                logger.warning(f"[_parse_mql] 维度重复，跳过: type={mapped_type}, value={dim_value}")
+                continue
+            seen_dim_types.add(dim_key)
+
             mql.dimensions.append(MQLDimension(
                 type=mapped_type,
                 column="",  # 不从 LLM 提取，使用 sql_generator 的维度类型映射
                 field=dim_data.get("field", ""),
-                value=dim_data.get("value"),
+                value=dim_value,
             ))
 
         # 筛选 - 只有用户明确指定时才添加
@@ -697,10 +711,15 @@ class MQLGenerator:
         if not mql.metric and inherited_mql and inherited_mql.metric:
             mql.metric = inherited_mql.metric
         # 如果新 MQL 的 metric 存在但 starrocks_sql 为空，从 inherited_mql 继承
+        # 注意：只有 metric name 相同时才继承，避免"毛利率"→"销售额"这种跨指标污染
         elif mql.metric and inherited_mql and inherited_mql.metric and inherited_mql.metric.starrocks_sql:
             if not mql.metric.starrocks_sql:
-                mql.metric.starrocks_sql = inherited_mql.metric.starrocks_sql
-                logger.info(f"[_fill_defaults] 从 inherited_mql 继承 starrocks_sql")
+                # ✶ 修复：检查 metric name 是否相同
+                if inherited_mql.metric.name == mql.metric.name:
+                    mql.metric.starrocks_sql = inherited_mql.metric.starrocks_sql
+                    logger.info(f"[_fill_defaults] 从 inherited_mql 继承 starrocks_sql (metric name 相同: {mql.metric.name})")
+                else:
+                    logger.info(f"[_fill_defaults] metric name 不同 ({mql.metric.name} vs {inherited_mql.metric.name})，不继承 starrocks_sql")
 
         # Top N 继承（用于排名查询的追问回复）
         if inherited_mql and inherited_mql.top_n and inherited_mql.top_n > 0:
@@ -745,7 +764,9 @@ class MQLGenerator:
             return
 
         # 指标名后缀（用于判断维度值和指标的边界）
-        metric_suffixes = ["销售额", "订单量", "转化率", "用户数", "访问量", "成交量", "点击量", "展示量"]
+        metric_suffixes = ["销售额", "订单量", "转化率", "用户数", "访问量", "成交量", "点击量", "展示量", "毛利率"]
+        # 率类指标后缀（这些指标名以"率"结尾）
+        rate_suffixes = ["率"]
 
         # 获取维度值上下文
         dim_values_context = self._get_dimension_values_context()
@@ -791,6 +812,14 @@ class MQLGenerator:
                     if re.search(pattern, question):
                         found_dim_values.append((dim_val, col))
                         break
+                # 检查率类指标（如"智能云存储毛利率"→"智能云存储"是维度值，"毛利率"是指标）
+                if not any(dv == dim_val for dv, _ in found_dim_values):
+                    for suffix in rate_suffixes:
+                        combined = dim_val + suffix
+                        if combined in question:
+                            found_dim_values.append((dim_val, col))
+                            logger.info(f"[_correct_dimension_value_in_metric_name] 率类指标: 维度值'{dim_val}' + 指标后缀'{suffix}' 在问题中匹配到")
+                            break
 
         logger.warning(f"[_correct_dimension_value_in_metric_name] 从问题中找到维度值: {found_dim_values}")
 
