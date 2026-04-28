@@ -52,14 +52,18 @@ class VolatilityAnalyzer:
     def __init__(self):
         self._llm_engine = get_llm_engine()
 
-    def calculate_basic_stats(self, data: List[Dict]) -> Dict[str, float]:
+    def calculate_basic_stats(self, data: List[Dict], period_days: int = 7) -> Dict[str, float]:
         """
-        计算基础统计指标
+        计算基础统计指标（修复版：周期对比而非日对比）
+
+        Args:
+            data: 时间序列数据，按日期排序
+            period_days: 周期天数（默认7天）
 
         Returns:
             {
-                current: 当期值,
-                prev: 上期值,
+                current: 当期周期总和,
+                prev: 上期周期总和,
                 avg: 平均值,
                 std: 标准差,
                 cv: 变异系数,
@@ -74,24 +78,39 @@ class VolatilityAnalyzer:
         if not values:
             return {"current": 0, "prev": 0, "avg": 0, "std": 0, "cv": 0, "mom": 0, "yoy": 0}
 
-        current = values[-1] if values else 0
-        prev = values[-2] if len(values) > 1 else 0
-        avg = sum(values) / len(values) if values else 0
+        # ========== 修复 1：周期对比而非日对比 ==========
+        # 当前周期：最后 period_days 天
+        if len(values) >= period_days:
+            current = sum(values[-period_days:])
+        else:
+            current = sum(values)
 
-        # 标准差
-        variance = sum((x - avg) ** 2 for x in values) / len(values) if values else 0
-        std = math.sqrt(variance)
-
-        # 变异系数
-        cv = std / avg if avg != 0 else 0
+        # 上期周期：再往前 period_days 天
+        if len(values) >= period_days * 2:
+            prev = sum(values[-period_days*2:-period_days])
+        elif len(values) > period_days:
+            prev = sum(values[:-period_days])
+        else:
+            prev = 0
 
         # 环比变化率
         mom = (current - prev) / prev if prev != 0 else 0
 
-        # 同比变化率（假设数据按天排列，取同周期数据）
+        # 同比变化率（本期 vs 去年同期/上周同期）
         yoy = 0
-        if len(values) >= 7:  # 至少有一周数据
-            yoy = (current - values[-8]) / values[-8] if values[-8] != 0 else 0
+        if len(values) >= period_days * 2:
+            current_period = values[-period_days:]
+            prev_year_period = values[-period_days*2:-period_days]
+            prev_sum = sum(prev_year_period)
+            if prev_sum != 0:
+                yoy = (sum(current_period) - prev_sum) / prev_sum
+        # =================================================
+
+        # 计算其他统计指标
+        avg = sum(values) / len(values) if values else 0
+        variance = sum((x - avg) ** 2 for x in values) / len(values) if values else 0
+        std = math.sqrt(variance)
+        cv = std / avg if avg != 0 else 0
 
         return {
             "current": current,
@@ -103,15 +122,25 @@ class VolatilityAnalyzer:
             "yoy": yoy
         }
 
-    def detect_anomaly_iqr(self, values: List[float]) -> Dict[str, Any]:
+    def detect_anomaly_iqr(
+        self,
+        values: List[float],
+        volatility_threshold_warning: float = 0.15,
+        volatility_threshold_critical: float = 0.25
+    ) -> Dict[str, Any]:
         """
-        IQR 四分位距异常检测
+        IQR 四分位距异常检测（修复版：阈值可配置）
+
+        Args:
+            values: 数值列表
+            volatility_threshold_warning: 波动阈值（默认15%）
+            volatility_threshold_critical: 异常阈值（默认25%）
 
         Returns:
             {
                 is_anomaly: bool,
                 anomaly_level: normal / 波动 / 异常,
-                anomaly_values: List[float]  # 异常值列表
+                anomaly_values: List[float]
             }
         """
         if len(values) < 4:
@@ -134,17 +163,18 @@ class VolatilityAnalyzer:
         # 异常值
         anomaly_values = [v for v in values if v < lower or v > upper]
 
-        # 计算波动率（用于判断）
+        # 计算波动率
         current = values[-1] if values else 0
         avg = sum(values) / len(values) if values else 0
         volatility_rate = abs(current - avg) / avg if avg != 0 else 0
 
-        # 判断等级
+        # ========== 修复 2：阈值可配置 ==========
         anomaly_level = "normal"
-        if volatility_rate > 0.25 or anomaly_values:
+        if volatility_rate > volatility_threshold_critical or anomaly_values:
             anomaly_level = "异常"
-        elif volatility_rate > 0.15:
+        elif volatility_rate > volatility_threshold_warning:
             anomaly_level = "波动"
+        # =======================================
 
         is_anomaly = anomaly_level != "normal"
 
@@ -157,18 +187,16 @@ class VolatilityAnalyzer:
 
     def calc_dimension_contribution(
         self,
-        data: List[Dict],
-        current_total: float,
-        prev_total: float,
+        current_data: List[Dict],
+        prev_data: Optional[List[Dict]],
         dimension_key: str = "dimension"
     ) -> Dict[str, List[Dict]]:
         """
-        计算各维度对波动的贡献度
+        计算各维度对波动的贡献度（修复版：使用真实上期数据）
 
         Args:
-            data: 当前期数据
-            current_total: 当前期总值
-            prev_total: 上期总值
+            current_data: 当前期数据（按维度分组的）
+            prev_data: 上期数据（如果有的话）
             dimension_key: 维度字段名
 
         Returns:
@@ -177,51 +205,160 @@ class VolatilityAnalyzer:
                 "negative": [{"name": xxx, "value": xxx, "contribution": xxx}, ...]
             }
         """
-        if not data or current_total == prev_total:
+        if not current_data:
             return {"positive": [], "negative": []}
 
-        # 按维度分组
-        dim_groups: Dict[str, List[float]] = {}
-        for row in data:
-            dim_value = row.get(dimension_key, "未知")
-            val = row.get('value', 0)
-            if dim_value not in dim_groups:
-                dim_groups[dim_value] = []
-            dim_groups[dim_value].append(val)
+        current_total = sum(row.get('value', 0) for row in current_data)
 
-        # 计算各维度贡献度
+        if not prev_data:
+            # 无上期数据，只返回当期占比
+            contributions = []
+            for row in current_data:
+                val = row.get('value', 0)
+                contribution = (val / current_total * 100) if current_total != 0 else 0
+                contributions.append({
+                    "name": row.get(dimension_key, "未知"),
+                    "value": val,
+                    "change": None,
+                    "change_pct": None,
+                    "contribution": contribution,
+                    "has_prev_data": False
+                })
+            contributions.sort(key=lambda x: x["contribution"], reverse=True)
+            return {
+                "positive": [c for c in contributions if c["contribution"] > 0][:3],
+                "negative": []
+            }
+
+        # ========== 修复 3：使用真实上期数据而非比例估算 ==========
+        prev_dict = {row.get(dimension_key): row.get('value', 0) for row in prev_data}
+        prev_total = sum(prev_dict.values())
         total_change = current_total - prev_total
+
         contributions = []
+        for row in current_data:
+            dim_name = row.get(dimension_key, "未知")
+            curr_val = row.get('value', 0)
+            prev_val = prev_dict.get(dim_name, 0)
 
-        for dim_name, values in dim_groups.items():
-            curr_sum = sum(values)
-            # 估算上期值（按比例估算）
-            if current_total > 0:
-                prev_estimate = curr_sum * (prev_total / current_total) if current_total != 0 else 0
-            else:
-                prev_estimate = 0
-
-            change = curr_sum - prev_estimate
-            contribution = change / total_change if total_change != 0 else 0
+            change = curr_val - prev_val
+            contribution = change / total_change * 100 if total_change != 0 else 0
+            change_pct = (change / prev_val * 100) if prev_val != 0 else None
 
             contributions.append({
                 "name": dim_name,
-                "value": curr_sum,
+                "value": curr_val,
+                "prev_value": prev_val,
                 "change": change,
-                "contribution": contribution * 100  # 转为百分比
+                "change_pct": change_pct,
+                "contribution": contribution,
+                "has_prev_data": True
             })
+        # =========================================================
 
-        # 按贡献度排序
         contributions.sort(key=lambda x: x["contribution"], reverse=True)
-
         positive = [c for c in contributions if c["contribution"] > 0][:3]
         negative = [c for c in contributions if c["contribution"] < 0][:3]
-        negative.sort(key=lambda x: x["contribution"])  # 负向按最小排
+        negative.sort(key=lambda x: x["contribution"])
 
         return {
             "positive": positive,
             "negative": negative
         }
+
+    def _calc_category_drivers(
+        self,
+        data: List[Dict],
+        prev_data: Optional[List[Dict]] = None,
+        dimension_key: str = "dimension"
+    ) -> Dict[str, List[Dict]]:
+        """
+        对于分类数据，计算品类贡献度（修复版：支持上期数据）
+
+        Args:
+            data: 当前期数据
+            prev_data: 上期数据（可选）
+            dimension_key: 维度字段名
+        """
+        if not data:
+            return {"positive": [], "negative": []}
+
+        current_total = sum(row.get('value', 0) for row in data)
+        current_dict = {row.get(dimension_key): row.get('value', 0) for row in data}
+
+        results = []
+        for dim_name, curr_val in current_dict.items():
+            contribution = (curr_val / current_total * 100) if current_total != 0 else 0
+
+            if prev_data:
+                prev_dict = {row.get(dimension_key): row.get('value', 0) for row in prev_data}
+                prev_val = prev_dict.get(dim_name, 0)
+                change = curr_val - prev_val
+                change_pct = (change / prev_val * 100) if prev_val != 0 else None
+            else:
+                prev_val = 0
+                change = None
+                change_pct = None
+
+            results.append({
+                "name": dim_name,
+                "value": curr_val,
+                "prev_value": prev_val,
+                "change": change,
+                "change_pct": change_pct,
+                "contribution": contribution,
+                "has_prev_data": prev_data is not None
+            })
+
+        results.sort(key=lambda x: x["value"], reverse=True)
+        return {
+            "positive": results[:3],
+            "negative": results[-3:] if len(results) > 3 else results
+        }
+
+    def _split_current_prev_dim_data(
+        self,
+        data: List[Dict],
+        period_days: int = 7,
+        dimension_key: str = "dimension"
+    ) -> tuple:
+        """
+        从时间序列数据中拆分当前期和上期的维度数据
+
+        数据格式约定：
+        [
+            {"date": "2026-04-27", "dimension": "站点A", "value": 100},
+            {"date": "2026-04-27", "dimension": "站点B", "value": 200},
+            {"date": "2026-04-20", "dimension": "站点A", "value": 90},
+            {"date": "2026-04-20", "dimension": "站点B", "value": 180},
+        ]
+        """
+        if not data:
+            return [], []
+
+        # 提取所有唯一日期并排序
+        dates = sorted({row.get("date", row.get("time", "")) for row in data})
+        if len(dates) < 2:
+            return data, []  # 数据不足，返回当前期
+
+        # 拆分当前周期和上期周期的日期
+        current_dates = dates[-period_days:] if len(dates) >= period_days else dates
+        prev_dates = dates[-period_days*2:-period_days] if len(dates) >= period_days*2 else dates[:-period_days]
+
+        # 提取对应数据
+        current_data = [row for row in data if row.get("date", row.get("time", "")) in current_dates]
+        prev_data = [row for row in data if row.get("date", row.get("time", "")) in prev_dates]
+
+        # 按维度聚合（同一维度多天数据求和）
+        def aggregate_by_dim(data_list: List[Dict]) -> List[Dict]:
+            dim_groups = {}
+            for row in data_list:
+                dim = row.get(dimension_key, "未知")
+                val = row.get('value', 0)
+                dim_groups[dim] = dim_groups.get(dim, 0) + val
+            return [{"dimension": k, "value": v} for k, v in dim_groups.items()]
+
+        return aggregate_by_dim(current_data), aggregate_by_dim(prev_data)
 
     async def llm_root_cause_analysis(
         self,
@@ -231,17 +368,11 @@ class VolatilityAnalyzer:
     ) -> Dict[str, Any]:
         """
         LLM 根因分析
-
-        Returns:
-            {
-                "root_cause": str,
-                "confidence": float,
-                "suggestion": str
-            }
         """
         # 构建 prompt
         prompt = f"""指标：{metric_name}
-当前值：{stats.get('current', 0):.2f}
+当前周期值：{stats.get('current', 0):.2f}
+上期周期值：{stats.get('prev', 0):.2f}
 平均值：{stats.get('avg', 0):.2f}
 环比变化：{stats.get('mom', 0)*100:.1f}%
 同比变化：{stats.get('yoy', 0)*100:.1f}%
@@ -251,7 +382,7 @@ class VolatilityAnalyzer:
 {chr(10).join([f"- {d['name']}: 贡献{d['contribution']:.1f}%" for d in dims.get('positive', [])]) if dims.get('positive') else '无'}
 
 负向拖累因素：
-{chr(10).join([f"- {d['name']}: 拖累{d['contribution']:.1f}%" for d in dims.get('negative', [])]) if dims.get('negative') else '无'}
+{chr(10).join([f"- {d['name']}: 拖累{abs(d['contribution']):.1f}%" for d in dims.get('negative', [])]) if dims.get('negative') else '无'}
 
 请按以下结构输出分析结论：
 1. 指标概况（数值、环比、同比）
@@ -289,7 +420,7 @@ class VolatilityAnalyzer:
             }
 
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
-        """解析 LLM 响应"""
+        """解析 LLM 响应（修复版：支持中英文冒号）"""
         lines = response.strip().split('\n')
         root_cause = "待分析"
         confidence = 0.5
@@ -297,15 +428,22 @@ class VolatilityAnalyzer:
 
         for line in lines:
             line = line.strip()
-            if line.startswith("根因："):
-                root_cause = line.replace("根因：", "").strip()
-            elif line.startswith("置信度："):
-                try:
-                    confidence = float(line.replace("置信度：", "").strip())
-                except:
-                    confidence = 0.5
-            elif line.startswith("建议："):
-                suggestion = line.replace("建议：", "").strip()
+            # 支持中文冒号和英文冒号
+            if "根因" in line:
+                parts = line.split("：", 1) if "：" in line else line.split(":", 1)
+                if len(parts) > 1:
+                    root_cause = parts[1].strip()
+            elif "置信度" in line:
+                parts = line.split("：", 1) if "：" in line else line.split(":", 1)
+                if len(parts) > 1:
+                    try:
+                        confidence = float(parts[1].strip())
+                    except:
+                        confidence = 0.5
+            elif "建议" in line:
+                parts = line.split("：", 1) if "：" in line else line.split(":", 1)
+                if len(parts) > 1:
+                    suggestion = parts[1].strip()
 
         return {
             "root_cause": root_cause,
@@ -338,74 +476,21 @@ class VolatilityAnalyzer:
         # 只有一个日期或没有日期 → 分类数据
         return "category"
 
-    def _calc_category_drivers(
-        self,
-        data: List[Dict],
-        dimension_key: str = "dimension"
-    ) -> Dict[str, List[Dict]]:
-        """
-        对于分类数据，计算品类贡献度
-        直接用数值排序，TOP3正向=最大值，TOP3负向=最小值
-        """
-        if not data:
-            return {"positive": [], "negative": []}
-
-        # 按value排序
-        sorted_data = sorted(data, key=lambda x: x.get('value', 0), reverse=True)
-
-        # 计算总值
-        total = sum(row.get('value', 0) for row in data)
-
-        # TOP3 正向（最大）
-        positive = []
-        for i, row in enumerate(sorted_data[:3]):
-            val = row.get('value', 0)
-            contribution = (val / total * 100) if total != 0 else 0
-            positive.append({
-                "name": row.get(dimension_key, f"品类{i+1}"),
-                "value": val,
-                "change": val,
-                "contribution": contribution
-            })
-
-        # TOP3 负向（最小）
-        negative = []
-        for row in sorted_data[-3:]:
-            val = row.get('value', 0)
-            contribution = (val / total * 100) if total != 0 else 0
-            negative.append({
-                "name": row.get(dimension_key, "其他"),
-                "value": val,
-                "change": -val,
-                "contribution": -contribution
-            })
-        negative.reverse()  # 按贡献度从小到大排列
-
-        return {"positive": positive, "negative": negative}
-
     async def analyze_stream(
         self,
         metric_name: str,
         data: List[Dict],
         time_range: Optional[Dict[str, str]] = None,
-        dimension_key: str = "dimension"
+        dimension_key: str = "dimension",
+        period_days: int = 7
     ) -> AsyncGenerator[StreamEvent, None]:
         """
-        流式波动分析
+        流式波动分析（修复版：支持周期参数）
 
-        生成 SSE 事件流：
-        1. volatility_overview - 基础统计
-        2. volatility_chart - 图表数据
-        3. volatility_dims - 维度贡献
-        4. volatility_llm_reasoning - LLM 推理过程
-        5. volatility_root - 根因归类
-        6. volatility_done - 完成
-
-        支持两种数据格式：
-        - 时间序列：多天数据，计算完整波动分析
-        - 分类数据：单天多品类，直接展示TOP驱动
+        Args:
+            period_days: 周期天数（默认7天）
         """
-        logger.info(f"[VolatilityAnalyzer] 开始分析指标: {metric_name}, 数据量: {len(data)}")
+        logger.info(f"[VolatilityAnalyzer] 开始分析指标: {metric_name}, 数据量: {len(data)}, 周期: {period_days}天")
 
         # 检测数据格式
         data_type = self._detect_data_type(data)
@@ -417,7 +502,7 @@ class VolatilityAnalyzer:
                 yield event
         else:
             # 时间序列数据分析
-            async for event in self._analyze_time_series(metric_name, data, dimension_key):
+            async for event in self._analyze_time_series(metric_name, data, dimension_key, period_days):
                 yield event
 
         logger.info(f"[VolatilityAnalyzer] 分析完成: {metric_name}")
@@ -479,7 +564,7 @@ class VolatilityAnalyzer:
         )
 
         # Step 3: 品类驱动
-        dims = self._calc_category_drivers(data, dimension_key)
+        dims = self._calc_category_drivers(data, None, dimension_key)
 
         yield StreamEvent(
             event=SSSEvent.STEP_COMPLETE,
@@ -534,13 +619,14 @@ class VolatilityAnalyzer:
         self,
         metric_name: str,
         data: List[Dict],
-        dimension_key: str = "dimension"
+        dimension_key: str = "dimension",
+        period_days: int = 7
     ) -> AsyncGenerator[StreamEvent, None]:
         """
-        时间序列数据分析：完整波动分析
+        时间序列数据分析（修复版：拆分当期/上期数据）
         """
-        # Step 1: 基础统计
-        stats = self.calculate_basic_stats(data)
+        # Step 1: 基础统计（使用周期对比）
+        stats = self.calculate_basic_stats(data, period_days)
         anomaly_result = self.detect_anomaly_iqr([row.get('value', 0) for row in data if 'value' in row])
 
         stats['volatility_rate'] = anomaly_result.get('volatility_rate', 0)
@@ -574,7 +660,7 @@ class VolatilityAnalyzer:
         for row in data:
             chart_data.append({
                 "date": row.get("date", row.get("time", "")),
-                "value": row.get("value", 0)
+                "value": row.get('value', 0)
             })
 
         yield StreamEvent(
@@ -586,13 +672,17 @@ class VolatilityAnalyzer:
             }
         )
 
+        # ========== 修复 4：拆分当期/上期数据再计算维度贡献 ==========
         # Step 3: 维度贡献度
+        current_dim_data, prev_dim_data = self._split_current_prev_dim_data(
+            data, period_days, dimension_key
+        )
         dims = self.calc_dimension_contribution(
-            data,
-            stats['current'],
-            stats['prev'],
+            current_dim_data,
+            prev_dim_data,
             dimension_key
         )
+        # =============================================================
 
         yield StreamEvent(
             event=SSSEvent.STEP_COMPLETE,
@@ -690,13 +780,14 @@ TOP3 核心品类（贡献度最高）：
         metric_name: str,
         data: List[Dict],
         time_range: Optional[Dict[str, str]] = None,
-        dimension_key: str = "dimension"
+        dimension_key: str = "dimension",
+        period_days: int = 7
     ) -> VolatilityResult:
         """
         同步波动分析（不生成 SSE 流）
         """
         # 基础统计
-        stats = self.calculate_basic_stats(data)
+        stats = self.calculate_basic_stats(data, period_days)
         anomaly_result = self.detect_anomaly_iqr([row.get('value', 0) for row in data if 'value' in row])
 
         # 维度贡献度（同步版本先不计算）
