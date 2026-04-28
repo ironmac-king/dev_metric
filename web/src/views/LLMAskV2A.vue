@@ -1122,7 +1122,9 @@ function openAttribution(msg) {
     volatilityPanelRef.value.startStream({
       metric_name: msg.metricName || '指标',
       data: resultDataCopy,
-      dimension_key: 'dimension'
+      dimension_key: 'dimension',
+      mom_change: msg.momChange ?? null,
+      yoy_change: msg.yoyChange ?? null
     })
   }
 }
