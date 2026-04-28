@@ -75,8 +75,9 @@ go mod tidy
 
 - `main.py` — FastAPI 入口，`ask_question` 是 `async def`
 - `graph/state.py` — V1 对话状态（已废弃，仅保留类型定义）
-- `engine/rule_engine.py` — 规则引擎（关键词匹配 + SQL 模板）
-- `engine/llm.py` — LLM 调用引擎（腾讯云 DeepSeek）
+- `engine/llm_v2/` — **LLM.V2 活跃引擎**（`graph.py` 是 LangGraph 入口）
+- `engine/llm.py` — V1 LLM 引擎（已废弃）
+- `engine/rule_engine.py` — V1 规则引擎（已废弃）
 - `engine/semantic_search.py` — 语义搜索（pgvector 存储 + 阿里 text-embedding-v2）
 - `engine/alibaba_embedding.py` — 阿里 Embedding 客户端（text-embedding-v2，1536维）
 - `engine/time_parser.py` — 时间表达式解析（支持"近7日"、"近30天"等）
@@ -92,6 +93,38 @@ go mod tidy
 - Vite 配置了 `@` 路径别名指向 `src/`
 
 ## AI 服务关键实现细节
+
+### LLM.V2 LangGraph 架构（智能问数核心）
+
+`ai/engine/llm_v2/` 是当前活跃的智能问数引擎（V1 已废弃）。
+
+**13 步 LangGraph 闭环**：
+
+```
+intent_router → context_enhancer → mql_generator → mql_syntax_validator
+    → mql_semantic_validator → sql_generator → sql_security_auditor
+    → sql_executor → data_quality_checker → trigger_analyzer
+    → result_analyzer → state_manager
+```
+
+| # | 节点 | 驱动 | 说明 |
+|---|------|------|------|
+| 1 | intent_router | LLM | 识别意图（query_value/trend/comparison 等） |
+| 2 | context_enhancer | RAG | 检索相似案例 |
+| 3 | mql_generator | LLM | 自然语言 → MQL Schema |
+| 4 | mql_syntax_validator | 规则 | JSON Schema 语法验证 |
+| 5 | mql_semantic_validator | LLM+规则 | 指标名→starrocks_sql 映射验证 |
+| 6 | sql_generator | **确定性规则** | MQL → SQL（不走 LLM） |
+| 7 | sql_security_auditor | 规则 | SQL 安全检查 |
+| 8 | sql_executor | async IO | 异步查 StarRocks |
+| 9 | data_quality_checker | 规则 | 空数据/异常值检查 |
+| 10 | trigger_analyzer | 规则 | 决策分析触发检测（波动/库存/广告效果等） |
+| 11 | result_analyzer | LLM | 生成自然语言回答 |
+| 12 | state_manager | 规则 | 更新会话状态 |
+
+**trigger_analyzer** 是决策分析引擎（`/api/v1/analysis`），也可在问数链路中被触发，支持 6 类触发器：VolatilityTrigger、ComparisonTrigger、AdEffectTrigger、InventoryRiskTrigger、GenericQueryTrigger、ContextTrigger。
+
+**决策分析**有独立入口 `/api/v1/analysis/analyze`，不经过问数链路。
 
 ### 对话流程（同步节点调用链）
 
