@@ -59,7 +59,7 @@ class VolatilityAnalyzer:
         yoy_mode: str = "auto"
     ) -> Dict[str, float]:
         """
-        计算基础统计指标（优化版：支持多种YoY模式）
+        计算基础统计指标（参考SQL的YoY/MoM计算逻辑）
 
         Args:
             data: 时间序列数据，按日期排序，每行需包含 'date' 或 'time' 字段
@@ -88,14 +88,35 @@ class VolatilityAnalyzer:
         if not values:
             return {"current": 0, "prev": 0, "avg": 0, "std": 0, "cv": 0, "mom": 0, "yoy": 0}
 
-        # ========== 1. 计算环比（周期对比） ==========
-        # 当前周期：最后 period_days 天
+        # ========== 1. 解析日期数据 ==========
+        dated_values = []
+        for row in data:
+            if ('date' in row or 'time' in row) and 'value' in row:
+                date_val = row.get('date') or row.get('time')
+                val = row.get('value', 0)
+                try:
+                    from datetime import datetime
+                    # 尝试多种日期格式
+                    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
+                        try:
+                            d = datetime.strptime(str(date_val), fmt)
+                            dated_values.append((d, val))
+                            break
+                        except:
+                            continue
+                except:
+                    continue
+
+        # 按日期排序
+        if dated_values:
+            dated_values.sort(key=lambda x: x[0])
+
+        # ========== 2. 计算当前周期和上期周期（参考SQL逻辑） ==========
         if len(values) >= period_days:
             current = sum(values[-period_days:])
         else:
             current = sum(values)
 
-        # 上期周期：再往前 period_days 天
         if len(values) >= period_days * 2:
             prev = sum(values[-period_days*2:-period_days])
         elif len(values) > period_days:
@@ -103,80 +124,51 @@ class VolatilityAnalyzer:
         else:
             prev = 0
 
-        # 环比变化率
         mom = (current - prev) / prev if prev != 0 else 0
 
-        # ========== 2. 计算同比（优化版：支持多种模式） ==========
+        # ========== 3. 计算YoY（参考sql_generator._build_mom_sql的逻辑） ==========
         yoy = 0
-
-        # 尝试从数据中提取日期
-        dated_values = []
-        for row in data:
-            if ('date' in row or 'time' in row) and 'value' in row:
-                date_val = row.get('date') or row.get('time')
-                val = row.get('value', 0)
-                dated_values.append((date_val, val))
-
-        if dated_values and yoy_mode != "week":
-            # 有日期数据，尝试智能对齐
+        if dated_values and len(dated_values) >= 2:
             try:
                 from datetime import datetime, timedelta
+                import calendar
 
-                # 按日期排序
-                dated_values.sort(key=lambda x: str(x[0]))
+                current_end = dated_values[-1][0]
+                current_start = dated_values[0][0]
+                day_count = (current_end - current_start).days + 1
 
-                # 解析日期
-                parsed_dates = []
-                for date_str, val in dated_values:
-                    try:
-                        # 尝试多种日期格式
-                        for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
-                            try:
-                                d = datetime.strptime(str(date_str), fmt)
-                                parsed_dates.append((d, val))
-                                break
-                            except:
-                                continue
-                    except:
-                        continue
+                if yoy_mode == "year" or (yoy_mode == "auto"):
+                    # YoY：去年同期（参考SQL：current_date.replace(year=current_date.year - 1)）
+                    prev_year_start = current_start.replace(year=current_start.year - 1)
+                    prev_year_end = current_end.replace(year=current_end.year - 1)
+                    yoy_sum = sum(val for d, val in dated_values if prev_year_start <= d <= prev_year_end)
+                    if yoy_sum > 0:
+                        yoy = (current - yoy_sum) / yoy_sum
+                        logger.info(f"[calculate_basic_stats] YoY: current={current}, prev_year={yoy_sum}, yoy={yoy*100:.1f}%")
 
-                if len(parsed_dates) >= 2:
-                    # 获取当前周期的日期范围
-                    current_end = parsed_dates[-1][0]
-                    current_start = current_end - timedelta(days=period_days - 1)
+                elif yoy_mode == "month":
+                    # MoM：上月同期（参考SQL：用calendar.monthrange保持相同天数）
+                    prev_month_start = current_start - timedelta(days=1)
+                    prev_month_start = prev_month_start.replace(day=1)
+                    prev_month_max_day = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
+                    prev_end_day = min(day_count, prev_month_max_day)
+                    prev_month_end = prev_month_start.replace(day=prev_end_day)
+                    mom_sum = sum(val for d, val in dated_values if prev_month_start <= d <= prev_month_end)
+                    if mom_sum > 0:
+                        yoy = (current - mom_sum) / mom_sum
+                        logger.info(f"[calculate_basic_stats] MoM: current={current}, prev_month={mom_sum}, mom={yoy*100:.1f}%")
 
-                    # 根据模式计算对比日期
-                    if yoy_mode == "year" or (yoy_mode == "auto" and period_days >= 30):
-                        # 年对齐：去年同期
-                        compare_start = current_start.replace(year=current_start.year - 1)
-                        compare_end = current_end.replace(year=current_end.year - 1)
-                    elif yoy_mode == "month" or (yoy_mode == "auto" and period_days >= 7):
-                        # 月对齐：上月同期
-                        compare_start = current_start - timedelta(days=30)
-                        compare_end = current_end - timedelta(days=30)
-                    else:
-                        # 周对齐：上周同期
-                        compare_start = current_start - timedelta(days=7)
-                        compare_end = current_end - timedelta(days=7)
-
-                    # 计算当前周期和对比周期的总和
-                    current_sum = sum(val for d, val in parsed_dates if current_start <= d <= current_end)
-                    compare_sum = sum(val for d, val in parsed_dates if compare_start <= d <= compare_end)
-
-                    if compare_sum != 0:
-                        yoy = (current_sum - compare_sum) / compare_sum
-                        logger.info(f"[calculate_basic_stats] YoY日期对齐: 当前({current_start.date()}~{current_end.date()})={current_sum}, 对比({compare_start.date()}~{compare_end.date()})={compare_sum}, YoY={yoy*100:.1f}%")
+                elif yoy_mode == "week":
+                    # 周对齐：上周同期
+                    week_start = current_start - timedelta(days=7)
+                    week_end = current_end - timedelta(days=7)
+                    week_sum = sum(val for d, val in dated_values if week_start <= d <= week_end)
+                    if week_sum > 0:
+                        yoy = (current - week_sum) / week_sum
+                        logger.info(f"[calculate_basic_stats] WoW: current={current}, prev_week={week_sum}, wow={yoy*100:.1f}%")
 
             except Exception as e:
-                logger.warning(f"[calculate_basic_stats] 日期对齐YoY计算失败，回退到周期对齐: {e}")
-
-        # 如果日期对齐失败或没有日期数据，使用原始周期对齐逻辑
-        if yoy == 0 and len(values) >= period_days * 2:
-            current_period = values[-period_days:]
-            prev_year_period = values[-period_days*2:-period_days]
-            prev_sum = sum(prev_year_period)
-            if prev_sum != 0:
-                yoy = (sum(current_period) - prev_sum) / prev_sum
+                logger.warning(f"[calculate_basic_stats] YoY/MoM计算失败: {e}")
 
         # ========== 3. 计算其他统计指标 ==========
         avg = sum(values) / len(values) if values else 0
