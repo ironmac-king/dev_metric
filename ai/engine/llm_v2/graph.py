@@ -814,21 +814,12 @@ async def trigger_analyzer(state: V2State) -> V2State:
         logger.info(f"[trigger_analyzer] result_dict: mom_change={result_dict['mom_change']}, yoy_change={result_dict['yoy_change']}, current_value={result_dict['current_value']}")
 
         # 如果有 YoY 数据但没有 MoM 数据，自动查环比（上一期）
-        # 条件：calculation_patterns 包含 mom（用户明确要环比）但 SQL 没有返回
-        def _has_mom_pattern(mql) -> bool:
-            if not mql or not mql.calculation_patterns:
-                return False
-            for p in mql.calculation_patterns:
-                v = p.value if hasattr(p, 'value') else str(p)
-                if v == "mom":
-                    return True
-            return False
-
+        # 条件：用户明确要环比（mql.has_mom）但 SQL 没有返回
         if (result_dict["mom_change"] is None
-                and result_dict["current_value"] > 0 and _has_mom_pattern(state.mql)):
+                and result_dict["current_value"] > 0 and (state.mql.has_mom if state.mql else False)):
             logger.info(f"[trigger_analyzer] 自动计算MoM: current={result_dict['current_value']}")
         else:
-            logger.info(f"[trigger_analyzer] 不计算MoM: yoy_change={result_dict['yoy_change']}, mom_change={result_dict['mom_change']}, current={result_dict['current_value']}, _has_mom_pattern={_has_mom_pattern(state.mql) if state.mql else 'mql is None'}")
+            logger.info(f"[trigger_analyzer] 不计算MoM: yoy_change={result_dict['yoy_change']}, mom_change={result_dict['mom_change']}, current={result_dict['current_value']}, has_mom={state.mql.has_mom if state.mql else 'mql is None'}")
             try:
                 prev_start, prev_end = _calc_previous_period(state.mql)
                 logger.info(f"[trigger_analyzer] _calc_previous_period: prev_start={prev_start}, prev_end={prev_end}")

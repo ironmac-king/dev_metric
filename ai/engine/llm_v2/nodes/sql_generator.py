@@ -231,30 +231,9 @@ class SQLGeneratorNode:
             return self._build_cross_metric_sql(mql)
 
         # MoM/YOY 对比：生成双时间段 SQL
-        # 先检查 comparison.types（intent_router 会独立设置这个）
-        has_mom = False
-        has_yoy = False
-        if mql.comparison and mql.comparison.types:
-            has_mom = "环比" in mql.comparison.types
-            has_yoy = "同比" in mql.comparison.types
-            logger.info(f"[_build_sql] 从 comparison.types 检测: has_mom={has_mom}, has_yoy={has_yoy}")
-
-        # 再检查 calculation_patterns
-        if mql.calculation_patterns:
-            from ..schema import CalculationPattern
-            def _is_mom(p):
-                if isinstance(p, CalculationPattern):
-                    return p == CalculationPattern.MOM or p.value == "mom"
-                return str(p).lower() == "mom"
-            def _is_yoy(p):
-                if isinstance(p, CalculationPattern):
-                    return p == CalculationPattern.YOY or p.value == "yoy"
-                return str(p).lower() == "yoy"
-            has_mom = has_mom or any(_is_mom(p) for p in mql.calculation_patterns)
-            has_yoy = has_yoy or any(_is_yoy(p) for p in mql.calculation_patterns)
-
-        if has_mom or has_yoy:
-            logger.info(f"[_build_sql] 进入 YoY/MoM 模式: has_mom={has_mom}, has_yoy={has_yoy}")
+        # 使用 MQLSchema 的 has_mom/has_yoy 属性统一判断
+        if mql.has_mom or mql.has_yoy:
+            logger.info(f"[_build_sql] 进入 YoY/MoM 模式: has_mom={mql.has_mom}, has_yoy={mql.has_yoy}")
             return self._build_mom_sql(mql)
 
         # 1. 确定表名
