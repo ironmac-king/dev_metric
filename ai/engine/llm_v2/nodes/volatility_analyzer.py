@@ -210,7 +210,12 @@ class VolatilityAnalyzer:
         if len(values) < 4:
             return {"is_anomaly": False, "anomaly_level": "normal", "anomaly_values": []}
 
-        sorted_vals = sorted(values)
+        # 过滤掉0值（可能是未完成的当天数据）
+        non_zero_values = [v for v in values if v > 0]
+        if len(non_zero_values) < 4:
+            return {"is_anomaly": False, "anomaly_level": "normal", "anomaly_values": []}
+
+        sorted_vals = sorted(non_zero_values)
         n = len(sorted_vals)
 
         # Q1, Q3
@@ -224,12 +229,12 @@ class VolatilityAnalyzer:
         lower = q1 - 1.5 * iqr
         upper = q3 + 1.5 * iqr
 
-        # 异常值
-        anomaly_values = [v for v in values if v < lower or v > upper]
+        # 异常值（用过滤后的数据）
+        anomaly_values = [v for v in non_zero_values if v < lower or v > upper]
 
-        # 计算波动率
-        current = values[-1] if values else 0
-        avg = sum(values) / len(values) if values else 0
+        # 计算波动率（用最后一个非0值）
+        current = non_zero_values[-1] if non_zero_values else 0
+        avg = sum(non_zero_values) / len(non_zero_values) if non_zero_values else 0
         volatility_rate = abs(current - avg) / avg if avg != 0 else 0
 
         # ========== 修复 2：阈值可配置 ==========
