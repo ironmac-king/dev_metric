@@ -368,6 +368,113 @@ class VolatilityAnalyzer:
 
         return current_dim_data, prev_dim_data
 
+    async def _query_related_indicators(
+        self,
+        starrocks_sql: Optional[str],
+        dimension_filters: List[Dict[str, str]],
+        time_range: Optional[Dict[str, str]],
+        period_days: int,
+    ) -> Dict[str, Any]:
+        """
+        查询关联辅助指标（广告产出比/曝光量/销售单价等），用于增强 LLM 根因判断
+
+        Returns:
+            {
+                "current": [月度数],  # 当前期每月数据
+                "prev": [月度数],     # 上期每月数据
+            }
+        """
+        import re
+        from datetime import datetime, timedelta
+
+        if not starrocks_sql:
+            return {"current": [], "prev": []}
+
+        # 解析 starrocks_sql 获取表名
+        table_match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", starrocks_sql, re.IGNORECASE)
+        table_name = table_match.group(1) if table_match else "ids.IDS_AMZ_COMPREHENSIVE_DI"
+
+        # 解析时间范围
+        current_start, current_end = None, None
+        if time_range and time_range.get('start') and time_range.get('end'):
+            for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
+                try:
+                    current_start = datetime.strptime(time_range['start'], fmt)
+                    current_end = datetime.strptime(time_range['end'], fmt)
+                    break
+                except:
+                    continue
+
+        if not current_start or not current_end:
+            logger.warning(f"[_query_related_indicators] 无法解析 time_range: {time_range}")
+            return {"current": [], "prev": []}
+
+        day_count = (current_end - current_start).days + 1
+        prev_start = current_start - timedelta(days=day_count)
+        prev_end = current_end - timedelta(days=day_count)
+
+        # 构建维度过滤条件（去重）
+        dim_filter_clause = ""
+        if dimension_filters:
+            seen = set()
+            for f in dimension_filters:
+                col = f.get("column", "")
+                val = f.get("value", "")
+                key = f"{col}={val}"
+                if col and val and key not in seen:
+                    seen.add(key)
+                    dim_filter_clause += f" AND {col} = '{val}'"
+
+        related_sql = f"""
+SELECT
+    LEFT(FDATE, 7) AS 月份,
+    SKU,
+    SUM(INCOME_NBCSS) AS 销售额,
+    SUM(TOTALSALES)/NULLIF(SUM(SPEND),0) AS 广告产出比,
+    SUM(IMPRESSIONS) AS 曝光量,
+    SUM(ORDERED_PRODUCTSALES)/NULLIF(SUM(UNITS_ORDERED),0) AS 销售单价
+FROM {table_name}
+WHERE FDATE >= '{{}}' AND FDATE <= '{{}}'
+{dim_filter_clause}
+GROUP BY LEFT(FDATE, 7), SKU
+ORDER BY 月份, SKU
+""".strip()
+
+        async def query_indicators(sql: str) -> List[Dict]:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        "http://localhost:8080/api/v1/query/execute",
+                        json={"sql": sql, "timeout": 30},
+                    )
+                    data = resp.json()
+                    if data.get("code") == 0 and data.get("data"):
+                        inner = data["data"]
+                        rows = inner.get("data") if isinstance(inner, dict) else inner
+                        return rows if rows else []
+            except Exception as e:
+                logger.warning(f"[_query_related_indicators] 查询失败: {e}")
+            return []
+
+        # 查询当期和上期
+        current_sql = related_sql.format(
+            current_start.strftime('%Y-%m-%d'),
+            current_end.strftime('%Y-%m-%d')
+        )
+        prev_sql = related_sql.format(
+            prev_start.strftime('%Y-%m-%d'),
+            prev_end.strftime('%Y-%m-%d')
+        )
+
+        logger.info(f"[_query_related_indicators] 查询当期: {current_sql[:200]}")
+        logger.info(f"[_query_related_indicators] 查询上期: {prev_sql[:200]}")
+
+        current_data = await query_indicators(current_sql)
+        prev_data = await query_indicators(prev_sql)
+
+        return {"current": current_data, "prev": prev_data}
+
     def detect_anomaly_iqr(
         self,
         values: List[float],
@@ -615,47 +722,176 @@ class VolatilityAnalyzer:
         self,
         stats: Dict[str, float],
         dims: Dict[str, List[Dict]],
-        metric_name: str
+        metric_name: str,
+        data: List[Dict] = None,
+        related_indicators: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
-        LLM 根因分析
+        LLM 根因分析（增强版：含每月趋势 + 更多驱动因素 + 关联指标）
         """
-        # 构建 prompt
-        prompt = f"""指标：{metric_name}
-当前周期值：{stats.get('current', 0):.2f}
-上期周期值：{stats.get('prev', 0):.2f}
-平均值：{stats.get('avg', 0):.2f}
-环比变化：{stats.get('mom', 0)*100:.1f}%
-同比变化：{stats.get('yoy', 0)*100:.1f}%
-波动率：{stats.get('cv', 0)*100:.1f}%
+        if data is None:
+            data = []
+        if related_indicators is None:
+            related_indicators = {"current": [], "prev": []}
 
-正向驱动因素：
-{chr(10).join([f"- {d['name']}: 贡献{d['contribution']:.1f}%" for d in dims.get('positive', [])]) if dims.get('positive') else '无'}
+        # ========== 构建每月趋势数据 ==========
 
-负向拖累因素：
-{chr(10).join([f"- {d['name']}: 拖累{abs(d['contribution']):.1f}%" for d in dims.get('negative', [])]) if dims.get('negative') else '无'}
+        # ========== 构建每月趋势数据 ==========
+        monthly_lines = []
+        for row in data:
+            date_val = row.get("date") or row.get("time") or ""
+            val = row.get("value", 0)
+            if date_val and val:
+                monthly_lines.append(f"- {date_val}: {val:,.0f}")
 
-请按以下结构输出分析结论：
-1. 指标概况（数值、环比、同比）
-2. 波动与异常判断
-3. 核心驱动维度（TOP3）
-4. 可能根因（从以下类别选择：业务活动/流量变化/结构变化/数据口径/系统异常）
-5. 结论与建议（简洁专业，可直接用于汇报）
+        monthly_block = "\n".join(monthly_lines) if monthly_lines else "无月度数据"
 
-输出格式：
-根因：[归类]
-置信度：[0-1之间的数值]
-建议：[一句话建议]"""
+        # ========== 构建驱动因素（含绝对值）==========
+        def format_driver(d: Dict, sign: str) -> str:
+            name = d.get("name", "未知")
+            val = d.get("value", 0)
+            prev = d.get("prev_value", 0)
+            change = d.get("change", 0)
+            pct = d.get("change_pct")
+            contrib = d.get("contribution", 0)
+            pct_str = f"{pct:+.1f}%" if pct else "N/A"
+            prev_str = f"{prev:,.0f}" if prev else "0"
+            return f"- {name}: 当期{val:,.0f} | 上期{prev_str} | 变化{pct_str} | 贡献{sign}{abs(contrib):.1f}%"
+
+        pos_lines = [format_driver(d, "+") for d in dims.get("positive", [])]
+        neg_lines = [format_driver(d, "-") for d in dims.get("negative", [])]
+
+        # ========== 构建关联指标区块（每一行明细都传给 LLM）==========
+        related_block = "无关联数据"
+        current_ind = related_indicators.get("current", [])
+        prev_ind = related_indicators.get("prev", [])
+        if current_ind:
+            def to_float(val):
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return None
+
+            # 按 (月份, SKU) 建立索引
+            prev_index = {}
+            for row in prev_ind:
+                key = (str(row.get("月份", "")), str(row.get("SKU", "")))
+                prev_index[key] = row
+
+            # 按周期内月份排序（2026-01, 2026-02... 对应 2025-09, 2025-10...）
+            # 注意：当期 2026-01 对应上期 2025-09（同一周期的第1个月）
+            curr_months_sorted = sorted(set(str(r.get("月份", "")) for r in current_ind))
+            prev_months_sorted = sorted(set(str(r.get("月份", "")) for r in prev_ind))
+
+            # 月份位置映射：当期第N个月 → 上期第N个月
+            month_pos_map = {}
+            for i, curr_m in enumerate(curr_months_sorted):
+                prev_m = prev_months_sorted[i] if i < len(prev_months_sorted) else None
+                month_pos_map[curr_m] = prev_m
+
+            # 生成对比文本，每一行都给到 LLM
+            related_lines = []
+            for row in current_ind:
+                month = str(row.get("月份", ""))
+                sku = str(row.get("SKU", ""))
+                c_sales = to_float(row.get("销售额"))
+                c_roas = to_float(row.get("广告产出比"))
+                c_imp = to_float(row.get("曝光量"))
+                c_price = to_float(row.get("销售单价"))
+
+                # 用位置映射找上期月份
+                prev_month = month_pos_map.get(month)
+                p_row = prev_index.get((prev_month, sku), {}) if prev_month else {}
+                p_sales = to_float(p_row.get("销售额")) if p_row else None
+                p_roas = to_float(p_row.get("广告产出比")) if p_row else None
+                p_imp = to_float(p_row.get("曝光量")) if p_row else None
+                p_price = to_float(p_row.get("销售单价")) if p_row else None
+
+                def fmt_val(val, fmt=".0f"):
+                    if val is None:
+                        return "N/A"
+                    try:
+                        v = float(val)
+                        if abs(v) > 100:
+                            return f"{v:,.0f}"
+                        return f"{v:{fmt}}"
+                    except (TypeError, ValueError):
+                        return "N/A"
+
+                def fmt_chg_cur(c, p):
+                    if c is None or p is None or p == 0:
+                        return "N/A"
+                    return f"{(c-p)/p*100:+.1f}%"
+
+                # 用上期月份显示，没有则标 N/A
+                period_label = f"{month}"
+                if prev_month and prev_month != month:
+                    period_label = f"{month}(vs {prev_month})"
+
+                line = (
+                    f"- {period_label} {sku}: "
+                    f"销售额={fmt_val(c_sales)}"
+                    f"(上期{fmt_val(p_sales)} {fmt_chg_cur(c_sales, p_sales)}) | "
+                    f"广告产出比={fmt_val(c_roas, '.2f')}"
+                    f"(上期{fmt_val(p_roas, '.2f')} {fmt_chg_cur(c_roas, p_roas)}) | "
+                    f"曝光量={fmt_val(c_imp)}"
+                    f"(上期{fmt_val(p_imp)} {fmt_chg_cur(c_imp, p_imp)}) | "
+                    f"销售单价={fmt_val(c_price, '.1f')}"
+                    f"(上期{fmt_val(p_price, '.1f')} {fmt_chg_cur(c_price, p_price)})"
+                )
+                related_lines.append(line)
+
+            related_block = "\n".join(related_lines) if related_lines else "无关联数据"
+
+        # ========== 构建 prompt ==========
+        prompt = f"""你是指标波动分析专家，请根据以下真实数据给出深入分析。
+
+## 指标概况
+- 指标名称：{metric_name}
+- 当期合计：{stats.get('current', 0):,.0f}
+- 上期合计：{stats.get('prev', 0):,.0f}
+- 平均值：{stats.get('avg', 0):,.0f}
+- 环比（MoM）：{stats.get('mom', 0)*100:+.1f}%
+- 同比（YoY）：{stats.get('yoy', 0)*100:+.1f}%
+- 波动率（CV）：{stats.get('cv', 0)*100:.1f}%
+
+## 每月趋势（当期）
+{monthly_block}
+
+## 核心驱动因素（按贡献排序）
+正向驱动（贡献最大）:
+{chr(10).join(pos_lines) if pos_lines else '无'}
+
+负向拖累（拖累最大）:
+{chr(10).join(neg_lines) if neg_lines else '无'}
+
+## 关联指标（同期对比）
+{related_block}
+
+## 分析要求
+请深度分析：
+1. 结合每月趋势和驱动因素，找出波动的关键原因
+2. 判断是业务活动、流量变化、结构变化、数据口径还是系统异常
+3. 给出一句最有价值的洞察
+
+## 输出格式（必须严格JSON）
+{{
+  "confidence": 0.0-1.0之间的置信度数值,
+  "suggestion": "给出2-3条具体可执行的建议，每条格式为：1.【标题】具体描述，标题要简洁概括问题类型（如：核心SKU断崖复盘/新SKU效率优化/数据异常监控），描述要指明具体问题来源（具体SKU或具体指标）",
+  "summary": "3-5句话的深度分析摘要，结合具体数字说明问题根源",
+  "key_insight": "一句话核心洞察"
+}}"""
+
+        logger.info(f"[llm_root_cause_analysis] prompt内容:\n{prompt[:3000]}")
 
         try:
             response = await self._llm_engine.generate(
                 prompt=prompt,
                 system_prompt=VOLATILITY_SYSTEM_PROMPT,
                 temperature=0.3,
-                max_tokens=500
+                max_tokens=1200
             )
 
-            # 简单解析 LLM 输出
             result = self._parse_llm_response(response)
             return result
 
@@ -667,39 +903,73 @@ class VolatilityAnalyzer:
             return {
                 "root_cause": "分析失败",
                 "confidence": 0.0,
-                "suggestion": f"LLM服务异常: {type(e).__name__}"
+                "suggestion": f"LLM服务异常: {type(e).__name__}",
+                "summary": "",
+                "key_insight": ""
             }
 
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
-        """解析 LLM 响应（修复版：支持中英文冒号）"""
-        lines = response.strip().split('\n')
+        """解析 LLM 响应：优先 JSON 解析，fallback 到行解析，同时清洗 markdown 标记"""
+        # 清洗 markdown 标记
+        cleaned = response.replace("**", "").replace("*", "").strip()
+
+        # 优先尝试 JSON 解析
+        try:
+            import json, re
+            # 提取第一个 {...} 块
+            json_match = re.search(r'\{[\s\S]*\}', cleaned)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                return {
+                    "root_cause": str(parsed.get("root_cause", "待分析")).strip(),
+                    "confidence": float(parsed.get("confidence", 0.5)),
+                    "suggestion": str(parsed.get("suggestion", "建议持续关注数据变化")).strip(),
+                    "summary": str(parsed.get("summary", "")).strip(),
+                    "key_insight": str(parsed.get("key_insight", "")).strip(),
+                }
+        except Exception:
+            pass
+
+        # Fallback：按行解析
+        lines = cleaned.split('\n')
         root_cause = "待分析"
         confidence = 0.5
         suggestion = "建议持续关注数据变化"
+        summary = ""
+        key_insight = ""
 
         for line in lines:
             line = line.strip()
-            # 支持中文冒号和英文冒号
-            if "根因" in line:
+            if "root_cause" in line.lower() or "根因" in line:
                 parts = line.split("：", 1) if "：" in line else line.split(":", 1)
                 if len(parts) > 1:
-                    root_cause = parts[1].strip()
-            elif "置信度" in line:
+                    root_cause = parts[1].strip().replace("**", "")
+            elif "confidence" in line.lower() or "置信度" in line:
                 parts = line.split("：", 1) if "：" in line else line.split(":", 1)
                 if len(parts) > 1:
                     try:
                         confidence = float(parts[1].strip())
                     except:
                         confidence = 0.5
-            elif "建议" in line:
+            elif "suggestion" in line.lower() or "建议" in line:
                 parts = line.split("：", 1) if "：" in line else line.split(":", 1)
                 if len(parts) > 1:
-                    suggestion = parts[1].strip()
+                    suggestion = parts[1].strip().replace("**", "")
+            elif "summary" in line.lower() or "摘要" in line:
+                parts = line.split("：", 1) if "：" in line else line.split(":", 1)
+                if len(parts) > 1:
+                    summary = parts[1].strip().replace("**", "")
+            elif "key_insight" in line.lower() or "洞察" in line:
+                parts = line.split("：", 1) if "：" in line else line.split(":", 1)
+                if len(parts) > 1:
+                    key_insight = parts[1].strip().replace("**", "")
 
         return {
             "root_cause": root_cause,
             "confidence": confidence,
-            "suggestion": suggestion
+            "suggestion": suggestion,
+            "summary": summary,
+            "key_insight": key_insight
         }
 
     def _detect_data_type(self, data: List[Dict]) -> str:
@@ -863,14 +1133,15 @@ class VolatilityAnalyzer:
 
         llm_result = await self.llm_root_cause_analysis_category(stats, dims, metric_name, len(data))
 
-        # Step 5: 根因归类
+        # Step 5: 根因归类（不再展示 root_cause，只展示置信度和详细建议）
         yield StreamEvent(
             event=SSSEvent.STEP_COMPLETE,
             data={
                 "type": "volatility_root",
-                "root_cause": llm_result['root_cause'],
-                "confidence": llm_result['confidence'],
-                "suggestion": llm_result['suggestion']
+                "confidence": llm_result.get('confidence', 0),
+                "suggestion": llm_result.get('suggestion', ''),
+                "summary": llm_result.get('summary', ''),
+                "key_insight": llm_result.get('key_insight', '')
             }
         )
 
@@ -986,16 +1257,24 @@ class VolatilityAnalyzer:
             }
         )
 
-        llm_result = await self.llm_root_cause_analysis(stats, dims, metric_name)
+        # 查询关联指标（广告产出比/曝光量/销售单价等）
+        related_indicators = await self._query_related_indicators(
+            starrocks_sql, dimension_filters, time_range, period_days
+        )
 
-        # Step 5: 根因归类
+        llm_result = await self.llm_root_cause_analysis(
+            stats, dims, metric_name, data=data, related_indicators=related_indicators
+        )
+
+        # Step 5: 根因归类（不再展示 root_cause，只展示置信度和详细建议）
         yield StreamEvent(
             event=SSSEvent.STEP_COMPLETE,
             data={
                 "type": "volatility_root",
-                "root_cause": llm_result['root_cause'],
-                "confidence": llm_result['confidence'],
-                "suggestion": llm_result['suggestion']
+                "confidence": llm_result.get('confidence', 0),
+                "suggestion": llm_result.get('suggestion', ''),
+                "summary": llm_result.get('summary', ''),
+                "key_insight": llm_result.get('key_insight', '')
             }
         )
 
@@ -1015,33 +1294,57 @@ class VolatilityAnalyzer:
         category_count: int
     ) -> Dict[str, Any]:
         """
-        分类数据的 LLM 根因分析
+        分类数据的 LLM 根因分析（增强版）
         """
-        prompt = f"""指标：{metric_name}
-数据类型：品类分布分析（共 {category_count} 个品类）
-总销售额：{stats.get('current', 0):.2f}
-平均品类销售额：{stats.get('avg', 0):.2f}
+        # 构建驱动因素详情
+        def format_driver(d: Dict) -> str:
+            name = d.get("name", "未知")
+            val = d.get("value", 0)
+            prev = d.get("prev_value", 0)
+            pct = d.get("change_pct")
+            contrib = d.get("contribution", 0)
+            pct_str = f"{pct:+.1f}%" if pct else "N/A"
+            prev_str = f"{prev:,.0f}" if prev else "0"
+            return f"- {name}: 当期{val:,.0f} | 上期{prev_str} | 变化{pct_str} | 贡献{abs(contrib):.1f}%"
 
-TOP3 核心品类（贡献度最高）：
-{chr(10).join([f"- {d['name']}: 销售额{d['value']:.2f}，占比{d['contribution']:.1f}%" for d in dims.get('positive', [])]) if dims.get('positive') else '无'}
+        pos_lines = [format_driver(d) for d in dims.get("positive", [])]
+        neg_lines = [format_driver(d) for d in dims.get("negative", [])]
 
-请按以下结构输出分析结论：
-1. 品类概况（总数、最大品类、占比）
-2. 核心品类贡献
-3. 可能原因（结构变化/品类偏好/季节性等）
-4. 结论与建议
+        prompt = f"""你是指标波动分析专家，请根据以下真实数据给出深入分析。
 
-输出格式：
-根因：[归类]
-置信度：[0-1之间的数值]
-建议：[一句话建议]"""
+## 指标概况
+- 指标名称：{metric_name}
+- 数据类型：品类分布分析（共 {category_count} 个品类）
+- 总计：{stats.get('current', 0):,.0f}
+- 平均值：{stats.get('avg', 0):,.0f}
+
+## 核心品类（按贡献排序）
+正向驱动（贡献最大）:
+{chr(10).join(pos_lines) if pos_lines else '无'}
+
+负向拖累（拖累最大）:
+{chr(10).join(neg_lines) if neg_lines else '无'}
+
+## 分析要求
+请深度分析：
+1. 结合品类结构和贡献因素，找出关键原因
+2. 判断是业务活动、流量变化、结构变化、数据口径还是系统异常
+3. 给出一句最有价值的洞察
+
+## 输出格式（必须严格JSON）
+{{
+  "confidence": 0.0-1.0之间的置信度数值,
+  "suggestion": "给出2-3条具体可执行的建议，每条格式为：1.【标题】具体描述，标题要简洁概括问题类型（如：核心SKU断崖复盘/新SKU效率优化/数据异常监控），描述要指明具体问题来源（具体SKU或具体指标）",
+  "summary": "3-5句话的深度分析摘要，结合具体数字说明问题根源",
+  "key_insight": "一句话核心洞察"
+}}"""
 
         try:
             response = await self._llm_engine.generate(
                 prompt=prompt,
                 system_prompt=VOLATILITY_SYSTEM_PROMPT,
                 temperature=0.3,
-                max_tokens=500
+                max_tokens=1200
             )
 
             result = self._parse_llm_response(response)

@@ -2,7 +2,7 @@
   <el-drawer
     v-model="visible"
     :direction="isMobile ? 'btt' : 'rtl'"
-    :size="isMobile ? '100%' : '480'"
+    :size="isMobile ? '100%' : '580'"
     :show-close="false"
     class="volatility-panel"
     :class="{ 'mobile-panel': isMobile }"
@@ -173,22 +173,18 @@
           <div v-if="state.llmThinking" class="thinking-stream">
             <div class="thinking-text">{{ state.llmThinking }}</div>
           </div>
-          <div v-if="state.rootCause" class="root-cause-card">
-            <div class="cause-label">根因归类</div>
-            <div class="cause-value">{{ state.rootCause }}</div>
-            <div class="confidence-bar">
-              <div class="confidence-label">置信度</div>
-              <div class="confidence-value">{{ (state.confidence * 100).toFixed(0) }}%</div>
-              <div class="confidence-track">
-                <div class="confidence-fill" :style="{ width: (state.confidence * 100) + '%' }"></div>
-              </div>
+          <div v-if="state.suggestion && state.confidence > 0" class="confidence-bar">
+            <div class="confidence-label">置信度</div>
+            <div class="confidence-value">{{ (state.confidence * 100).toFixed(0) }}%</div>
+            <div class="confidence-track">
+              <div class="confidence-fill" :style="{ width: (state.confidence * 100) + '%' }"></div>
             </div>
           </div>
           <div v-if="state.suggestion" class="suggestion-card">
             <div class="suggestion-label">分析建议</div>
             <div class="suggestion-text">{{ state.suggestion }}</div>
           </div>
-          <div v-if="!state.rootCause && !state.llmThinking" class="reasoning-loading">
+          <div v-if="!state.suggestion && !state.llmThinking" class="reasoning-loading">
             <div class="loading-dots">
               <span></span><span></span><span></span>
             </div>
@@ -262,7 +258,7 @@ const phaseStatus = computed(() => ({
   overview: state.value.overview ? 'done' : 'loading',
   chart: state.value.chartData.length > 0 ? 'done' : (state.value.overview ? 'loading' : 'pending'),
   drivers: (state.value.positiveDims.length > 0 || state.value.negativeDims.length > 0) ? 'done' : (state.value.chartData.length > 0 ? 'loading' : 'pending'),
-  reasoning: state.value.rootCause ? 'done' : (state.value.llmThinking ? 'loading' : 'pending')
+  reasoning: state.value.suggestion ? 'done' : (state.value.llmThinking ? 'loading' : 'pending')
 }))
 
 const eventSource = ref(null)
@@ -983,7 +979,8 @@ defineExpose({
 .suggestion-text {
   font-size: 14px;
   color: #374151;
-  line-height: 1.5;
+  line-height: 1.6;
+  white-space: pre-line;
 }
 
 .reasoning-loading {
