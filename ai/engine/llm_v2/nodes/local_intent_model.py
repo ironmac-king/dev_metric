@@ -63,6 +63,8 @@ TIME_EXPRESSIONS = [
 # ============== SKU 格式 ==============
 
 SKU_PATTERN = re.compile(r'\w+-\d+')
+# ASIN: Amazon Standard Identification Number, 10位字母数字, 通常以B0开头
+ASIN_PATTERN = re.compile(r'(?<![A-Z0-9])[A-Z0-9]{10}(?![A-Z0-9])', re.IGNORECASE)
 
 
 class JointBERTModel(torch.nn.Module):
@@ -101,10 +103,12 @@ class LocalJointIntentModel:
     使用本地模型做意图识别 + NER，匹配成功则跳过 LLM。
     """
 
-    # 置信度阈值
-    CONFIDENCE_THRESHOLD = 0.85
+    # 置信度阈值（降低到0.5，让中等置信度的预测也能通过，走本地模型结果）
+    # 注意：本地模型预测 intent=query_value + METRIC实体已经足够可靠
+    # 之前 0.85 过高，导致几乎所有 query 都走 LLM fallback，而 LLM fallback 经常失败
+    CONFIDENCE_THRESHOLD = 0.5
 
-    def __init__(self, model_path: str = "D:/py/test/intent_trainer/best_model/joint"):
+    def __init__(self, model_path: str = "D:/py/test/intent_trainer/best_model/joint_v2"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"[LocalJointIntentModel] 使用设备: {self.device}")
 
@@ -351,11 +355,27 @@ class LocalJointIntentModel:
                 })
 
         # 规则补充：提取 SKU
-        text = self.tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)
-        for match in SKU_PATTERN.finditer(text):
+        for match in SKU_PATTERN.finditer(original_text):
             entities.append({
                 'text': match.group(),
                 'type': 'SKU_VALUE',
+                'start': match.start(),
+                'end': match.end()
+            })
+
+        # 规则补充：提取 ASIN (10位字母数字, 通常B0开头)
+        # 直接用原始 question 匹配，避免 tokenizer decode 改变大小写
+        for match in ASIN_PATTERN.finditer(original_text):
+            asin_val = match.group().upper()
+            # 跳过纯数字的（避免匹配时间等）
+            if asin_val.isdigit():
+                continue
+            # 跳过已识别为SKU的
+            if any(e['text'] == asin_val and e['type'] == 'SKU_VALUE' for e in entities):
+                continue
+            entities.append({
+                'text': asin_val,
+                'type': 'ASIN_VALUE',
                 'start': match.start(),
                 'end': match.end()
             })
@@ -557,7 +577,7 @@ class LocalJointIntentModel:
         all_entities.sort(key=lambda x: (x['start'], -x['end']))
 
         # 去重 + 类型优先级：DIM > METRIC > DIM_VALUE > TIME > PLATFORM > FULFILL
-        type_priority = {'DIM': 0, 'METRIC': 2, 'DIM_VALUE': 1, 'TIME': 3, 'PLATFORM': 4, 'FULFILL': 5, 'SKU_VALUE': 6}
+        type_priority = {'DIM': 0, 'METRIC': 2, 'DIM_VALUE': 1, 'TIME': 3, 'PLATFORM': 4, 'FULFILL': 5, 'SKU_VALUE': 6, 'ASIN_VALUE': 7}
         seen = set()
         final = []
         for e in all_entities:
@@ -598,7 +618,7 @@ def get_local_intent_model(model_path: str = None) -> LocalJointIntentModel:
     if _instance is None:
         if model_path is None:
             # 从配置读取
-            model_path = "D:/py/test/intent_trainer/best_model/joint"
+            model_path = "D:/py/test/intent_trainer/best_model/joint_v2"
         _instance = LocalJointIntentModel(model_path=model_path)
 
     return _instance

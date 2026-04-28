@@ -31,6 +31,24 @@ class ResultAnalyzer:
             return mql.time.original
         return "本月"
 
+    def _get_dim_label_from_service(self) -> Dict[str, str]:
+        """从 DimensionService 获取用户友好的维度名称映射"""
+        try:
+            from ai.services.dimension_service import DimensionService
+            svc = DimensionService()
+            options = svc.get_ranking_options()
+            result = {}
+            for opt in options:
+                col = opt.get("value", "")
+                label = opt.get("label", "")
+                if label.startswith("按"):
+                    label = label[1:]
+                if col and label:
+                    result[col.upper()] = label
+            return result
+        except Exception:
+            return {}
+
     async def analyze(
         self,
         mql: MQLSchema,
@@ -230,11 +248,50 @@ class ResultAnalyzer:
         if len(data) > 5:
             answer += f"\n... 还有 {len(data) - 5} 条数据"
 
+        # 生成带维度上下文的建议
+        time_context = self._get_time_context(mql)
+        dim_label = ""
+        dim_context = ""
+
+        if mql.dimensions and len(mql.dimensions) > 0:
+            dim = mql.dimensions[0]
+            if dim.type:
+                # 用 DimensionService 把 column name 转为用户友好名称
+                col_upper = dim.type.upper()
+                label_map = self._get_dim_label_from_service()
+                dim_label = label_map.get(col_upper, dim.type)
+                # 如果 dim_label 已经是列名(如FSITE/GROUP_1)而不是中文，说明用户输入可能已带"各"前缀
+                # 这种情况 dim_context 不再加"各"
+                if dim_label.upper() == col_upper:
+                    dim_context = dim_label  # e.g., "FSITE"
+                else:
+                    dim_context = f"各{dim_label}" if dim_label else ""
+        else:
+            # 无维度，从 DimensionService 拿默认维度
+            try:
+                from ai.services.dimension_service import DimensionService
+                svc = DimensionService()
+                options = svc.get_ranking_options()
+                time_cols = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
+                for opt in options:
+                    col = opt.get("value", "")
+                    label = opt.get("label", "")
+                    if col.upper() not in time_cols:
+                        if label.startswith("按"):
+                            dim_label = label[1:]
+                        else:
+                            dim_label = label
+                        dim_context = f"各{dim_label}" if dim_label else ""
+                        break
+            except Exception:
+                dim_label = ""
+                dim_context = ""
+
         return {
             "answer": answer,
             "suggestions": [
-                f"查看{metric_name}排名前10",
-                f"按维度分析{metric_name}",
+                f"查看{time_context}{dim_context}{metric_name}排名前10",
+                f"按{dim_label}维度分析{metric_name}" if dim_label else f"按维度分析{metric_name}",
             ],
         }
 
@@ -497,11 +554,41 @@ class ResultAnalyzer:
             lines.append(f"{i}. " + " | ".join(parts))
 
         metric_name = mql.metric.name if mql.metric else "指标值"
+
+        # 决定建议问题中的维度上下文
+        dim_label = ""
+        if mql.dimensions and len(mql.dimensions) > 0:
+            # 有维度，用已有的
+            dim = mql.dimensions[0]
+            dim_label = f"各{dim.type}" if dim.type else "各维度"
+        else:
+            # 无维度，从 DimensionService 拿一个默认维度
+            try:
+                from ai.services.dimension_service import DimensionService
+                svc = DimensionService()
+                options = svc.get_ranking_options()
+                # 找第一个非时间维度的选项
+                time_cols = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
+                for opt in options:
+                    col = opt.get("value", "")
+                    label = opt.get("label", "")
+                    if col.upper() not in time_cols:
+                        # label 格式是 "按平台"，去掉"按"得到"平台"
+                        if label.startswith("按"):
+                            dim_label = label[1:]
+                        else:
+                            dim_label = label
+                        break
+            except Exception:
+                dim_label = "各维度"
+
+        dim_context = f"各{dim_label}" if dim_label else ""
+
         return {
             "answer": "\n".join(lines),
             "suggestions": [
-                f"查看更多{time_context}{metric_name}排名",
-                f"查看{time_context}{metric_name}占比分布",
+                f"查看更多{time_context}{dim_context}{metric_name}排名",
+                f"查看{time_context}{dim_context}{metric_name}占比分布",
             ],
         }
 
@@ -515,6 +602,38 @@ class ResultAnalyzer:
         data = sql_result.data
         metric_name = mql.metric.name if mql.metric else "指标值"
         time_context = self._get_time_context(mql)
+
+        # 计算维度上下文
+        dim_label = ""
+        dim_context = ""
+        if mql.dimensions and len(mql.dimensions) > 0:
+            dim = mql.dimensions[0]
+            if dim.type:
+                col_upper = dim.type.upper()
+                label_map = self._get_dim_label_from_service()
+                dim_label = label_map.get(col_upper, dim.type)
+                if dim_label.upper() == col_upper:
+                    dim_context = dim_label
+                else:
+                    dim_context = f"各{dim_label}" if dim_label else ""
+        else:
+            try:
+                from ai.services.dimension_service import DimensionService
+                svc = DimensionService()
+                options = svc.get_ranking_options()
+                time_cols = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
+                for opt in options:
+                    col = opt.get("value", "")
+                    label = opt.get("label", "")
+                    if col.upper() not in time_cols:
+                        if label.startswith("按"):
+                            dim_label = label[1:]
+                        else:
+                            dim_label = label
+                        dim_context = f"各{dim_label}" if dim_label else ""
+                        break
+            except Exception:
+                pass
 
         # 计算总体的各部分占比
         if not data:
@@ -550,8 +669,8 @@ class ResultAnalyzer:
         return {
             "answer": "\n".join(lines),
             "suggestions": [
-                f"查看{time_context}{metric_name}详细数据",
-                f"查看{time_context}{metric_name}趋势变化",
+                f"查看{time_context}{dim_context}{metric_name}详细数据",
+                f"查看{time_context}{dim_context}{metric_name}趋势变化",
             ],
         }
 

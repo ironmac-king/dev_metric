@@ -331,6 +331,9 @@ class SQLGeneratorNode:
         if not metric_a_sql:
             return f"SELECT 'ERROR: 主指标 {metric_a_name} 无 starrocks_sql' AS error"
 
+        # 3.5 检测是否为复合指标（ratio），如果是则不加 GROUP BY（避免嵌套聚合）
+        is_compound_a = 'CASE' in metric_a_sql.upper() and ('/' in metric_a_sql.upper())
+
         # 4. 获取指标 B（对比指标）的聚合表达式
         metric_b_name = mql.cross_metric.metric_name
         metric_b_info = self._metric_client.get_metric_by_name(metric_b_name)
@@ -343,6 +346,7 @@ class SQLGeneratorNode:
             field=metric_b_info.get("starrocks_field", ""),
         )
         metric_b_sql, metric_b_alias = self._extract_metric_expression(metric_b, "metric_b")
+        is_compound_b = 'CASE' in metric_b_sql.upper() and ('/' in metric_b_sql.upper())
 
         # 5. 比较运算符
         op = mql.cross_metric.operator
@@ -356,18 +360,21 @@ class SQLGeneratorNode:
         where_in_cte = where_cond if where_cond else "1=1"
         # SELECT 子句中维度列需要加表前缀 a.
         dim_select_a = ", ".join([f"a.{c}" for c in dim_columns])
+        # 如果是复合指标（已含聚合），CTE 不需要 GROUP BY；否则需要
+        group_a = "" if is_compound_a else f"GROUP BY {dim_group}"
+        group_b = "" if is_compound_b else f"GROUP BY {dim_group}"
         sql = f"""
 WITH metric_a AS (
     SELECT {dim_select}, {metric_a_sql} AS {metric_a_alias}
     FROM {self.DEFAULT_TABLE}
     WHERE {where_in_cte}
-    GROUP BY {dim_group}
+    {group_a}
 ),
 metric_b AS (
     SELECT {dim_select}, {metric_b_sql} AS {metric_b_alias}
     FROM {self.DEFAULT_TABLE}
     WHERE {where_in_cte}
-    GROUP BY {dim_group}
+    {group_b}
 )
 SELECT {dim_select_a}, a.{metric_a_alias} AS {metric_a_alias}, b.{metric_b_alias} AS {metric_b_alias}
 FROM metric_a a
@@ -508,6 +515,27 @@ LIMIT 20
         if not metric_field_sql:
             return f"SELECT 'ERROR: 指标无 starrocks_sql' AS error"
 
+        # 4.5 检测是否复合指标（包含除法，需要拆分子分母分别聚合）
+        is_compound_metric = '/' in metric_field_sql.upper() and metric_field_sql.strip().upper().startswith('CASE')
+        molecule_field = None  # 裸字段（不含 SUM），用于条件聚合内层
+        denominator_field = None
+        if is_compound_metric:
+            starrocks_sql = (mql.metric.starrocks_sql or "") if mql.metric else ""
+            if starrocks_sql:
+                molecule_expr, denominator_expr = self._extract_compound_parts(starrocks_sql)
+                if molecule_expr and denominator_expr:
+                    molecule_field = molecule_expr
+                    denominator_field = denominator_expr
+                    logger.info(f"[_build_mom_sql] 复合指标(CASE WHEN): 分子={molecule_field}, 分母={denominator_field}")
+                else:
+                    # 解析失败，降级为简单指标（用原始 CASE WHEN 做条件聚合）
+                    is_compound_metric = False
+                    logger.warning(f"[_build_mom_sql] 复合指标解析失败，降级为简单指标模式")
+            if not molecule_field:
+                is_compound_metric = False
+        else:
+            logger.info(f"[_build_mom_sql] 简单指标: metric_field_sql={metric_field_sql}")
+
         # 5. 构建 MoM SQL - 使用条件聚合避免 JOIN 问题
         # 关键：如果没有业务维度（dim_columns 为空），不按 MONTHS 分组，
         #      让两个月的数据直接聚合在一起计算 change_rate
@@ -601,17 +629,18 @@ LIMIT 20
             # 构建同时包含 MoM 和 YoY 的 SQL
             if has_mom_compare and has_yoy_compare:
                 # 同时有 MoM 和 YoY
+                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_chg = self._build_change_expr(current_cond, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_chg = self._build_change_expr(current_cond, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT {select_clause},
-       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
-       SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) AS "环比值",
-       CASE WHEN SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "环比变化",
-       SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) AS "同比值",
-       CASE WHEN SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "同比变化"
+       {curr_val} AS "当前值",
+       {mom_val} AS "环比值",
+       {mom_chg} AS "环比变化",
+       {yoy_val} AS "同比值",
+       {yoy_chg} AS "同比变化"
 FROM {self.DEFAULT_TABLE}
 WHERE ( {current_cond} )
    OR ( {where_mom} )
@@ -622,13 +651,14 @@ LIMIT 20
 """.strip()
             elif has_mom_compare:
                 # 只有 MoM
+                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_chg = self._build_change_expr(current_cond, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT {select_clause},
-       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
-       SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) AS "环比值",
-       CASE WHEN SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "环比变化",
+       {curr_val} AS "当前值",
+       {mom_val} AS "环比值",
+       {mom_chg} AS "环比变化",
        NULL AS "同比值",
        NULL AS "同比变化"
 FROM {self.DEFAULT_TABLE}
@@ -640,15 +670,16 @@ LIMIT 20
 """.strip()
             elif has_yoy_compare:
                 # 只有 YoY
+                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_chg = self._build_change_expr(current_cond, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT {select_clause},
-       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
+       {curr_val} AS "当前值",
        NULL AS "环比值",
        NULL AS "环比变化",
-       SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) AS "同比值",
-       CASE WHEN SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "同比变化"
+       {yoy_val} AS "同比值",
+       {yoy_chg} AS "同比变化"
 FROM {self.DEFAULT_TABLE}
 WHERE ( {current_cond} )
    OR ( {where_yoy} )
@@ -658,9 +689,10 @@ LIMIT 20
 """.strip()
             else:
                 # 没有有效对比周期，只查当前周期
+                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT {select_clause},
-       SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
+       {curr_val} AS "当前值",
        NULL AS "环比值",
        NULL AS "环比变化",
        NULL AS "同比值",
@@ -675,30 +707,32 @@ LIMIT 20
             # 没有业务维度需要 GROUP BY，但 CASE WHEN 中仍需使用纯时间条件（避免 StarRocks 严格模式报错）
             # 注意：where_mom 和 where_yoy 已经包含维度过滤，这里只取时间条件用于 CASE WHEN
             if has_mom_compare and has_yoy_compare:
+                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_chg = self._build_change_expr(current_time_only, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_chg = self._build_change_expr(current_time_only, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT
-       SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
-       SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) AS "环比值",
-       CASE WHEN SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "环比变化",
-       SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) AS "同比值",
-       CASE WHEN SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "同比变化"
+       {curr_val} AS "当前值",
+       {mom_val} AS "环比值",
+       {mom_chg} AS "环比变化",
+       {yoy_val} AS "同比值",
+       {yoy_chg} AS "同比变化"
 FROM {self.DEFAULT_TABLE}
 WHERE ( {current_cond} )
    OR ( {where_mom} )
    OR ( {where_yoy} )
 """.strip()
             elif has_mom_compare:
+                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                mom_chg = self._build_change_expr(current_time_only, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT
-       SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
-       SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) AS "环比值",
-       CASE WHEN SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_mom} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "环比变化",
+       {curr_val} AS "当前值",
+       {mom_val} AS "环比值",
+       {mom_chg} AS "环比变化",
        NULL AS "同比值",
        NULL AS "同比变化"
 FROM {self.DEFAULT_TABLE}
@@ -706,23 +740,25 @@ WHERE ( {current_cond} )
    OR ( {where_mom} )
 """.strip()
             elif has_yoy_compare:
+                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+                yoy_chg = self._build_change_expr(current_time_only, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT
-       SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
+       {curr_val} AS "当前值",
        NULL AS "环比值",
        NULL AS "环比变化",
-       SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) AS "同比值",
-       CASE WHEN SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) > 0
-            THEN ROUND((SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) - SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END)) / SUM(CASE WHEN {where_yoy} THEN {metric_field_sql} ELSE 0 END) * 100, 2)
-            ELSE NULL END AS "同比变化"
+       {yoy_val} AS "同比值",
+       {yoy_chg} AS "同比变化"
 FROM {self.DEFAULT_TABLE}
 WHERE ( {current_cond} )
    OR ( {where_yoy} )
 """.strip()
             else:
+                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
                 sql = f"""
 SELECT
-       SUM(CASE WHEN {current_time_only} THEN {metric_field_sql} ELSE 0 END) AS "当前值",
+       {curr_val} AS "当前值",
        NULL AS "环比值",
        NULL AS "环比变化",
        NULL AS "同比值",
@@ -734,17 +770,178 @@ WHERE ( {current_cond} )
         logger.info(f"[_build_mom_sql] SQL: {sql[:300]}")
         return sql
 
+    @staticmethod
+    def _extract_compound_parts(starrocks_sql: str) -> tuple:
+        """
+        从 CASE WHEN 复合指标 SQL 提取分子和分母表达式（不含聚合函数包装）
+
+        CASE WHEN 格式：
+            SELECT CASE WHEN SUM(...) = 0 THEN 0
+            ELSE (分子算术表达式) / SUM(分母字段) END AS alias FROM ...
+
+        例如：
+            分子：SUM(IFNULL(ORDERED_PRODUCTSALES, 0)) - SUM(IFNULL(COSTFEESS, 0))
+            分母：SUM(IFNULL(ORDERED_PRODUCTSALES, 0))
+
+        Returns:
+            tuple: (molecule_field, denominator_field) 不含外层 SUM()
+            例如: ("SUM(IFNULL(ORDERED_PRODUCTSALES, 0)) - SUM(IFNULL(COSTFEESS, 0))",
+                   "SUM(IFNULL(ORDERED_PRODUCTSALES, 0))")
+            如果解析失败返回 (None, None)
+        """
+        if not starrocks_sql:
+            return None, None
+
+        import re
+
+        # 直接用正则匹配 "ELSE (分子算术) / SUM(分母)" 模式
+        # 分子可能包含嵌套括号，用 lazy quantifier 匹配
+        # 结构: ELSE (arith) / SUM(col) END
+        import re
+
+        # 匹配 ELSE (分子) / SUM(分母内容) 的模式
+        # 非贪婪匹配 (.+?) 会在第一个 ) / SUM( 处停止，正好是外层 ELSE 的闭合
+        m = re.search(
+            r'ELSE\s*\((.+?)\)\s*/\s*(SUM|AVG|COUNT|MAX|MIN)\s*\(([^)]+)\)\s*END',
+            starrocks_sql, re.IGNORECASE | re.DOTALL
+        )
+        if not m:
+            return None, None
+
+        raw_molecule = m.group(1)  # "(SUM(IFNULL(ORD...)) - SUM(IFNULL(COSTFEESS, 0)))"
+        func_name = m.group(2).upper()
+        denom_inner = m.group(3)  # "IFNULL(ORDERED_PRODUCTSALES, 0)"
+
+        # 去掉分子最外层括号（分子算术表达式被包在括号里）
+        # 例如: "(SUM(a) - SUM(b))" -> "SUM(a) - SUM(b)"
+        molecule_clean = raw_molecule
+        if raw_molecule.startswith('(') and raw_molecule.endswith(')'):
+            # 验证括号是否配对
+            depth = 0
+            for ch in raw_molecule[1:-1]:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth < 0:
+                        break
+            if depth == 0:
+                molecule_clean = raw_molecule[1:-1]
+
+        # 去掉分子和分母中的 SUM/AVG/COUNT/MAX/MIN 包装（用于条件聚合，外层 SUM 会做聚合）
+        def strip_aggregates(text: str) -> str:
+            """去掉所有 SUM/AVG/COUNT/MAX/MIN 包装"""
+            pattern = r'(SUM|AVG|COUNT|MAX|MIN)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)'
+            while True:
+                new_text = re.sub(pattern, r'\2', text, flags=re.IGNORECASE)
+                if new_text == text:
+                    break
+                text = new_text
+            return text
+
+        molecule_clean = strip_aggregates(molecule_clean)
+        denominator_full = strip_aggregates(f"{func_name}({denom_inner})")
+
+        logger.info(f"[_extract_compound_parts] molecule={molecule_clean}, denominator={denominator_full}")
+        return molecule_clean, denominator_full
+
+    def _build_value_expr(self, cond: str, metric_field_sql: str,
+                          is_compound: bool, molecule_field: str = None, denominator_field: str = None) -> str:
+        """构建值表达式（兼容简单指标和复合指标）
+
+        简单指标：SUM(CASE WHEN cond THEN metric_field_sql ELSE 0 END)
+        复合指标：CASE WHEN SUM(...分子...) = 0 THEN 0 ELSE SUM(...分子...) / NULLIF(SUM(...分母...), 0) END
+        """
+        if is_compound and molecule_field and denominator_field:
+            return (
+                f"CASE WHEN SUM(CASE WHEN {cond} THEN {molecule_field} ELSE 0 END) = 0 THEN 0 "
+                f"ELSE ROUND(SUM(CASE WHEN {cond} THEN {molecule_field} ELSE 0 END) / "
+                f"NULLIF(SUM(CASE WHEN {cond} THEN {denominator_field} ELSE 0 END), 0), 4) END"
+            )
+        else:
+            return f"SUM(CASE WHEN {cond} THEN {metric_field_sql} ELSE 0 END)"
+
+    def _build_change_expr(self, current_cond: str, compare_cond: str,
+                           metric_field_sql: str, is_compound: bool,
+                           molecule_field: str = None, denominator_field: str = None) -> str:
+        """构建变化率表达式
+
+        简单指标：(当前值 - 对比值) / 对比值 * 100
+        复合指标：(当前率 - 对比率) / 对比率 * 100
+        """
+        if is_compound and molecule_field and denominator_field:
+            # 分子分母分别聚合后外层做除法
+            curr_num = f"SUM(CASE WHEN {current_cond} THEN {molecule_field} ELSE 0 END)"
+            curr_den = f"NULLIF(SUM(CASE WHEN {current_cond} THEN {denominator_field} ELSE 0 END), 0)"
+            comp_num = f"SUM(CASE WHEN {compare_cond} THEN {molecule_field} ELSE 0 END)"
+            comp_den = f"NULLIF(SUM(CASE WHEN {compare_cond} THEN {denominator_field} ELSE 0 END), 0)"
+            return (
+                f"CASE WHEN {comp_den} IS NULL OR {comp_den} = 0 THEN NULL "
+                f"ELSE ROUND((({curr_num} / {curr_den}) - ({comp_num} / {comp_den})) / ({comp_num} / {comp_den}) * 100, 2) END"
+            )
+        else:
+            curr = f"SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END)"
+            comp = f"SUM(CASE WHEN {compare_cond} THEN {metric_field_sql} ELSE 0 END)"
+            return (
+                f"CASE WHEN {comp} > 0 "
+                f"THEN ROUND(({curr} - {comp}) / {comp} * 100, 2) "
+                f"ELSE NULL END"
+            )
+
     def _extract_raw_metric_expression(self, metric: MQLMetric) -> str:
         """从 metric 的 starrocks_sql 提取原始字段表达式（不含聚合函数）
 
         用于条件聚合（CASE WHEN 内部），因为外层 SUM 会做聚合。
 
         Returns:
-            str: 原始字段表达式，如 "PAGEVIEWS_TOTAL" 或 "IFNULL(a,0)-IFNULL(b,0)"
+            str: 原始字段表达式，如 "IFNULL(a,0)-IFNULL(b,0)"
         """
         if not metric:
             return "ORDERED_PRODUCTSALES"
-        return FieldExtractor(metric).extract_raw()
+
+        expr = metric.starrocks_sql or ""
+        import re
+        # 提取 SELECT 和 FROM 之间的表达式
+        match = re.search(r'SELECT\s+(.+?)\s+FROM', expr, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return FieldExtractor(metric).extract_raw()
+
+        full_expr = match.group(1).strip()
+
+        # 去掉 AS alias 别名部分（保留括号内的表达式）
+        # 例如 "(SUM(a) - SUM(b)) AS xxx" -> "(SUM(a) - SUM(b))"
+        full_expr = re.sub(r'\s+AS\s+[\w"]+\s*$', '', full_expr, flags=re.IGNORECASE)
+
+        def strip_aggregates(text: str) -> str:
+            """去掉所有 SUM/AVG/COUNT/MAX/MIN 包装，保留括号内的内容"""
+            pattern = r'(SUM|AVG|COUNT|MAX|MIN)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)'
+            while True:
+                new_text = re.sub(pattern, r'\2', text, flags=re.IGNORECASE)
+                if new_text == text:
+                    break
+                text = new_text
+            return text
+
+        # 去掉外层括号（如果整个表达式被包在括号里）
+        result = full_expr
+        while result.startswith('(') and result.endswith(')'):
+            # 验证括号是否配对
+            depth = 0
+            for ch in result[1:-1]:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                    if depth < 0:
+                        break
+            if depth == 0:
+                result = result[1:-1]
+            else:
+                break
+
+        stripped = strip_aggregates(result)
+        logger.info(f"[_extract_raw_metric_expression] {full_expr} -> {stripped}")
+        return stripped
 
     def _extract_metric_expression(self, metric: MQLMetric, prefix: str) -> tuple:
         """从 metric 的 starrocks_sql 提取聚合表达式和别名
@@ -772,14 +969,13 @@ WHERE ( {current_cond} )
         logger.info(f"[_build_select] starrocks_sql={mql.metric.starrocks_sql[:80] if mql.metric and mql.metric.starrocks_sql else 'EMPTY'}")
         select_parts = []
 
-        # 添加维度列
+        # 添加维度列（去重）
+        seen_dim_cols = set()
         for dim in mql.dimensions:
-            if dim.column:
-                select_parts.append(dim.column)
-            else:
-                col = self._get_dimension_column(dim.type)
-                if col:
-                    select_parts.append(col)
+            col = dim.column if dim.column else self._get_dimension_column(dim.type)
+            if col and col not in seen_dim_cols:
+                seen_dim_cols.add(col)
+                select_parts.append(col)
 
         # 如果有时间过滤且是月粒度查询，确保 MONTHS 加入 SELECT（让时间在结果中可见）
         # 使用 MONTH(FDATE) 格式化月份，如 "2月"
@@ -888,12 +1084,22 @@ WHERE ( {current_cond} )
             logger.info(f"[_build_select] 指标表达式: {expr} AS \"{chinese_name}\"")
 
         # 多指标支持：处理 mql.metrics 中的额外指标
+        # 按 code 去重，避免同一指标的不同名称变体（如"毛利"和"销售毛利"）重复添加
+        seen_metric_codes = set()
+        if mql.metric and mql.metric.code:
+            seen_metric_codes.add(mql.metric.code)
         for i, metric in enumerate(mql.metrics):
             if not metric or not metric.name:
                 continue
-            # 跳过与主指标相同的项
+            # 跳过与主指标同名的项
             if mql.metric and metric.name == mql.metric.name:
                 continue
+            # 按 code 去重：跳过与已添加指标 code 相同的项
+            if metric.code and metric.code in seen_metric_codes:
+                logger.info(f"[_build_select] 多指标[{i}] '{metric.name}' code={metric.code} 已存在，跳过")
+                continue
+            if metric.code:
+                seen_metric_codes.add(metric.code)
             logger.info(f"[_build_select] 多指标[{i}]: {metric.name}")
 
             # 使用 FieldExtractor 统一解析
@@ -952,7 +1158,8 @@ WHERE ( {current_cond} )
                     if isinstance(filter_obj.value, list) and len(filter_obj.value) == 2:
                         where_parts.append(f"{safe_field} BETWEEN '{self._sanitize_value(filter_obj.value[0])}' AND '{self._sanitize_value(filter_obj.value[1])}'")
 
-        # 维度过滤
+        # 维度过滤（去重）
+        seen_dim_filter = set()
         for dim in mql.dimensions:
             if dim.value:
                 # 优先使用 column，如果为空则从类型映射获取
@@ -960,6 +1167,11 @@ WHERE ( {current_cond} )
                 if not col:
                     col = self._get_dimension_column(dim.type)
                 if col:
+                    # 去重：(col, value) 组合重复则跳过
+                    filter_key = (col, dim.value)
+                    if filter_key in seen_dim_filter:
+                        continue
+                    seen_dim_filter.add(filter_key)
                     # 验证列名（col 来自 DIMENSION_COLUMN_MAP，应该是安全的）
                     safe_col = self._validate_field_name(col)
                     where_parts.append(f"{safe_col} = '{self._sanitize_value(dim.value)}'")
@@ -1319,16 +1531,15 @@ WHERE ( {current_cond} )
     def _build_group_by(self, mql: MQLSchema) -> str:
         """构建 GROUP BY 子句"""
         group_by_parts = []
+        seen_cols = set()  # 去重
 
         # 添加维度列
         for dim in mql.dimensions:
             # 优先使用 column，如果为空则从类型映射获取
-            if dim.column:
-                group_by_parts.append(dim.column)
-            else:
-                col = self._get_dimension_column(dim.type)
-                if col:
-                    group_by_parts.append(col)
+            col = dim.column if dim.column else self._get_dimension_column(dim.type)
+            if col and col not in seen_cols:
+                seen_cols.add(col)
+                group_by_parts.append(col)
 
         # 如果有时间过滤且是月粒度查询，确保 MONTH(FDATE) 加入 GROUP BY
         # 但 QUERY_RANKING 场景下不应该按月拆分——排名需要整个时间范围的汇总
