@@ -706,7 +706,7 @@ const chartOptions = computed(() => {
     backgroundColor: 'transparent',
     grid: {
       left: 50,
-      right: 50,
+      right: 80,
       top: 20,
       bottom: 40
     },
