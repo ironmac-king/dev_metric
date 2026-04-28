@@ -977,12 +977,18 @@ WHERE ( {current_cond} )
                 seen_dim_cols.add(col)
                 select_parts.append(col)
 
-        # 如果有时间过滤且是月粒度查询，确保 MONTHS 加入 SELECT（让时间在结果中可见）
-        # 使用 MONTH(FDATE) 格式化月份，如 "2月"
-        # 但 QUERY_RANKING 场景下不加 MONTHS——排名需要整个时间范围汇总，不需要按月拆分
+        # 如果有时间过滤且是月粒度查询，确保时间列加入 SELECT
+        # QUERY_RANKING 场景下不加——排名需要整个时间范围汇总
         if mql.intent != MQLIntent.QUERY_RANKING:
             if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-                if self.COL_MONTHS not in select_parts:
+                # QUERY_TREND 且无业务维度时，按天分组，SELECT 加 FDATE
+                if mql.intent == MQLIntent.QUERY_TREND and not any(
+                    (dim.type and dim.type.startswith('GROUP_')) or dim.type in ('REGION', 'PLATFORM', 'FSITE', 'FCOUNTRY', 'FBRAND', 'FPRODUCTLINE')
+                    for dim in mql.dimensions
+                ):
+                    if "FDATE" not in select_parts:
+                        select_parts.append("FDATE")
+                elif self.COL_MONTHS not in select_parts:
                     select_parts.append(f"MONTH(FDATE) AS MONTHS")
 
         # 检查是否有维度分组（GROUP_X 等）- 有维度分组时不需要日期范围字段
@@ -1547,7 +1553,12 @@ WHERE ( {current_cond} )
             # 排名查询：只按维度分组，不按月拆分
             pass
         elif mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            if self.COL_MONTHS not in group_by_parts:
+            # QUERY_TREND 意图且无业务维度时，按天分组（显示每日趋势）
+            # 其他情况按月分组
+            if mql.intent == MQLIntent.QUERY_TREND and not group_by_parts:
+                if "FDATE" not in group_by_parts:
+                    group_by_parts.append("FDATE")
+            elif self.COL_MONTHS not in group_by_parts:
                 group_by_parts.append("MONTH(FDATE)")
 
         if group_by_parts:
@@ -1606,6 +1617,9 @@ WHERE ( {current_cond} )
         # 时间维度查询按时间排序（近7天、近12个月等）
         if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
             # 按时间升序（从早到晚）
+            # 按FDATE分组时用FDATE排序，按MONTH分组时用MONTH排序
+            if mql.intent == MQLIntent.QUERY_TREND and not mql.dimensions:
+                return "ORDER BY FDATE ASC"
             return "ORDER BY MONTH(FDATE) ASC"
 
         return ""

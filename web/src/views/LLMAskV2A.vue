@@ -239,6 +239,7 @@
                     <ChartCard
                       v-if="msg.resultData && msg.resultData.length > 0"
                       :data="msg.resultData"
+                      :columns="msg.columns || []"
                       :height="260"
                       :interpretation="msg.interpretation"
                       :truncation-length="12"
@@ -249,8 +250,8 @@
                       class="message-chart"
                     />
 
-                    <!-- 快速下钻 -->
-                    <div v-if="msg.role === 'assistant' && msg.resultData && msg.resultData.length > 0" class="analysis-drilldown">
+                    <!-- 快速下钻 - 仅当有有效 category 时显示（由 trigger_analyzer 设置） -->
+                    <div v-if="msg.role === 'assistant' && msg.resultData && msg.resultData.length > 0 && msg.category" class="analysis-drilldown">
                       <div class="drilldown-title">快速下钻</div>
                       <div class="drilldown-list">
                         <button class="drilldown-btn" @click="handleDrilldown({ check: 'sales' })">📊 看销售</button>
@@ -372,7 +373,7 @@
 
                     <!-- 生成报告按钮 -->
                     <button
-                      v-if="msg.resultData && msg.resultData.length > 0"
+                      v-if="false"
                       class="report-btn"
                       @click="generateReport(msg)"
                     >
@@ -703,9 +704,9 @@ const AlertIcon = () => h('svg', { width: 20, height: 20, viewBox: '0 0 20 20', 
 
 const modes = [
   { id: 'query', label: '数据查询', icon: QueryIcon },
-  { id: 'analyze', label: '趋势分析', icon: TrendIcon },
-  { id: 'compare', label: '对比分析', icon: ChartIcon },
-  { id: 'alert', label: '异常告警', icon: AlertIcon }
+  // { id: 'analyze', label: '趋势分析', icon: TrendIcon },
+  // { id: 'compare', label: '对比分析', icon: ChartIcon },
+  // { id: 'alert', label: '异常告警', icon: AlertIcon }
 ]
 
 const suggestions = ref([])
@@ -1695,37 +1696,32 @@ function scrollToBottom() {
 }
 
 .message-avatar {
-  position: absolute;
-  top: -31px;
-  left: 0;
-  width: 62px;
-  height: 62px;
-  border-radius: 21px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.15) 100%);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   border: 1px solid rgba(99, 102, 241, 0.1);
-  z-index: 1;
+  align-self: flex-start;
+  margin-top: 4px;
 }
 
 .message-item.user .message-avatar {
-  left: auto;
-  right: 0;
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.1) 100%);
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .message-content {
   max-width: 75%;
-  min-width: 234px;
+  min-width: 200px;
   background: #fff;
   border-radius: 40px;
   padding: 20px 28px;
   box-shadow: 0 2px 12px rgba(99, 102, 241, 0.06), 0 1px 4px rgba(99, 102, 241, 0.03);
   border: 1px solid rgba(99, 102, 241, 0.06);
-  position: relative;
   transition: all 0.2s ease;
 }
 
@@ -1743,16 +1739,7 @@ function scrollToBottom() {
 
 /* AI消息气泡小三角 */
 .message-item.assistant .message-content::before {
-  content: '';
-  position: absolute;
-  left: -8px;
-  top: 16px;
-  width: 0;
-  height: 0;
-  border-top: 8px solid transparent;
-  border-bottom: 8px solid transparent;
-  border-right: 10px solid #fff;
-  filter: drop-shadow(-2px 0 2px rgba(99, 102, 241, 0.04));
+  display: none;
 }
 
 .message-item.user .message-content {
@@ -1765,15 +1752,7 @@ function scrollToBottom() {
 
 /* 用户消息气泡小三角 */
 .message-item.user .message-content::before {
-  content: '';
-  position: absolute;
-  right: -8px;
-  top: 16px;
-  width: 0;
-  height: 0;
-  border-top: 8px solid transparent;
-  border-bottom: 8px solid transparent;
-  border-left: 10px solid #6366F1;
+  display: none;
 }
 
 .message-text {

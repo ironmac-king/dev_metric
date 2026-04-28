@@ -203,6 +203,10 @@ const props = defineProps({
   periodInfo: {
     type: Object,
     default: () => ({ currentPeriod: '', comparePeriod: '' })
+  },
+  columns: {
+    type: Array,
+    default: () => []
   }
 })
 
@@ -305,9 +309,15 @@ const timeRangeLabel = computed(() => {
 })
 
 // 多指标表格的列 keys（排除时间维度列）
-// 保持 Object.keys 的原始顺序（与 SQL SELECT 列顺序一致）
-// 不要按字母排序，否则 tableHeaders 和 tableKeys 会错位
+// 优先使用 columns 数组（来自后端的列元数据，顺序与 SQL SELECT 一致）
+// 如果没有 columns，则 fallback 到 Object.keys（不保证顺序）
 const tableKeys = computed(() => {
+  // 优先使用后端返回的 columns 元数据
+  if (props.columns && props.columns.length > 0) {
+    // 过滤掉时间维度列
+    return props.columns.filter(k => k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
+  }
+  // Fallback: 从数据对象提取 keys（不保证顺序）
   if (!props.data || props.data.length === 0) return []
   const keys = Object.keys(props.data[0])
   // 过滤掉时间维度列（MONTHS/FDATE/FDATE_START/FDATE_END）
@@ -403,11 +413,15 @@ const tableHeaders = computed(() => {
   return filteredKeys.map(k => {
     // 数值列：优先用 metricNames 中对应的中文名
     if (numericKeys.includes(k)) {
-      // 在 metricNames 中找对应的英文名
-      // metricNames 顺序与 numericKeys 顺序应该对应
-      const idx = numericKeys.indexOf(k)
-      if (idx >= 0 && idx < metricNames.length) {
-        return metricNames[idx]
+      // 精确匹配优先：key === metricNames 中的某一项
+      const exactIdx = metricNames.findIndex(name => name === k)
+      if (exactIdx >= 0) {
+        return k
+      }
+      // 子串匹配：metricNames 中某一项包含 key（如 "毛利率" 包含 "毛利"）
+      const foundIdx = metricNames.findIndex(name => name.includes(k))
+      if (foundIdx >= 0) {
+        return metricNames[foundIdx]
       }
       // fallback：用 FIELD_NAME_MAP 映射
       return FIELD_NAME_MAP[k] || k
@@ -457,8 +471,25 @@ function formatTableCell(key, val, colIdx) {
     return metricName?.includes('销量')
   })()
 
+  // 判断是否使用百分比格式（率类指标）
+  // 注意：不能用 colIdx 索引 metricNames，因为 metricNames 顺序可能与 result_data key 顺序不一致
+  const usePercentFormat = (() => {
+    if (!props.metricNames || props.metricNames.length === 0) return false
+    const metricNames = props.metricNames
+    // 精确匹配：key === metricNames 中的某一项
+    if (metricNames.includes(key)) return key.includes('率')
+    // 子串匹配：metricNames 中某一项包含 key（如 "毛利率" 包含 "毛利"）
+    const foundName = metricNames.find(name => name.includes(key))
+    return foundName ? foundName.includes('率') : false
+  })()
+
   const rawNum = typeof val === 'number' ? val : parseFloat(String(val).replace(/,/g, ''))
   if (isNaN(rawNum)) return val
+
+  if (usePercentFormat) {
+    // 率类指标：显示为百分比（小数 * 100）
+    return (rawNum * 100).toFixed(2) + '%'
+  }
 
   if (useCommaFormat) {
     // 销量：千分位逗号
@@ -556,8 +587,9 @@ const chartType = computed(() => {
     const metricName = props.metricName || ''
     const ratioKeywords = ['占比', '比例', '比率', '率']
     const isRatioMetric = ratioKeywords.some(k => metricName.includes(k))
-    const isPercentageRange = props.data.some(row => {
-      // 只要有一行及以上数据在 0-100 范围内就认为是占比数据
+    // 只有當 metricName 包含佔比關鍵詞時，才檢查值範圍
+    // 否則金額類指標（如銷售毛利）即使有 0 值也不應顯示為餅圖
+    const isPercentageRange = isRatioMetric && props.data.some(row => {
       const val = parseFloat(row[numericKeys[0]])
       return !isNaN(val) && val >= 0 && val <= 100
     })
