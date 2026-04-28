@@ -74,8 +74,7 @@ go mod tidy
 ### Python AI 服务 (`ai/`)
 
 - `main.py` — FastAPI 入口，`ask_question` 是 `async def`
-- `graph/nodes.py` — 对话节点（intent_node、entity_node、sql_gen_node、**execute_node 是 async**、response_node）
-- `graph/state.py` — ConversationState 对话状态
+- `graph/state.py` — V1 对话状态（已废弃，仅保留类型定义）
 - `engine/rule_engine.py` — 规则引擎（关键词匹配 + SQL 模板）
 - `engine/llm.py` — LLM 调用引擎（腾讯云 DeepSeek）
 - `engine/semantic_search.py` — 语义搜索（pgvector 存储 + 阿里 text-embedding-v2）

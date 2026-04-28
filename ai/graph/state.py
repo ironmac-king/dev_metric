@@ -1,5 +1,9 @@
 """
 LangGraph 对话状态定义
+
+[DEPRECATED] 此模块为 V1（旧版）状态定义，已被 ai.engine.llm_v2.schema.V2State 取代。
+V1 引擎（ai/engine/llm.py）和规则引擎（ai/engine/rule_engine.py）仍依赖此定义，
+但后续不再维护，请勿在新代码中引用。
 """
 from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field

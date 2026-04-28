@@ -1,6 +1,9 @@
 """
 规则引擎 - 模板匹配 + 指标知识库 + ML增强
 从数据库加载意图模板和 SQL 模板，支持ML意图分类和实体抽取
+
+[DEPRECATED] V1 规则引擎，已被 ai.engine.llm_v2 取代。
+仅用于 V1 对话流程，新功能开发请使用 V2。
 """
 import re
 import httpx

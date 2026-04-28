@@ -1,5 +1,8 @@
 """
 LLM 引擎 - 调用腾讯云 DeepSeek
+
+[DEPRECATED] 此为 V1 引擎，已被 ai.engine.llm_v2 取代。
+ai.engine.llm_v2.graph 是当前活跃的 LangGraph 实现。
 """
 import os
 import re
