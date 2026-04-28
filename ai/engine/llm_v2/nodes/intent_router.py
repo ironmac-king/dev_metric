@@ -873,7 +873,16 @@ class IntentRouter:
                             mql.time.type = TimeType(parsed["type"])
                         except ValueError:
                             pass
-            logger.info(f"[IntentRouter] 本地模型提取时间: {time_text} -> {time_original}, start={mql.time.start}, end={mql.time.end}")
+            # 计算时间范围天数
+            if mql.time.start and mql.time.end:
+                from datetime import datetime
+                try:
+                    start_dt = datetime.strptime(mql.time.start, "%Y-%m-%d")
+                    end_dt = datetime.strptime(mql.time.end, "%Y-%m-%d")
+                    mql.time.days = (end_dt - start_dt).days
+                except ValueError:
+                    pass
+            logger.info(f"[IntentRouter] 本地模型提取时间: {time_text} -> {time_original}, start={mql.time.start}, end={mql.time.end}, days={mql.time.days}")
 
         # 维度实体（类型 + 值）
         dim_entities = [e for e in entities if e['type'] == 'DIM']
@@ -1342,7 +1351,16 @@ class IntentRouter:
                             mql.time.type = TimeType(parsed["type"])
                         except ValueError:
                             pass
-            logger.info(f"[IntentRouter] LLM nl2structure 时间解析: original={original}, start={mql.time.start}, end={mql.time.end}")
+            # 计算时间范围天数
+            if mql.time.start and mql.time.end:
+                from datetime import datetime
+                try:
+                    start_dt = datetime.strptime(mql.time.start, "%Y-%m-%d")
+                    end_dt = datetime.strptime(mql.time.end, "%Y-%m-%d")
+                    mql.time.days = (end_dt - start_dt).days
+                except ValueError:
+                    pass
+            logger.info(f"[IntentRouter] LLM nl2structure 时间解析: original={original}, start={mql.time.start}, end={mql.time.end}, days={mql.time.days}")
 
         # 解析维度（支持 dimensions 数组 和 dimension 单个值两种格式）
         dim_type_map = {

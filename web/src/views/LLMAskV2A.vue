@@ -18,7 +18,7 @@
             <!-- 顶部问候区 -->
             <div class="greeting-section">
               <div class="avatar-wrapper" ref="avatarContainer"></div>
-              <h1 class="welcome-text">{{ greetingText }}，匀点工作给我吧~</h1>
+              <h1 class="welcome-text">{{ greetingText }}，有活别自己干，匀给我一点儿~</h1>
             </div>
 
             <!-- 快捷功能胶囊栏 -->
@@ -703,7 +703,7 @@ const AlertIcon = () => h('svg', { width: 20, height: 20, viewBox: '0 0 20 20', 
 ])
 
 const modes = [
-  { id: 'query', label: '数据查询', icon: QueryIcon },
+  { id: 'query', label: '销售分析', icon: QueryIcon },
   // { id: 'analyze', label: '趋势分析', icon: TrendIcon },
   // { id: 'compare', label: '对比分析', icon: ChartIcon },
   // { id: 'alert', label: '异常告警', icon: AlertIcon }
@@ -794,6 +794,11 @@ async function handleSend() {
   let finalThinkingClarificationOptions = []
   let finalThinkingOriginalQuestion = ''
   let thinkingStepsMap = new Map()
+  let finalStarrocksSql = ''
+  let finalMomChange = null
+  let finalYoyChange = null
+  let currentMqlDimensions = []  // 捕获最近一次 thinking 事件的 mql.dimensions（用于传给波动分析）
+  let currentMqlTime = null  // 捕获最近一次 thinking 事件的 mql.time（用于传给波动分析）
 
   try {
     const token = localStorage.getItem('token') || ''
@@ -885,6 +890,14 @@ async function handleSend() {
                 clarificationOptions: data.clarification_options || [],
                 originalQuestion: data.original_question || ''
               })
+              // 捕获 mql dimensions（包含 GROUP_2 等维度过滤）用于传给波动分析
+              if (data.mql && data.mql.dimensions && data.mql.dimensions.length > 0) {
+                currentMqlDimensions = data.mql.dimensions
+              }
+              // 捕获 mql time（包含 start/end）用于传给波动分析计算 MoM/YoY
+              if (data.mql && data.mql.time) {
+                currentMqlTime = data.mql.time
+              }
               // 追问信息优先从 thinking 事件获取（泛指维度时流程在 intent_router 就中断了）
               if (data.needs_clarification) {
                 finalNeedsClarification = true
@@ -905,6 +918,9 @@ async function handleSend() {
               finalMultiMetricData = data.multi_metric_data || []
               finalDimensionalData = data.dimensional_data || {}
               finalCategory = data.category || ''
+              finalStarrocksSql = data.starrocks_sql || ''
+              finalMomChange = data.mom_change ?? null
+              finalYoyChange = data.yoy_change ?? null
             } else if (currentEvent === 'answer_ready') {
               finalAnswer = data.answer
               finalSuggest = data.suggestions || []
@@ -1022,6 +1038,11 @@ async function handleSend() {
       clarificationOptions: effectiveClarificationOptions,
       clarificationMessage: effectiveClarificationMessage,
       originalQuestion: finalThinkingOriginalQuestion,
+      starrocksSql: finalStarrocksSql,
+      momChange: finalMomChange,
+      yoyChange: finalYoyChange,
+      dimensionFilters: currentMqlDimensions,
+      timeRange: currentMqlTime,
       time: getCurrentTime()
     })
 
@@ -1124,7 +1145,15 @@ function openAttribution(msg) {
       data: resultDataCopy,
       dimension_key: 'dimension',
       mom_change: msg.momChange ?? null,
-      yoy_change: msg.yoyChange ?? null
+      yoy_change: msg.yoyChange ?? null,
+      starrocks_sql: msg.starrocksSql ?? null,
+      // 只传 column 和 value，过滤掉 level 等 MQL 内部字段
+      dimension_filters: (msg.dimensionFilters || []).map(d => ({
+        column: d.column || d.type || '',
+        value: d.value || ''
+      })),
+      // 传 MQL time range（start/end）用于计算正确的 MoM/YoY
+      time_range: msg.timeRange ? { start: msg.timeRange.start, end: msg.timeRange.end } : null
     })
   }
 }
@@ -2202,6 +2231,11 @@ function scrollToBottom() {
 }
 .chat-report-card.theme-cost .header-icon {
   color: #0d9488;
+}
+
+/* site_health 卡片由 trigger_analyzer 生成，大哥不需要看 */
+.chat-report-card.theme-site_health {
+  display: none;
 }
 
 .report-header {

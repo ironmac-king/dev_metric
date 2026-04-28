@@ -325,8 +325,16 @@ function startStream(data) {
     dimension_key: data.dimension_key || 'dimension',
     // 传递SQL层计算好的mom/yoy
     mom_change: data.mom_change ?? null,
-    yoy_change: data.yoy_change ?? null
+    yoy_change: data.yoy_change ?? null,
+    // 传递 starrocks_sql（供波动分析自行计算 MoM/YoY）
+    starrocks_sql: data.starrocks_sql ?? null,
+    // 传递维度过滤（GROUP_2 等），用于 YoY 查询
+    dimension_filters: data.dimension_filters ?? [],
+    // 传递 MQL time_range（start/end）用于正确计算 MoM/YoY
+    time_range: data.time_range ?? null
   }
+
+  console.log('[VolatilityPanel] starrocks_sql from SSE msg:', data.starrocks_sql, '-> requestData:', requestData.starrocks_sql)
 
   fetchVolatilityData(requestData)
 }

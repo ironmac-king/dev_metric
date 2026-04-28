@@ -735,6 +735,28 @@ def _calc_previous_period(mql) -> tuple:
                 logger.info(f"[_calc_previous_period] partial月 {year}-{month:02d}(day={end_day}) → {prev_year}-{prev_month:02d}(day={min(end_day, prev_max_day)})")
                 return prev_start, prev_end
 
+    # 跨月/跨年范围判断：如果 start 和 end 不是同一月份/年份，说明是跨期范围
+    # 例如 2026-01-01~2026-04-27 → 2025-09-05~2025-12-31（按相同天数往前推）
+    if year and start_str and end_str:
+        end_match = re.match(r"(\d{4})-(\d{2})-(\d{2})", end_str)
+        if end_match:
+            end_year = int(end_match.group(1))
+            end_month = int(end_match.group(2))
+            end_day = int(end_match.group(3))
+            # 如果 start 和 end 不是同一月份（跨月范围），按相同天数往前推
+            if year != end_month or day != 1 or end_day != calendar.monthrange(end_year, end_month)[1]:
+                # 计算时间跨度天数
+                start_dt = datetime(year, month, day)
+                end_dt = datetime(end_year, end_month, end_day)
+                days_diff = (end_dt - start_dt).days
+                # 按相同天数往前推
+                prev_start_dt = start_dt - timedelta(days=days_diff)
+                prev_end_dt = end_dt - timedelta(days=days_diff)
+                prev_start = prev_start_dt.strftime("%Y-%m-%d")
+                prev_end = prev_end_dt.strftime("%Y-%m-%d")
+                logger.info(f"[_calc_previous_period] 跨期范围 {year}-{month:02d}~{end_year}-{end_month:02d} (days={days_diff}) → {prev_start}~{prev_end}")
+                return prev_start, prev_end
+
     return None, None
 
 
@@ -802,9 +824,11 @@ async def trigger_analyzer(state: V2State) -> V2State:
                     return True
             return False
 
-        if (result_dict["yoy_change"] is not None and result_dict["mom_change"] is None
+        if (result_dict["mom_change"] is None
                 and result_dict["current_value"] > 0 and _has_mom_pattern(state.mql)):
-            logger.info(f"[trigger_analyzer] 自动计算MoM: yoy={result_dict['yoy_change']}, current={result_dict['current_value']}")
+            logger.info(f"[trigger_analyzer] 自动计算MoM: current={result_dict['current_value']}")
+        else:
+            logger.info(f"[trigger_analyzer] 不计算MoM: yoy_change={result_dict['yoy_change']}, mom_change={result_dict['mom_change']}, current={result_dict['current_value']}, _has_mom_pattern={_has_mom_pattern(state.mql) if state.mql else 'mql is None'}")
             try:
                 prev_start, prev_end = _calc_previous_period(state.mql)
                 logger.info(f"[trigger_analyzer] _calc_previous_period: prev_start={prev_start}, prev_end={prev_end}")
@@ -820,8 +844,17 @@ async def trigger_analyzer(state: V2State) -> V2State:
                         metric_field = sum_match.group(1)
                         table_match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", starrocks_sql, re.IGNORECASE)
                         table_name = table_match.group(1) if table_match else "ids.IDS_AMZ_COMPREHENSIVE_DI"
-                        prev_sql = f"SELECT SUM({metric_field}) AS prev_val FROM {table_name} WHERE FDATE >= '{prev_start}' AND FDATE <= '{prev_end}'"
-                        logger.info(f"[trigger_analyzer] 查环比上一期: {prev_start}~{prev_end}, SQL={prev_sql}")
+                        # 构建维度过滤条件
+                        dim_filters = []
+                        if state.mql and state.mql.dimensions:
+                            for dim in state.mql.dimensions:
+                                if dim.column and dim.value:
+                                    dim_filters.append(f"{dim.column} = '{dim.value}'")
+                        where_parts = [f"FDATE >= '{prev_start}'", f"FDATE <= '{prev_end}'"]
+                        where_parts.extend(dim_filters)
+                        where_clause = " AND ".join(where_parts)
+                        prev_sql = f"SELECT SUM({metric_field}) AS prev_val FROM {table_name} WHERE {where_clause}"
+                        logger.info(f"[trigger_analyzer] 查环比上一期: {prev_start}~{prev_end}, dim_filters={dim_filters}, SQL={prev_sql}")
                         # 通过 Go API 执行
                         import httpx
                         async with httpx.AsyncClient(timeout=30) as client:
@@ -830,14 +863,17 @@ async def trigger_analyzer(state: V2State) -> V2State:
                                 json={"sql": prev_sql, "timeout": 30},
                             )
                             data = resp.json()
-                            logger.info(f"[trigger_analyzer] 环比查询返回: code={data.get('code')}, data={str(data.get('data',''))[:100]}")
+                            logger.info(f"[trigger_analyzer] 环比查询返回: code={data.get('code')}, message={data.get('message')}, data={str(data.get('data',''))[:200]}")
+                            logger.info(f"[trigger_analyzer] 原始 data 类型: {type(data.get('data'))}, keys: {data.get('data').keys() if isinstance(data.get('data'), dict) else 'N/A'}")
                             # Go API 返回结构: {"code": 0, "data": {"cached": true, "count": 1, "data": [...]}}
                             if data.get("code") == 0 and data.get("data"):
                                 # 兼容两层嵌套结构
                                 inner_data = data["data"]
                                 rows = inner_data.get("data") if isinstance(inner_data, dict) else inner_data
                                 if rows and len(rows) > 0:
-                                    prev_val = float(rows[0].get("prev_val") or 0)
+                                    # Go API 返回的字段名可能是 alias 或实际 SQL 表达式
+                                    # 尝试 alias "prev_val"，也尝试实际 SUM 表达式
+                                    prev_val = float(rows[0].get("prev_val") or rows[0].get("SUM(ORDERED_PRODUCTSALES)") or 0)
                                     if prev_val > 0:
                                         mom = (result_dict["current_value"] - prev_val) / prev_val * 100
                                         result_dict["mom_change"] = round(mom, 2)
@@ -1031,6 +1067,18 @@ async def trigger_analyzer(state: V2State) -> V2State:
             llm_used=False,
             duration_ms=int((time.time() - start_time) * 1000),
         )
+
+    # 传递 mom/yoy 到 state（供 SSE result_ready 事件使用）
+    # 优先用 result_dict 中计算好的值；若为 None，则从 state.analysis.kpi 提取（trigger_analyzer 算过）
+    if result_dict.get("mom_change") is not None:
+        state.mom_change = result_dict["mom_change"]
+    elif state.analysis and state.analysis.get("kpi", {}).get("mom") is not None:
+        state.mom_change = state.analysis["kpi"]["mom"]
+
+    if result_dict.get("yoy_change") is not None:
+        state.yoy_change = result_dict["yoy_change"]
+    elif state.analysis and state.analysis.get("kpi", {}).get("yoy") is not None:
+        state.yoy_change = state.analysis["kpi"]["yoy"]
 
     return state
 

@@ -549,6 +549,17 @@ async def ask_question_v2_stream(req: AskRequestV2):
 
                 # 发送结果（一旦就绪）
                 if step_state.get("result_data"):
+                    # 从 mql 中提取 starrocks_sql（用于波动分析自行计算 MoM/YoY）
+                    mql_obj = step_state.get("mql")
+                    starrocks_sql = None
+                    if mql_obj and isinstance(mql_obj, dict):
+                        metric = mql_obj.get("metric") or {}
+                        starrocks_sql = metric.get("starrocks_sql") or ""
+                    elif mql_obj and hasattr(mql_obj, "metric"):
+                        # mql_obj 是 MQLSchema 对象
+                        mql_metric = getattr(mql_obj, "metric", None)
+                        if mql_metric and hasattr(mql_metric, "starrocks_sql"):
+                            starrocks_sql = getattr(mql_metric, "starrocks_sql") or ""
                     yield StreamEvent(SSSEvent.RESULT_READY, {
                         "result_data": step_state["result_data"],
                         "total": step_state.get("total", 0),
@@ -560,6 +571,9 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "category": step_state.get("category", ""),
                         "analysis": step_state.get("analysis"),
                         "health_score": step_state.get("health_score"),
+                        "momChange": step_state.get("momChange"),
+                        "yoyChange": step_state.get("yoyChange"),
+                        "starrocks_sql": starrocks_sql,
                     }).to_sse()
 
                 # 发送回答（一旦就绪）
@@ -758,6 +772,9 @@ async def _stream_graph(graph, state: V2State):
                     "metric_names": metric_names,
                     # 传递 MQL JSON（供 mql_semantic_validator 步骤展示）
                     "mql": mql_json,
+                    # 传递 mom/yoy（供波动分析使用）
+                    "momChange": getattr(state_update, 'mom_change', None),
+                    "yoyChange": getattr(state_update, 'yoy_change', None),
                 }
         logger.info(f"[_stream_graph] 流式执行完成")
     except Exception as e:
@@ -1018,6 +1035,8 @@ class VolatilityRequest(BaseModel):
     dimension_key: str = "dimension"         # 维度字段名
     mom_change: Optional[float] = None       # 环比变化率（SQL层计算好的）
     yoy_change: Optional[float] = None       # 同比变化率（SQL层计算好的）
+    starrocks_sql: Optional[str] = None      # StarRocks SQL（用于自行计算MoM/YoY）
+    dimension_filters: List[Dict[str, Any]] = []  # 维度过滤 [{"column": "GROUP_2", "value": "智能云存储"}, ...]
 
 
 @router.post("/v2/volatility/stream")
@@ -1035,7 +1054,7 @@ async def volatility_analysis_stream(req: VolatilityRequest):
     """
     from .nodes.volatility_analyzer import VolatilityAnalyzer
 
-    logger.info(f"[Volatility Stream] 收到分析请求: metric={req.metric_name}, data_count={len(req.data)}")
+    logger.info(f"[Volatility Stream] 收到分析请求: metric={req.metric_name}, data_count={len(req.data)}, starrocks_sql={'有(' + str(len(req.starrocks_sql or '')) + '字符)' if req.starrocks_sql else '无'}")
 
     analyzer = VolatilityAnalyzer()
 
@@ -1048,7 +1067,9 @@ async def volatility_analysis_stream(req: VolatilityRequest):
                 time_range=req.time_range,
                 dimension_key=req.dimension_key,
                 mom_change=req.mom_change,
-                yoy_change=req.yoy_change
+                yoy_change=req.yoy_change,
+                starrocks_sql=req.starrocks_sql,
+                dimension_filters=req.dimension_filters,
             ):
                 yield event.to_sse()
                 await asyncio.sleep(0.05)  # 让浏览器有时间渲染

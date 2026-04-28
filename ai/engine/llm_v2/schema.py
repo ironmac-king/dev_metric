@@ -524,6 +524,8 @@ class V2State:
     analysis: Optional[Dict[str, Any]] = None  # 触发分析输出（AnalysisOutput.to_dict()）
     multi_metric_data: List[Dict[str, Any]] = field(default_factory=list)  # 多指标下钻数据
     category: str = ""  # 下钻类别 (sales/ad/inventory/cost)
+    mom_change: Optional[float] = None  # 环比变化率（%）
+    yoy_change: Optional[float] = None  # 同比变化率（%）
 
     # ===== 思考过程 =====
     thinking_steps: List[ThinkingStep] = field(default_factory=list)

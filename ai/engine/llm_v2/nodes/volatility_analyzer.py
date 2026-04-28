@@ -52,23 +52,25 @@ class VolatilityAnalyzer:
     def __init__(self):
         self._llm_engine = get_llm_engine()
 
-    def calculate_basic_stats(
+    async def calculate_basic_stats(
         self,
         data: List[Dict],
         period_days: int = 7,
-        yoy_mode: str = "auto"
+        yoy_mode: str = "auto",
+        starrocks_sql: Optional[str] = None,
+        dimension_filters: List[Dict[str, str]] = None,
+        time_range: Optional[Dict[str, str]] = None,
     ) -> Dict[str, float]:
         """
-        计算基础统计指标（参考SQL的YoY/MoM计算逻辑）
+        计算基础统计指标（自行通过 StarRocks 查询上期数据计算 MoM/YoY）
 
         Args:
             data: 时间序列数据，按日期排序，每行需包含 'date' 或 'time' 字段
             period_days: 周期天数（默认7天）
             yoy_mode: YoY计算模式
-                - auto: 自动检测（优先用日期对齐，回退到周期对齐）
-                - week: 周对齐（上周同期）
-                - month: 月对齐（上月同期）
-                - year: 年对齐（去年同期）
+            starrocks_sql: StarRocks SQL（用于自行查询上期数据）
+            dimension_filters: 维度过滤 [{"column": "GROUP_2", "value": "智能云存储"}, ...]
+            time_range: MQL定义的时间范围 {"start": "2026-01-01", "end": "2026-04-27"}（优先用于MoM/YoY计算）
 
         Returns:
             {
@@ -84,6 +86,8 @@ class VolatilityAnalyzer:
         if not data:
             return {"current": 0, "prev": 0, "avg": 0, "std": 0, "cv": 0, "mom": 0, "yoy": 0}
 
+        dimension_filters = dimension_filters or []
+
         values = [row.get('value', 0) for row in data if 'value' in row]
         if not values:
             return {"current": 0, "prev": 0, "avg": 0, "std": 0, "cv": 0, "mom": 0, "yoy": 0}
@@ -96,7 +100,6 @@ class VolatilityAnalyzer:
                 val = row.get('value', 0)
                 try:
                     from datetime import datetime
-                    # 尝试多种日期格式
                     for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
                         try:
                             d = datetime.strptime(str(date_val), fmt)
@@ -107,68 +110,114 @@ class VolatilityAnalyzer:
                 except:
                     continue
 
-        # 按日期排序
         if dated_values:
             dated_values.sort(key=lambda x: x[0])
 
-        # ========== 2. 计算当前周期和上期周期（参考SQL逻辑） ==========
-        if len(values) >= period_days:
-            current = sum(values[-period_days:])
-        else:
-            current = sum(values)
+        current_end = dated_values[-1][0] if dated_values else None
+        current_start = dated_values[0][0] if dated_values else None
+        current_sum = sum(val for d, val in dated_values)
 
-        if len(values) >= period_days * 2:
-            prev = sum(values[-period_days*2:-period_days])
-        elif len(values) > period_days:
-            prev = sum(values[:-period_days])
-        else:
-            prev = 0
+        # 如果提供了 time_range，优先使用 MQL 定义的时间范围（而非数据里的日期）
+        if time_range and time_range.get('start') and time_range.get('end'):
+            from datetime import datetime
+            for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
+                try:
+                    mql_start = datetime.strptime(time_range['start'], fmt)
+                    mql_end = datetime.strptime(time_range['end'], fmt)
+                    current_start = mql_start
+                    current_end = mql_end
+                    break
+                except:
+                    continue
 
-        mom = (current - prev) / prev if prev != 0 else 0
+        mom = 0.0
+        prev_period_sum = 0.0
+        yoy = 0.0
 
-        # ========== 3. 计算YoY（参考sql_generator._build_mom_sql的逻辑） ==========
-        yoy = 0
-        if dated_values and len(dated_values) >= 2:
+        if current_start and current_end and dated_values:
             try:
-                from datetime import datetime, timedelta
-                import calendar
+                from datetime import timedelta
 
-                current_end = dated_values[-1][0]
-                current_start = dated_values[0][0]
                 day_count = (current_end - current_start).days + 1
 
-                if yoy_mode == "year" or (yoy_mode == "auto"):
-                    # YoY：去年同期（参考SQL：current_date.replace(year=current_date.year - 1)）
-                    prev_year_start = current_start.replace(year=current_start.year - 1)
-                    prev_year_end = current_end.replace(year=current_end.year - 1)
+                # MoM：按相同天数往前推
+                prev_start = current_start - timedelta(days=day_count)
+                prev_end = current_end - timedelta(days=day_count)
+
+                # YoY：去年同期
+                prev_year_start = current_start.replace(year=current_start.year - 1)
+                prev_year_end = current_end.replace(year=current_end.year - 1)
+
+                # 如果提供了 starrocks_sql，通过 StarRocks 查询上期数据
+                if starrocks_sql:
+                    # 解析 starrocks_sql 获取表名和字段
+                    import re
+                    sum_match = re.search(r"SUM\s*\(\s*([A-Z_]+)\s*\)", starrocks_sql, re.IGNORECASE)
+                    metric_field = sum_match.group(1) if sum_match else None
+                    table_match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", starrocks_sql, re.IGNORECASE)
+                    table_name = table_match.group(1) if table_match else None
+
+                    if metric_field and table_name:
+                        # 构建维度过滤条件（去重）
+                        dim_filter_clause = ""
+                        if dimension_filters:
+                            seen = set()
+                            for f in dimension_filters:
+                                col = f.get("column", "")
+                                val = f.get("value", "")
+                                key = f"{col}={val}"
+                                if col and val and key not in seen:
+                                    seen.add(key)
+                                    dim_filter_clause += f" AND {col} = '{val}'"
+                            logger.info(f"[calculate_basic_stats] 维度过滤: {dim_filter_clause}")
+
+                        # 查询 MoM 上期
+                        mom_sql = (
+                            f"SELECT SUM({metric_field}) AS prev_val "
+                            f"FROM {table_name} "
+                            f"WHERE FDATE >= '{prev_start.strftime('%Y-%m-%d')}' "
+                            f"AND FDATE <= '{prev_end.strftime('%Y-%m-%d')}'"
+                            f"{dim_filter_clause}"
+                        )
+                        logger.info(f"[calculate_basic_stats] 查询MoM上期: {mom_sql}")
+                        mom_prev = await self._query_starrocks_sum(mom_sql)
+                        if mom_prev and mom_prev > 0:
+                            mom = (current_sum - mom_prev) / mom_prev
+                            prev_period_sum = mom_prev
+                            logger.info(f"[calculate_basic_stats] MoM(StarRocks): current={current_sum}, prev={mom_prev}, mom={mom*100:.1f}%")
+
+                        # 查询 YoY 上期
+                        yoy_sql = (
+                            f"SELECT SUM({metric_field}) AS prev_val "
+                            f"FROM {table_name} "
+                            f"WHERE FDATE >= '{prev_year_start.strftime('%Y-%m-%d')}' "
+                            f"AND FDATE <= '{prev_year_end.strftime('%Y-%m-%d')}'"
+                            f"{dim_filter_clause}"
+                        )
+                        logger.info(f"[calculate_basic_stats] 查询YoY上期: {yoy_sql}")
+                        yoy_prev = await self._query_starrocks_sum(yoy_sql)
+                        if yoy_prev and yoy_prev > 0:
+                            yoy = (current_sum - yoy_prev) / yoy_prev
+                            logger.info(f"[calculate_basic_stats] YoY(StarRocks): current={current_sum}, prev={yoy_prev}, yoy={yoy*100:.1f}%")
+                    else:
+                        logger.warning(f"[calculate_basic_stats] 无法从 starrocks_sql 解析出字段: {starrocks_sql[:80]}")
+                else:
+                    # 无 starrocks_sql，回退用图表数据估算
+                    prev_period_sum = sum(val for d, val in dated_values if prev_start <= d <= prev_end)
+                    if prev_period_sum > 0:
+                        mom = (current_sum - prev_period_sum) / prev_period_sum
+                        logger.info(f"[calculate_basic_stats] MoM(chart): current={current_sum}, prev_period={prev_period_sum}, mom={mom*100:.1f}%")
+
                     yoy_sum = sum(val for d, val in dated_values if prev_year_start <= d <= prev_year_end)
                     if yoy_sum > 0:
-                        yoy = (current - yoy_sum) / yoy_sum
-                        logger.info(f"[calculate_basic_stats] YoY: current={current}, prev_year={yoy_sum}, yoy={yoy*100:.1f}%")
-
-                elif yoy_mode == "month":
-                    # MoM：上月同期（参考SQL：用calendar.monthrange保持相同天数）
-                    prev_month_start = current_start - timedelta(days=1)
-                    prev_month_start = prev_month_start.replace(day=1)
-                    prev_month_max_day = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
-                    prev_end_day = min(day_count, prev_month_max_day)
-                    prev_month_end = prev_month_start.replace(day=prev_end_day)
-                    mom_sum = sum(val for d, val in dated_values if prev_month_start <= d <= prev_month_end)
-                    if mom_sum > 0:
-                        yoy = (current - mom_sum) / mom_sum
-                        logger.info(f"[calculate_basic_stats] MoM: current={current}, prev_month={mom_sum}, mom={yoy*100:.1f}%")
-
-                elif yoy_mode == "week":
-                    # 周对齐：上周同期
-                    week_start = current_start - timedelta(days=7)
-                    week_end = current_end - timedelta(days=7)
-                    week_sum = sum(val for d, val in dated_values if week_start <= d <= week_end)
-                    if week_sum > 0:
-                        yoy = (current - week_sum) / week_sum
-                        logger.info(f"[calculate_basic_stats] WoW: current={current}, prev_week={week_sum}, wow={yoy*100:.1f}%")
+                        yoy = (current_sum - yoy_sum) / yoy_sum
+                        logger.info(f"[calculate_basic_stats] YoY(chart): current={current_sum}, prev_year={yoy_sum}, yoy={yoy*100:.1f}%")
 
             except Exception as e:
-                logger.warning(f"[calculate_basic_stats] YoY/MoM计算失败: {e}")
+                logger.warning(f"[calculate_basic_stats] 计算失败: {e}")
+                mom = 0.0
+                prev_period_sum = 0.0
+                yoy = 0.0
 
         # ========== 3. 计算其他统计指标 ==========
         avg = sum(values) / len(values) if values else 0
@@ -177,14 +226,147 @@ class VolatilityAnalyzer:
         cv = std / avg if avg != 0 else 0
 
         return {
-            "current": current,
-            "prev": prev,
+            "current": current_sum,
+            "prev": prev_period_sum,
             "avg": avg,
             "std": std,
             "cv": cv,
             "mom": mom,
-            "yoy": yoy
+            "yoy": yoy,
         }
+
+    async def _query_starrocks_sum(self, sql: str) -> Optional[float]:
+        """通过 Go API 查询 StarRocks，返回 SUM 结果"""
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "http://localhost:8080/api/v1/query/execute",
+                    json={"sql": sql, "timeout": 30},
+                )
+                data = resp.json()
+                if data.get("code") == 0 and data.get("data"):
+                    inner = data["data"]
+                    rows = inner.get("data") if isinstance(inner, dict) else inner
+                    if rows and len(rows) > 0:
+                        row = rows[0]
+                        # 尝试获取 SUM 别名或原始字段
+                        val = row.get("prev_val") or row.get(list(row.keys())[0]) if row else None
+                        if val is not None:
+                            return float(val)
+        except Exception as e:
+            logger.warning(f"[_query_starrocks_sum] 查询失败: {e}, sql={sql[:100]}")
+        return None
+
+    async def _query_sku_dimension_data(
+        self,
+        starrocks_sql: str,
+        dimension_filters: List[Dict[str, str]],
+        time_range: Optional[Dict[str, str]],
+        period_days: int,
+    ) -> tuple:
+        """
+        按 SKU 分组查询当期和上期的维度数据（用于核心驱动分析）
+
+        Returns:
+            (current_dim_data, prev_dim_data): 均为 [{"dimension": "SKU1", "value": xxx}, ...]
+        """
+        import re
+        from datetime import datetime, timedelta
+
+        if not starrocks_sql:
+            return [], []
+
+        # 解析 starrocks_sql
+        sum_match = re.search(r"SUM\s*\(\s*([A-Z_]+)\s*\)", starrocks_sql, re.IGNORECASE)
+        metric_field = sum_match.group(1) if sum_match else None
+        table_match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", starrocks_sql, re.IGNORECASE)
+        table_name = table_match.group(1) if table_match else None
+
+        if not metric_field or not table_name:
+            logger.warning(f"[_query_sku_dimension_data] 无法从 starrocks_sql 解析出字段: {starrocks_sql[:80]}")
+            return [], []
+
+        # 解析时间范围
+        current_start, current_end = None, None
+        if time_range and time_range.get('start') and time_range.get('end'):
+            for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
+                try:
+                    current_start = datetime.strptime(time_range['start'], fmt)
+                    current_end = datetime.strptime(time_range['end'], fmt)
+                    break
+                except:
+                    continue
+
+        if not current_start or not current_end:
+            logger.warning(f"[_query_sku_dimension_data] 无法解析 time_range: {time_range}")
+            return [], []
+
+        day_count = (current_end - current_start).days + 1
+        prev_start = current_start - timedelta(days=day_count)
+        prev_end = current_end - timedelta(days=day_count)
+
+        # 构建维度过滤条件（去重）
+        dim_filter_clause = ""
+        if dimension_filters:
+            seen = set()
+            for f in dimension_filters:
+                col = f.get("column", "")
+                val = f.get("value", "")
+                key = f"{col}={val}"
+                if col and val and key not in seen:
+                    seen.add(key)
+                    dim_filter_clause += f" AND {col} = '{val}'"
+
+        async def query_sku(sql: str) -> List[Dict]:
+            """执行 SQL 并返回按 SKU 分组的结果"""
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(
+                        "http://localhost:8080/api/v1/query/execute",
+                        json={"sql": sql, "timeout": 30},
+                    )
+                    data = resp.json()
+                    if data.get("code") == 0 and data.get("data"):
+                        inner = data["data"]
+                        rows = inner.get("data") if isinstance(inner, dict) else inner
+                        result = []
+                        for row in rows:
+                            sku = row.get("SKU") or row.get("sku") or row.get(list(row.keys())[0]) if row else None
+                            val = row.get(metric_field) or row.get(list(row.keys())[1]) if row else None
+                            if sku is not None and val is not None:
+                                result.append({"dimension": str(sku), "value": float(val)})
+                        return result
+            except Exception as e:
+                logger.warning(f"[_query_sku_dimension_data] SKU查询失败: {e}, sql={sql[:100]}")
+            return []
+
+        # 查询当期 SKU 数据
+        current_sql = (
+            f"SELECT SKU, SUM({metric_field}) AS val "
+            f"FROM {table_name} "
+            f"WHERE FDATE >= '{current_start.strftime('%Y-%m-%d')}' "
+            f"AND FDATE <= '{current_end.strftime('%Y-%m-%d')}'"
+            f"{dim_filter_clause} "
+            f"GROUP BY SKU ORDER BY val DESC LIMIT 20"
+        )
+        logger.info(f"[_query_sku_dimension_data] 查询当期SKU: {current_sql}")
+        current_dim_data = await query_sku(current_sql)
+
+        # 查询上期 SKU 数据
+        prev_sql = (
+            f"SELECT SKU, SUM({metric_field}) AS val "
+            f"FROM {table_name} "
+            f"WHERE FDATE >= '{prev_start.strftime('%Y-%m-%d')}' "
+            f"AND FDATE <= '{prev_end.strftime('%Y-%m-%d')}'"
+            f"{dim_filter_clause} "
+            f"GROUP BY SKU ORDER BY val DESC LIMIT 20"
+        )
+        logger.info(f"[_query_sku_dimension_data] 查询上期SKU: {prev_sql}")
+        prev_dim_data = await query_sku(prev_sql)
+
+        return current_dim_data, prev_dim_data
 
     def detect_anomaly_iqr(
         self,
@@ -553,17 +735,23 @@ class VolatilityAnalyzer:
         dimension_key: str = "dimension",
         period_days: int = 7,
         mom_change: Optional[float] = None,
-        yoy_change: Optional[float] = None
+        yoy_change: Optional[float] = None,
+        starrocks_sql: Optional[str] = None,
+        dimension_filters: List[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """
-        流式波动分析（支持SQL层传来的mom/yoy）
+        流式波动分析（支持自行计算MoM/YoY）
 
         Args:
             period_days: 周期天数（默认7天）
             mom_change: SQL层计算的环比变化率（如果传了就用这个，不再重复计算）
             yoy_change: SQL层计算的同比变化率（如果传了就用这个，不再重复计算）
+            starrocks_sql: StarRocks SQL（用于自行计算MoM/YoY）
+            dimension_filters: 维度过滤 [{"column": "GROUP_2", "value": "智能云存储"}, ...]
         """
-        logger.info(f"[VolatilityAnalyzer] 开始分析指标: {metric_name}, 数据量: {len(data)}, mom={mom_change}, yoy={yoy_change}")
+        if dimension_filters is None:
+            dimension_filters = []
+        logger.info(f"[VolatilityAnalyzer] 开始分析指标: {metric_name}, 数据量: {len(data)}, mom={mom_change}, yoy={yoy_change}, starrocks_sql={'有' if starrocks_sql else '无'}, dimension_filters={dimension_filters}")
 
         # 检测数据格式
         data_type = self._detect_data_type(data)
@@ -577,7 +765,10 @@ class VolatilityAnalyzer:
             # 时间序列数据分析
             async for event in self._analyze_time_series(
                 metric_name, data, dimension_key, period_days,
-                mom_change=mom_change, yoy_change=yoy_change
+                mom_change=mom_change, yoy_change=yoy_change,
+                starrocks_sql=starrocks_sql,
+                dimension_filters=dimension_filters,
+                time_range=time_range,
             ):
                 yield event
 
@@ -698,13 +889,19 @@ class VolatilityAnalyzer:
         dimension_key: str = "dimension",
         period_days: int = 7,
         mom_change: Optional[float] = None,
-        yoy_change: Optional[float] = None
+        yoy_change: Optional[float] = None,
+        starrocks_sql: Optional[str] = None,
+        dimension_filters: List[Dict[str, str]] = None,
+        time_range: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """
         时间序列数据分析（支持传入SQL层计算的mom/yoy）
         """
+        if dimension_filters is None:
+            dimension_filters = []
         # Step 1: 基础统计（使用周期对比）
-        stats = self.calculate_basic_stats(data, period_days)
+        # 自行通过 StarRocks 查询上期数据来计算 MoM/YoY（不依赖传入值）
+        stats = await self.calculate_basic_stats(data, period_days, starrocks_sql=starrocks_sql, dimension_filters=dimension_filters, time_range=time_range)
         anomaly_result = self.detect_anomaly_iqr([row.get('value', 0) for row in data if 'value' in row])
 
         stats['volatility_rate'] = anomaly_result.get('volatility_rate', 0)
@@ -758,15 +955,15 @@ class VolatilityAnalyzer:
             }
         )
 
-        # ========== 修复 4：拆分当期/上期数据再计算维度贡献 ==========
-        # Step 3: 维度贡献度
-        current_dim_data, prev_dim_data = self._split_current_prev_dim_data(
-            data, period_days, dimension_key
+        # ========== 修复 4：按 SKU 分组查询当期/上期数据计算维度贡献 ==========
+        # Step 3: 维度贡献度（按 SKU 分组）
+        current_dim_data, prev_dim_data = await self._query_sku_dimension_data(
+            starrocks_sql, dimension_filters, time_range, period_days
         )
         dims = self.calc_dimension_contribution(
             current_dim_data,
             prev_dim_data,
-            dimension_key
+            "dimension"  # dimension_key 用于兼容，calc_dimension_contribution 内部用 "dimension" 做 key
         )
         # =============================================================
 
@@ -861,7 +1058,7 @@ TOP3 核心品类（贡献度最高）：
                 "suggestion": "品类贡献度分析结果已展示"
             }
 
-    def analyze(
+    async def analyze(
         self,
         metric_name: str,
         data: List[Dict],
@@ -873,7 +1070,7 @@ TOP3 核心品类（贡献度最高）：
         同步波动分析（不生成 SSE 流）
         """
         # 基础统计
-        stats = self.calculate_basic_stats(data, period_days)
+        stats = await self.calculate_basic_stats(data, period_days)
         anomaly_result = self.detect_anomaly_iqr([row.get('value', 0) for row in data if 'value' in row])
 
         # 维度贡献度（同步版本先不计算）

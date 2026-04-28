@@ -644,29 +644,33 @@ func GetAskSuggest(c *gin.Context) {
 func GetV2InitialSuggestions(c *gin.Context) {
 	// 返回适合 LLMAskV2A.vue 的快捷提问
 	suggestions := []map[string]interface{}{
+		// 1. QueryIcon：品类排名查询
 		{
-			"title": "本月各品类销售额",
-			"desc":  "查看各品类的销售数据排名，了解哪些品类表现最好",
+			"title": "本月各品类销售额排名",
+			"desc":  "按销售额降序排列，一眼锁定爆款品类",
 			"icon":  "QueryIcon",
-			"text":  "本月各品类销售额是多少？",
+			"text":  "本月各品类销售额是多少？按降序排列",
 		},
+		// 2. TrendIcon：趋势分析
 		{
-			"title": "近30天用户趋势",
-			"desc":  "分析用户数的变化趋势，发现增长或下降的规律",
+			"title": "今年智能云存储销售额走势",
+			"desc":  "看全年销售波动，发现增长/下降规律",
 			"icon":  "TrendIcon",
-			"text":  "近30天用户数变化趋势",
+			"text":  "今年智能云存储销售额变化趋势",
 		},
+		// 3. AlertIcon → 改为多指标分析（更贴合原title）
 		{
-			"title": "指标异常检测",
-			"desc":  "自动发现数据中的异常波动，及时预警问题",
+			"title": "上月一级品类销售额&毛利率",
+			"desc":  "同时看规模和利润，识别高价值品类",
 			"icon":  "AlertIcon",
-			"text":  "最近有哪些指标出现异常？",
+			"text":  "上个月各一级品类的销售额及销售毛利率",
 		},
+		// 4. ChartIcon：推广效果分析
 		{
-			"title": "环比数据对比",
-			"desc":  "对比不同周期的数据差异，评估业务变化",
+			"title": "本月推广带来的订单量",
+			"desc":  "评估广告效果，看推广对订单的贡献",
 			"icon":  "ChartIcon",
-			"text":  "对比本月与上月数据差异",
+			"text":  "本月推广带来的订单有多少？",
 		},
 	}
 	response.Success(c, suggestions)

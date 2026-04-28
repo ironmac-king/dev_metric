@@ -533,7 +533,16 @@ class MQLGenerator:
                             mql.time.type = TimeType(parsed["type"])
                         except ValueError:
                             pass
-            logger.info(f"[_parse_mql] 时间解析: original={mql.time.original}, start={mql.time.start}, end={mql.time.end}")
+            # 计算时间范围天数
+            if mql.time.start and mql.time.end:
+                from datetime import datetime
+                try:
+                    start_dt = datetime.strptime(mql.time.start, "%Y-%m-%d")
+                    end_dt = datetime.strptime(mql.time.end, "%Y-%m-%d")
+                    mql.time.days = (end_dt - start_dt).days
+                except ValueError:
+                    pass
+            logger.info(f"[_parse_mql] 时间解析: original={mql.time.original}, start={mql.time.start}, end={mql.time.end}, days={mql.time.days}")
 
         # 加载 dimension_configs 动态映射
         self._load_dimension_configs()

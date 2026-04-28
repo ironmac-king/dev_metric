@@ -970,25 +970,26 @@ WHERE ( {current_cond} )
         select_parts = []
 
         # 添加维度列（去重）
+        # 只有维度没有具体值时才加入 SELECT（否则已在 WHERE 过滤）
         seen_dim_cols = set()
         for dim in mql.dimensions:
             col = dim.column if dim.column else self._get_dimension_column(dim.type)
-            if col and col not in seen_dim_cols:
+            if col and col not in seen_dim_cols and not dim.value:
                 seen_dim_cols.add(col)
                 select_parts.append(col)
 
-        # 如果有时间过滤且是月粒度查询，确保时间列加入 SELECT
-        # QUERY_RANKING 场景下不加——排名需要整个时间范围汇总
-        if mql.intent != MQLIntent.QUERY_RANKING:
+        # 如果有时间过滤，确保时间列加入 SELECT
+        # QUERY_TREND 根据时间范围决定粒度，QUERY_RANKING 不按时间拆分
+        if mql.intent == MQLIntent.QUERY_TREND and mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
+            if mql.time.days <= 31:
+                if "FDATE" not in select_parts:
+                    select_parts.append("FDATE")
+            else:
+                if self.COL_MONTHS not in select_parts:
+                    select_parts.append(f"MONTH(FDATE) AS MONTHS")
+        elif mql.intent != MQLIntent.QUERY_RANKING:
             if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-                # QUERY_TREND 且无业务维度时，按天分组，SELECT 加 FDATE
-                if mql.intent == MQLIntent.QUERY_TREND and not any(
-                    (dim.type and dim.type.startswith('GROUP_')) or dim.type in ('REGION', 'PLATFORM', 'FSITE', 'FCOUNTRY', 'FBRAND', 'FPRODUCTLINE')
-                    for dim in mql.dimensions
-                ):
-                    if "FDATE" not in select_parts:
-                        select_parts.append("FDATE")
-                elif self.COL_MONTHS not in select_parts:
+                if self.COL_MONTHS not in select_parts:
                     select_parts.append(f"MONTH(FDATE) AS MONTHS")
 
         # 检查是否有维度分组（GROUP_X 等）- 有维度分组时不需要日期范围字段
@@ -1540,25 +1541,31 @@ WHERE ( {current_cond} )
         seen_cols = set()  # 去重
 
         # 添加维度列
+        # 只有维度没有具体值时才加入 GROUP BY（否则已在 WHERE 过滤）
         for dim in mql.dimensions:
             # 优先使用 column，如果为空则从类型映射获取
             col = dim.column if dim.column else self._get_dimension_column(dim.type)
-            if col and col not in seen_cols:
+            if col and col not in seen_cols and not dim.value:
                 seen_cols.add(col)
                 group_by_parts.append(col)
 
-        # 如果有时间过滤且是月粒度查询，确保 MONTH(FDATE) 加入 GROUP BY
-        # 但 QUERY_RANKING 场景下不应该按月拆分——排名需要整个时间范围的汇总
+        # 如果有时间过滤，确保时间列加入 GROUP BY
+        # QUERY_RANKING 不按时间拆分，其他意图根据时间范围决定粒度
         if mql.intent == MQLIntent.QUERY_RANKING:
-            # 排名查询：只按维度分组，不按月拆分
+            # 排名查询：只按维度分组，不按时间拆分
             pass
-        elif mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            # QUERY_TREND 意图且无业务维度时，按天分组（显示每日趋势）
-            # 其他情况按月分组
-            if mql.intent == MQLIntent.QUERY_TREND and not group_by_parts:
+        elif mql.intent == MQLIntent.QUERY_TREND and mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
+            # 趋势查询：根据时间范围决定粒度
+            # 一个月内按日分组，超过一个月按月分组（避免数据太稀疏或太密集）
+            if mql.time.days <= 31:
                 if "FDATE" not in group_by_parts:
                     group_by_parts.append("FDATE")
-            elif self.COL_MONTHS not in group_by_parts:
+            else:
+                if self.COL_MONTHS not in group_by_parts:
+                    group_by_parts.append("MONTH(FDATE)")
+        elif mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
+            # 其他意图：按月分组
+            if self.COL_MONTHS not in group_by_parts:
                 group_by_parts.append("MONTH(FDATE)")
 
         if group_by_parts:
@@ -1593,6 +1600,14 @@ WHERE ( {current_cond} )
             return f"ORDER BY \"{ratio_name}\" DESC"
         # ===========================================
 
+        # ========== QUERY_TREND 模式：按时间排序 ==========
+        if mql.intent == MQLIntent.QUERY_TREND and mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
+            # 趋势查询按时间升序（从早到晚）
+            if mql.time.days <= 31:
+                return "ORDER BY FDATE ASC"
+            return "ORDER BY MONTH(FDATE) ASC"
+        # ============================================
+
         # 默认按指标降序（有 GROUP BY 时必须用聚合函数）
         if mql.metric and (mql.dimensions or is_ranking):
             direction = "DESC"
@@ -1616,11 +1631,14 @@ WHERE ( {current_cond} )
 
         # 时间维度查询按时间排序（近7天、近12个月等）
         if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            # 按时间升序（从早到晚）
-            # 按FDATE分组时用FDATE排序，按MONTH分组时用MONTH排序
-            if mql.intent == MQLIntent.QUERY_TREND and not mql.dimensions:
-                return "ORDER BY FDATE ASC"
-            return "ORDER BY MONTH(FDATE) ASC"
+            # 趋势查询始终按时间升序排序（从早到晚）
+            if mql.intent == MQLIntent.QUERY_TREND:
+                # 按FDATE分组时用FDATE排序，按MONTH分组时用MONTH排序
+                if mql.time.days <= 31:
+                    return "ORDER BY FDATE ASC"
+                return "ORDER BY MONTH(FDATE) ASC"
+            # 其他意图：按指标降序
+            return "ORDER BY SUM(ORDERED_PRODUCTSALES) DESC"
 
         return ""
 
