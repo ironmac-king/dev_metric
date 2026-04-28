@@ -1016,6 +1016,8 @@ class VolatilityRequest(BaseModel):
     data: List[Dict[str, Any]]              # 数据列表，格式：[{date: "2024-01-01", value: 1000, dimension: "京东"}, ...]
     time_range: Optional[Dict[str, str]] = None  # 时间范围
     dimension_key: str = "dimension"         # 维度字段名
+    mom_change: Optional[float] = None       # 环比变化率（SQL层计算好的）
+    yoy_change: Optional[float] = None       # 同比变化率（SQL层计算好的）
 
 
 @router.post("/v2/volatility/stream")
@@ -1044,7 +1046,9 @@ async def volatility_analysis_stream(req: VolatilityRequest):
                 metric_name=req.metric_name,
                 data=req.data,
                 time_range=req.time_range,
-                dimension_key=req.dimension_key
+                dimension_key=req.dimension_key,
+                mom_change=req.mom_change,
+                yoy_change=req.yoy_change
             ):
                 yield event.to_sse()
                 await asyncio.sleep(0.05)  # 让浏览器有时间渲染

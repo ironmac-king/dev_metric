@@ -551,15 +551,19 @@ class VolatilityAnalyzer:
         data: List[Dict],
         time_range: Optional[Dict[str, str]] = None,
         dimension_key: str = "dimension",
-        period_days: int = 7
+        period_days: int = 7,
+        mom_change: Optional[float] = None,
+        yoy_change: Optional[float] = None
     ) -> AsyncGenerator[StreamEvent, None]:
         """
-        流式波动分析（修复版：支持周期参数）
+        流式波动分析（支持SQL层传来的mom/yoy）
 
         Args:
             period_days: 周期天数（默认7天）
+            mom_change: SQL层计算的环比变化率（如果传了就用这个，不再重复计算）
+            yoy_change: SQL层计算的同比变化率（如果传了就用这个，不再重复计算）
         """
-        logger.info(f"[VolatilityAnalyzer] 开始分析指标: {metric_name}, 数据量: {len(data)}, 周期: {period_days}天")
+        logger.info(f"[VolatilityAnalyzer] 开始分析指标: {metric_name}, 数据量: {len(data)}, mom={mom_change}, yoy={yoy_change}")
 
         # 检测数据格式
         data_type = self._detect_data_type(data)
@@ -571,7 +575,10 @@ class VolatilityAnalyzer:
                 yield event
         else:
             # 时间序列数据分析
-            async for event in self._analyze_time_series(metric_name, data, dimension_key, period_days):
+            async for event in self._analyze_time_series(
+                metric_name, data, dimension_key, period_days,
+                mom_change=mom_change, yoy_change=yoy_change
+            ):
                 yield event
 
         logger.info(f"[VolatilityAnalyzer] 分析完成: {metric_name}")
@@ -689,10 +696,12 @@ class VolatilityAnalyzer:
         metric_name: str,
         data: List[Dict],
         dimension_key: str = "dimension",
-        period_days: int = 7
+        period_days: int = 7,
+        mom_change: Optional[float] = None,
+        yoy_change: Optional[float] = None
     ) -> AsyncGenerator[StreamEvent, None]:
         """
-        时间序列数据分析（修复版：拆分当期/上期数据）
+        时间序列数据分析（支持传入SQL层计算的mom/yoy）
         """
         # Step 1: 基础统计（使用周期对比）
         stats = self.calculate_basic_stats(data, period_days)
@@ -700,15 +709,23 @@ class VolatilityAnalyzer:
 
         stats['volatility_rate'] = anomaly_result.get('volatility_rate', 0)
 
+        # 如果SQL层传了mom/yoy，使用传入值而非重新计算
+        final_mom = mom_change if mom_change is not None else stats['mom']
+        final_yoy = yoy_change if yoy_change is not None else stats['yoy']
+
+        # 更新stats中的mom/yoy（供LLM分析用）
+        stats['mom'] = final_mom
+        stats['yoy'] = final_yoy
+
         overview_data = {
             "metric_name": metric_name,
             "current_value": stats['current'],
             "prev_value": stats['prev'],
             "avg_value": stats['avg'],
-            "mom_change": stats['mom'],
-            "mom_change_pct": f"{stats['mom']*100:.1f}%",
-            "yoy_change": stats['yoy'],
-            "yoy_change_pct": f"{stats['yoy']*100:.1f}%",
+            "mom_change": final_mom,
+            "mom_change_pct": f"{final_mom*100:.1f}%",
+            "yoy_change": final_yoy,
+            "yoy_change_pct": f"{final_yoy*100:.1f}%",
             "volatility_rate": stats['volatility_rate'],
             "volatility_rate_pct": f"{stats['volatility_rate']*100:.1f}%",
             "anomaly_level": anomaly_result['anomaly_level'],

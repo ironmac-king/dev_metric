@@ -322,7 +322,10 @@ function startStream(data) {
   const requestData = {
     metric_name: data.metric_name || props.metricName,
     data: transformedData,
-    dimension_key: data.dimension_key || 'dimension'
+    dimension_key: data.dimension_key || 'dimension',
+    // 传递SQL层计算好的mom/yoy
+    mom_change: data.mom_change ?? null,
+    yoy_change: data.yoy_change ?? null
   }
 
   fetchVolatilityData(requestData)
