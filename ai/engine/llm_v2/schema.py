@@ -334,6 +334,20 @@ class MQLSchema:
     # 解析后的问题（同义词替换）
     resolved_question: str = ""
 
+    @property
+    def has_mom(self) -> bool:
+        """是否有环比计算"""
+        if self.comparison and self.comparison.types:
+            return "环比" in self.comparison.types
+        return any(p.value == "mom" for p in (self.calculation_patterns or []))
+
+    @property
+    def has_yoy(self) -> bool:
+        """是否有同比计算"""
+        if self.comparison and self.comparison.types:
+            return "同比" in self.comparison.types
+        return any(p.value == "yoy" for p in (self.calculation_patterns or []))
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {

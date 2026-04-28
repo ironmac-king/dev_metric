@@ -452,22 +452,10 @@ LIMIT 20
             except Exception:
                 pass
 
-        from ..schema import CalculationPattern
-        def _is_mom(p):
-            if isinstance(p, CalculationPattern):
-                return p == CalculationPattern.MOM or p.value == "mom"
-            return str(p).lower() == "mom"
-        def _is_yoy(p):
-            if isinstance(p, CalculationPattern):
-                return p == CalculationPattern.YOY or p.value == "yoy"
-            return str(p).lower() == "yoy"
-
-        has_mom = any(_is_mom(p) for p in mql.calculation_patterns)
-        has_yoy = any(_is_yoy(p) for p in mql.calculation_patterns)
-        # 同时检查 comparison.types（intent_router 会设置这个）
-        if mql.comparison and mql.comparison.types:
-            has_mom = has_mom or "环比" in mql.comparison.types
-            has_yoy = has_yoy or "同比" in mql.comparison.types
+        # 使用 MQLSchema 的 has_mom/has_yoy 属性判断是否需要环比/同比计算
+        # has_mom_compare/has_yoy_compare 是基于是否成功推断出对比周期
+        has_mom = mql.has_mom
+        has_yoy = mql.has_yoy
 
         # 如果有 mql.comparison 的指定时间，优先使用
         if mql.comparison:
@@ -621,151 +609,71 @@ LIMIT 20
         dim_group = dim_select
         has_dim_groupby = bool(dim_columns)
 
-        if has_dim_groupby:
-            # 有业务维度，按业务维度 + MONTHS 分组
-            select_clause = f"{dim_select}, MONTHS"
-            group_clause = f"{dim_group}, MONTHS"
+        logger.info(f"[_build_mom_sql] dim_columns={dim_columns}, has_dim_groupby={has_dim_groupby}")
 
-            # 构建同时包含 MoM 和 YoY 的 SQL
-            if has_mom_compare and has_yoy_compare:
-                # 同时有 MoM 和 YoY
-                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_chg = self._build_change_expr(current_cond, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_chg = self._build_change_expr(current_cond, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT {select_clause},
-       {curr_val} AS "当前值",
-       {mom_val} AS "环比值",
-       {mom_chg} AS "环比变化",
-       {yoy_val} AS "同比值",
-       {yoy_chg} AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-   OR ( {where_mom} )
-   OR ( {where_yoy} )
-GROUP BY {group_clause}
-ORDER BY {dim_group}, MONTHS
-LIMIT 20
-""".strip()
-            elif has_mom_compare:
-                # 只有 MoM
-                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_chg = self._build_change_expr(current_cond, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT {select_clause},
-       {curr_val} AS "当前值",
-       {mom_val} AS "环比值",
-       {mom_chg} AS "环比变化",
-       NULL AS "同比值",
-       NULL AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-   OR ( {where_mom} )
-GROUP BY {group_clause}
-ORDER BY {dim_group}, MONTHS
-LIMIT 20
-""".strip()
-            elif has_yoy_compare:
-                # 只有 YoY
-                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_chg = self._build_change_expr(current_cond, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT {select_clause},
-       {curr_val} AS "当前值",
-       NULL AS "环比值",
-       NULL AS "环比变化",
-       {yoy_val} AS "同比值",
-       {yoy_chg} AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-   OR ( {where_yoy} )
-GROUP BY {group_clause}
-ORDER BY {dim_group}, MONTHS
-LIMIT 20
-""".strip()
+        # ========================================================
+        # 构建最终 SQL：统一使用 mql.has_mom/has_yoy 控制输出列
+        # has_mom_compare/has_yoy_compare 控制是否有对比周期数据
+        # ========================================================
+
+        # 构建当前值表达式（总是需要）
+        curr_val = self._build_value_expr(
+            current_cond if has_dim_groupby else current_time_only,
+            metric_field_sql, is_compound_metric, molecule_field, denominator_field
+        )
+
+        # 构建对比周期表达式（仅当有对比周期时）
+        mom_val = mom_chg = yoy_val = yoy_chg = None
+        if has_mom_compare:
+            mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+            mom_chg = self._build_change_expr(
+                current_cond if has_dim_groupby else current_time_only,
+                where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field
+            )
+        if has_yoy_compare:
+            yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
+            yoy_chg = self._build_change_expr(
+                current_cond if has_dim_groupby else current_time_only,
+                where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field
+            )
+
+        # 构建 SELECT 列（根据是否请求了环比/同比决定输出哪些列）
+        select_parts = []
+        if has_dim_groupby:
+            select_parts.append(dim_select)
+        select_parts.append(f"{curr_val} AS \"当前值\"")
+        if has_mom:
+            if mom_val:
+                select_parts.append(f"{mom_val} AS \"环比值\"")
+                select_parts.append(f"{mom_chg} AS \"环比变化\"")
             else:
-                # 没有有效对比周期，只查当前周期
-                curr_val = self._build_value_expr(current_cond, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT {select_clause},
-       {curr_val} AS "当前值",
-       NULL AS "环比值",
-       NULL AS "环比变化",
-       NULL AS "同比值",
-       NULL AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-GROUP BY {group_clause}
-ORDER BY {dim_group}, MONTHS
-LIMIT 20
-""".strip()
-        else:
-            # 没有业务维度需要 GROUP BY，但 CASE WHEN 中仍需使用纯时间条件（避免 StarRocks 严格模式报错）
-            # 注意：where_mom 和 where_yoy 已经包含维度过滤，这里只取时间条件用于 CASE WHEN
-            if has_mom_compare and has_yoy_compare:
-                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_chg = self._build_change_expr(current_time_only, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_chg = self._build_change_expr(current_time_only, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT
-       {curr_val} AS "当前值",
-       {mom_val} AS "环比值",
-       {mom_chg} AS "环比变化",
-       {yoy_val} AS "同比值",
-       {yoy_chg} AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-   OR ( {where_mom} )
-   OR ( {where_yoy} )
-""".strip()
-            elif has_mom_compare:
-                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                mom_chg = self._build_change_expr(current_time_only, where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT
-       {curr_val} AS "当前值",
-       {mom_val} AS "环比值",
-       {mom_chg} AS "环比变化",
-       NULL AS "同比值",
-       NULL AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-   OR ( {where_mom} )
-""".strip()
-            elif has_yoy_compare:
-                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                yoy_chg = self._build_change_expr(current_time_only, where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT
-       {curr_val} AS "当前值",
-       NULL AS "环比值",
-       NULL AS "环比变化",
-       {yoy_val} AS "同比值",
-       {yoy_chg} AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-   OR ( {where_yoy} )
-""".strip()
+                select_parts.append("NULL AS \"环比值\"")
+                select_parts.append("NULL AS \"环比变化\"")
+        if has_yoy:
+            if yoy_val:
+                select_parts.append(f"{yoy_val} AS \"同比值\"")
+                select_parts.append(f"{yoy_chg} AS \"同比变化\"")
             else:
-                curr_val = self._build_value_expr(current_time_only, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-                sql = f"""
-SELECT
-       {curr_val} AS "当前值",
-       NULL AS "环比值",
-       NULL AS "环比变化",
-       NULL AS "同比值",
-       NULL AS "同比变化"
-FROM {self.DEFAULT_TABLE}
-WHERE ( {current_cond} )
-""".strip()
+                select_parts.append("NULL AS \"同比值\"")
+                select_parts.append("NULL AS \"同比变化\"")
+        select_clause = ",\n       ".join(select_parts)
+
+        # 构建 WHERE 子句
+        where_parts = [f"( {current_cond} )"]
+        if has_mom_compare:
+            where_parts.append(f"( {where_mom} )")
+        if has_yoy_compare:
+            where_parts.append(f"( {where_yoy} )")
+        where_clause = "\n   OR ".join(where_parts)
+
+        # 构建最终 SQL
+        sql_parts = [f"SELECT {select_clause}", f"FROM {self.DEFAULT_TABLE}", f"WHERE {where_clause}"]
+        if has_dim_groupby:
+            sql_parts.append(f"GROUP BY {dim_group}")
+            sql_parts.append(f"ORDER BY {dim_group}")
+            sql_parts.append("LIMIT 20")
+
+        sql = "\n".join(sql_parts)
 
         logger.info(f"[_build_mom_sql] SQL: {sql[:300]}")
         return sql
@@ -1605,7 +1513,7 @@ WHERE ( {current_cond} )
             # 趋势查询按时间升序（从早到晚）
             if mql.time.days <= 31:
                 return "ORDER BY FDATE ASC"
-            return "ORDER BY MONTH(FDATE) ASC"
+            return "ORDER BY MONTHS ASC"
         # ============================================
 
         # 默认按指标降序（有 GROUP BY 时必须用聚合函数）
@@ -1636,7 +1544,7 @@ WHERE ( {current_cond} )
                 # 按FDATE分组时用FDATE排序，按MONTH分组时用MONTH排序
                 if mql.time.days <= 31:
                     return "ORDER BY FDATE ASC"
-                return "ORDER BY MONTH(FDATE) ASC"
+                return "ORDER BY MONTHS ASC"
             # 其他意图：按指标降序
             return "ORDER BY SUM(ORDERED_PRODUCTSALES) DESC"
 

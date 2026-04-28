@@ -49,6 +49,39 @@ class ResultAnalyzer:
         except Exception:
             return {}
 
+    def _get_alternative_dimensions(self, current_dim_type: str = None) -> tuple:
+        """
+        获取与当前维度不同的替代维度，用于建议问题生成。
+
+        优先级：站点 > 三级品类 > 二级品类 > 一级品类
+        即：如果当前是站点 → 推荐三级品类
+            如果当前是三级品类 → 推荐站点
+            ...
+        """
+        dim_priority = ["FSITE", "GROUP_3", "GROUP_2", "GROUP_1"]
+        # 中文类型名 → 英文字段名 映射
+        dim_type_to_col = {
+            "站点": "FSITE", "FSITE": "FSITE",
+            "三级品类": "GROUP_3", "GROUP_3": "GROUP_3",
+            "二级品类": "GROUP_2", "GROUP_2": "GROUP_2",
+            "一级品类": "GROUP_1", "GROUP_1": "GROUP_1",
+            "四级品类": "GROUP_4", "GROUP_4": "GROUP_4",
+            "ASIN": "ASIN", "SKU": "SKU",
+            "平台": "PLATFORM", "PLATFORM": "PLATFORM",
+        }
+        label_map = self._get_dim_label_from_service()
+
+        if not current_dim_type:
+            dim_col = dim_priority[0]
+        else:
+            # 将中文/英文类型名统一转换为英文字段名
+            current_col = dim_type_to_col.get(current_dim_type, current_dim_type.upper())
+            candidates = [d for d in dim_priority if d != current_col]
+            dim_col = candidates[0] if candidates else dim_priority[0]
+
+        dim_label = label_map.get(dim_col, dim_col)
+        return dim_col, dim_label
+
     async def analyze(
         self,
         mql: MQLSchema,
@@ -199,23 +232,24 @@ class ResultAnalyzer:
                 # 收集所有指标名用于建议
                 metric_names = [mql.metric.name] if mql.metric else []
                 metric_names.extend([m.name for m in mql.metrics if m.name])
+                _, alt_label = self._get_alternative_dimensions(None)
                 return {
                     "answer": answer,
                     "suggestions": [
-                        f"查看{time_context}{metric_names[0]}趋势变化" if metric_names else f"查看{time_context}趋势变化",
-                        f"对比上月{metric_names[0]}" if metric_names else "对比上月",
+                        f"查看{time_context}各{alt_label}{metric_names[0]}趋势变化" if metric_names else f"查看{time_context}各{alt_label}趋势变化",
+                        f"按{alt_label}维度对比上月" if metric_names else f"按{alt_label}维度对比上月",
                     ],
                 }
             else:
                 # 单指标查询
                 value = list(row.values())[0] if row else 0
                 formatted_value = self._format_value(value)
-
+                _, alt_label = self._get_alternative_dimensions(None)
                 return {
                     "answer": f"{metric_name}为 {formatted_value}",
                     "suggestions": [
-                        f"查看{time_context}{metric_name}趋势变化",
-                        f"对比上月{metric_name}",
+                        f"查看{time_context}各{alt_label}{metric_name}趋势变化",
+                        f"按{alt_label}维度对比上月",
                     ],
                 }
 
@@ -248,50 +282,16 @@ class ResultAnalyzer:
         if len(data) > 5:
             answer += f"\n... 还有 {len(data) - 5} 条数据"
 
-        # 生成带维度上下文的建议
+        # 生成带维度上下文的建议（维度错开，时间一致）
         time_context = self._get_time_context(mql)
-        dim_label = ""
-        dim_context = ""
-
-        if mql.dimensions and len(mql.dimensions) > 0:
-            dim = mql.dimensions[0]
-            if dim.type:
-                # 用 DimensionService 把 column name 转为用户友好名称
-                col_upper = dim.type.upper()
-                label_map = self._get_dim_label_from_service()
-                dim_label = label_map.get(col_upper, dim.type)
-                # 如果 dim_label 已经是列名(如FSITE/GROUP_1)而不是中文，说明用户输入可能已带"各"前缀
-                # 这种情况 dim_context 不再加"各"
-                if dim_label.upper() == col_upper:
-                    dim_context = dim_label  # e.g., "FSITE"
-                else:
-                    dim_context = f"各{dim_label}" if dim_label else ""
-        else:
-            # 无维度，从 DimensionService 拿默认维度
-            try:
-                from ai.services.dimension_service import DimensionService
-                svc = DimensionService()
-                options = svc.get_ranking_options()
-                time_cols = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
-                for opt in options:
-                    col = opt.get("value", "")
-                    label = opt.get("label", "")
-                    if col.upper() not in time_cols:
-                        if label.startswith("按"):
-                            dim_label = label[1:]
-                        else:
-                            dim_label = label
-                        dim_context = f"各{dim_label}" if dim_label else ""
-                        break
-            except Exception:
-                dim_label = ""
-                dim_context = ""
+        current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+        _, alt_label = self._get_alternative_dimensions(current_dim)
 
         return {
             "answer": answer,
             "suggestions": [
-                f"查看{time_context}{dim_context}{metric_name}排名前10",
-                f"按{dim_label}维度分析{metric_name}" if dim_label else f"按维度分析{metric_name}",
+                f"查看{time_context}各{alt_label}{metric_name}排名前10",
+                f"按{alt_label}维度分析{metric_name}",
             ],
         }
 
@@ -332,9 +332,8 @@ class ResultAnalyzer:
             unit = mql.metric.unit if mql.metric and mql.metric.unit else ""
 
             # 判断是 MoM 还是 YoY
-            comparison_types = mql.comparison.types if mql.comparison and mql.comparison.types else []
-            is_yoy = "同比" in comparison_types
-            is_mom = "环比" in comparison_types
+            is_yoy = mql.has_yoy
+            is_mom = mql.has_mom
 
             if is_yoy and yoy_val is not None and yoy_val != 0:
                 # 同比数据
@@ -379,12 +378,42 @@ class ResultAnalyzer:
 
                 answer = f"{metric_name}整体{trend_desc}，{change_desc}（当前：{current_str}，对比期：{compare_str}）"
 
+            current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+            _, alt_label = self._get_alternative_dimensions(current_dim)
+
+            # 获取多个替代维度（三级品类 + 二级品类 + 一级品类）
+            dim_priority = ["FSITE", "GROUP_3", "GROUP_2", "GROUP_1"]
+            label_map = self._get_dim_label_from_service()
+            dim_type_to_col = {
+                "站点": "FSITE", "FSITE": "FSITE",
+                "三级品类": "GROUP_3", "GROUP_3": "GROUP_3",
+                "二级品类": "GROUP_2", "GROUP_2": "GROUP_2",
+                "一级品类": "GROUP_1", "GROUP_1": "GROUP_1",
+            }
+            current_col = dim_type_to_col.get(current_dim, current_dim.upper()) if current_dim else "FSITE"
+            # 过滤掉当前维度，取后续所有维度
+            alt_dims = [d for d in dim_priority if d != current_col]
+
+            # 用户问环比 → 推荐同比+异维度；用户问同比 → 推荐环比+异维度
+            if is_mom:
+                alt_type = "同比"
+                same_type = "环比"
+            else:
+                alt_type = "环比"
+                same_type = "同比"
+
+            # 第一建议：当前维度的另一种对比类型（如 同比 → 环比）
+            # 第二、三建议：其他维度 + 当前对比类型（提供不同视角）
+            suggestions = [
+                f"查看各{alt_label}{metric_name}{alt_type}变化",
+            ]
+            for dim_col in alt_dims[:2]:  # 最多加两个异维度建议
+                dim_lbl = label_map.get(dim_col, dim_col)
+                suggestions.append(f"查看各{dim_lbl}{metric_name}{same_type}变化")
+
             return {
                 "answer": answer,
-                "suggestions": [
-                    f"查看{metric_name}同比变化",
-                    f"查看{metric_name}环比变化",
-                ],
+                "suggestions": suggestions,
             }
 
         # 原始时间序列趋势分析（多行数据）
@@ -416,11 +445,13 @@ class ResultAnalyzer:
         trend = "上升" if change > 0 else "下降"
         answer = f"趋势{trend}，变化幅度 {abs(change):.1f}%"
 
+        current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+        _, alt_label = self._get_alternative_dimensions(current_dim)
         return {
             "answer": answer,
             "suggestions": [
-                f"查看{metric_name}同比变化",
-                f"查看{metric_name}环比变化",
+                f"查看各{alt_label}{metric_name}同比变化",
+                f"查看各{alt_label}{metric_name}环比变化",
             ],
         }
 
@@ -462,9 +493,8 @@ class ResultAnalyzer:
             trend = row.get('trend', '')
 
             # 判断是环比(MoM)还是同比(YoY)
-            comparison_types = mql.comparison.types if mql.comparison and mql.comparison.types else []
-            is_yoy = "同比" in comparison_types
-            is_mom = "环比" in comparison_types
+            is_yoy = mql.has_yoy
+            is_mom = mql.has_mom
             period_label = "同比" if is_yoy else ("环比" if is_mom else "")
 
             # 从 MQL time 提取实际期间描述
@@ -514,12 +544,39 @@ class ResultAnalyzer:
                 compare_period = "对比期"
                 answer = f"{metric_name}{period_label}{trend_desc}{change_desc}。{current_period}为 {int(current_val):,}，{compare_period}为 {int(compare_val or 0):,}。"
 
+            current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+            _, alt_label = self._get_alternative_dimensions(current_dim)
+
+            # 获取多个替代维度
+            dim_priority = ["FSITE", "GROUP_3", "GROUP_2", "GROUP_1"]
+            label_map = self._get_dim_label_from_service()
+            dim_type_to_col = {
+                "站点": "FSITE", "FSITE": "FSITE",
+                "三级品类": "GROUP_3", "GROUP_3": "GROUP_3",
+                "二级品类": "GROUP_2", "GROUP_2": "GROUP_2",
+                "一级品类": "GROUP_1", "GROUP_1": "GROUP_1",
+            }
+            current_col = dim_type_to_col.get(current_dim, current_dim.upper()) if current_dim else "FSITE"
+            alt_dims = [d for d in dim_priority if d != current_col]
+
+            # 用户问环比 → 推荐同比+异维度；用户问同比 → 推荐环比+异维度
+            if is_mom:
+                alt_type = "同比"
+                same_type = "环比"
+            else:
+                alt_type = "环比"
+                same_type = "同比"
+
+            suggestions = [
+                f"查看{time_context}各{alt_label}{metric_name}{alt_type}变化",
+            ]
+            for dim_col in alt_dims[:2]:
+                dim_lbl = label_map.get(dim_col, dim_col)
+                suggestions.append(f"查看{time_context}各{dim_lbl}{metric_name}{same_type}变化")
+
             return {
                 "answer": answer,
-                "suggestions": [
-                    f"查看{time_context}{metric_name}详细数据",
-                    f"查看{time_context}{metric_name}趋势变化",
-                ],
+                "suggestions": suggestions,
             }
 
         # 传统对比查询（两行数据）
@@ -529,12 +586,13 @@ class ResultAnalyzer:
                 "suggestions": [],
             }
 
-        # TODO: 更智能的对比分析
+        current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+        _, alt_label = self._get_alternative_dimensions(current_dim)
         return {
             "answer": f"对比结果已生成，详见数据",
             "suggestions": [
-                f"查看{time_context}{metric_name}详细数据",
-                f"查看{time_context}{metric_name}趋势变化",
+                f"查看{time_context}各{alt_label}{metric_name}详细数据",
+                f"查看{time_context}各{alt_label}{metric_name}趋势变化",
             ],
         }
 
@@ -555,40 +613,15 @@ class ResultAnalyzer:
 
         metric_name = mql.metric.name if mql.metric else "指标值"
 
-        # 决定建议问题中的维度上下文
-        dim_label = ""
-        if mql.dimensions and len(mql.dimensions) > 0:
-            # 有维度，用已有的
-            dim = mql.dimensions[0]
-            dim_label = f"各{dim.type}" if dim.type else "各维度"
-        else:
-            # 无维度，从 DimensionService 拿一个默认维度
-            try:
-                from ai.services.dimension_service import DimensionService
-                svc = DimensionService()
-                options = svc.get_ranking_options()
-                # 找第一个非时间维度的选项
-                time_cols = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
-                for opt in options:
-                    col = opt.get("value", "")
-                    label = opt.get("label", "")
-                    if col.upper() not in time_cols:
-                        # label 格式是 "按平台"，去掉"按"得到"平台"
-                        if label.startswith("按"):
-                            dim_label = label[1:]
-                        else:
-                            dim_label = label
-                        break
-            except Exception:
-                dim_label = "各维度"
-
-        dim_context = f"各{dim_label}" if dim_label else ""
+        # 生成维度错开的建议
+        current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+        _, alt_label = self._get_alternative_dimensions(current_dim)
 
         return {
             "answer": "\n".join(lines),
             "suggestions": [
-                f"查看更多{time_context}{dim_context}{metric_name}排名",
-                f"查看{time_context}{dim_context}{metric_name}占比分布",
+                f"查看更多{time_context}各{alt_label}{metric_name}排名",
+                f"查看{time_context}各{alt_label}{metric_name}占比分布",
             ],
         }
 
@@ -602,38 +635,6 @@ class ResultAnalyzer:
         data = sql_result.data
         metric_name = mql.metric.name if mql.metric else "指标值"
         time_context = self._get_time_context(mql)
-
-        # 计算维度上下文
-        dim_label = ""
-        dim_context = ""
-        if mql.dimensions and len(mql.dimensions) > 0:
-            dim = mql.dimensions[0]
-            if dim.type:
-                col_upper = dim.type.upper()
-                label_map = self._get_dim_label_from_service()
-                dim_label = label_map.get(col_upper, dim.type)
-                if dim_label.upper() == col_upper:
-                    dim_context = dim_label
-                else:
-                    dim_context = f"各{dim_label}" if dim_label else ""
-        else:
-            try:
-                from ai.services.dimension_service import DimensionService
-                svc = DimensionService()
-                options = svc.get_ranking_options()
-                time_cols = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
-                for opt in options:
-                    col = opt.get("value", "")
-                    label = opt.get("label", "")
-                    if col.upper() not in time_cols:
-                        if label.startswith("按"):
-                            dim_label = label[1:]
-                        else:
-                            dim_label = label
-                        dim_context = f"各{dim_label}" if dim_label else ""
-                        break
-            except Exception:
-                pass
 
         # 计算总体的各部分占比
         if not data:
@@ -666,11 +667,15 @@ class ResultAnalyzer:
                 except (ValueError, TypeError):
                     continue
 
+        # 生成维度错开的建议
+        current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+        _, alt_label = self._get_alternative_dimensions(current_dim)
+
         return {
             "answer": "\n".join(lines),
             "suggestions": [
-                f"查看{time_context}{dim_context}{metric_name}详细数据",
-                f"查看{time_context}{dim_context}{metric_name}趋势变化",
+                f"查看{time_context}各{alt_label}{metric_name}详细数据",
+                f"查看{time_context}各{alt_label}{metric_name}趋势变化",
             ],
         }
 
