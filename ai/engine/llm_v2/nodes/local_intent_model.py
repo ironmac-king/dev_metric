@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, List
 from transformers import AutoTokenizer, AutoModel
 
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from ai.services.dimension_service import DimensionService
 
 logger = get_logger("ai.llm_v2.local_intent_model")
@@ -51,7 +52,7 @@ ID2TAG = {i: tag for i, tag in enumerate(BIO_TAGS)}
 TIME_EXPRESSIONS = [
     '今日', '昨日', '本周', '上周', '本月', '上月',
     '本季度', '上季度', '本年', '去年', '今年',
-    '近7天', '近30天', '近3个月',
+    '近7天', '近30天', '近3个月', '最近一周', '最近7天',
     '2024年1月', '2023年Q4',
     '本月至今', '本年至今', '今日实时',
     # 季度表达式
@@ -456,7 +457,7 @@ class LocalJointIntentModel:
         # 尝试从 Go API 加载业务术语同义词
         try:
             import httpx
-            response = httpx.get('http://localhost:8080/api/v1/metadata/terms', timeout=5)
+            response = httpx.get(f"{get_go_api_base()}/api/v1/metadata/terms", timeout=5)
             if response.status_code == 200:
                 terms = response.json().get('data', [])
                 for term_info in terms:
@@ -552,6 +553,20 @@ class LocalJointIntentModel:
                         'end': pos + len(val)
                     })
                     start = pos + 1
+
+        # 正则匹配：补充识别 \d{4}年 系列（本地模型未训练的时间表达式）
+        year_patterns = [
+            (r'(\d{4})年(\d{1,2})月', 'TIME'),  # 2024年7月
+            (r'(\d{4})年', 'TIME'),              # 2025年
+        ]
+        for pattern, etype in year_patterns:
+            for match in re.finditer(pattern, text):
+                rule_matches.append({
+                    'text': match.group(0),
+                    'type': etype,
+                    'start': match.start(),
+                    'end': match.end()
+                })
 
         # 合并：词典匹配优先，模型预测补充
         all_entities = []

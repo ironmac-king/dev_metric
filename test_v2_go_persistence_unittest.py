@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ai.engine.llm_v2.router import _save_v2_session_to_go
 from ai.engine.llm_v2.schema import MQLIntent, MQLMetric, MQLSchema, SQLResult, TimeRange, TimeType, V2State, create_v2_state
@@ -17,7 +17,7 @@ class V2GoPersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
         state.sql_result = SQLResult(sql=state.sql, data=[{"销售额": 100}], columns=["销售额"], total=1)
 
-        mock_response = AsyncMock()
+        mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
         mock_client = AsyncMock()
         mock_client.post.return_value = mock_response

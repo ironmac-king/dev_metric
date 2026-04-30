@@ -1817,7 +1817,7 @@ async function saveTerm() {
     loadData()
     // 热更新 AI 服务缓存
     try {
-      await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+      await fetch('/api/v1/admin/reload-config', { method: 'POST' })
       ElMessage.success('AI 服务缓存已刷新')
     } catch (e) {
       console.warn('热更新失败:', e)
@@ -1842,7 +1842,7 @@ async function removeSynonym(termId, synonymIndex) {
     loadData()
     // 热更新 AI 服务缓存
     try {
-      await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+      await fetch('/api/v1/admin/reload-config', { method: 'POST' })
     } catch (e) {
       console.warn('热更新失败:', e)
     }
@@ -1859,7 +1859,7 @@ async function deleteTerm(id) {
     loadData()
     // 热更新 AI 服务缓存
     try {
-      await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+      await fetch('/api/v1/admin/reload-config', { method: 'POST' })
       ElMessage.success('AI 服务缓存已刷新')
     } catch (e) {
       console.warn('热更新失败:', e)
@@ -2145,7 +2145,7 @@ async function savePrompt() {
       loadPrompts()
       // 热更新 Prompt 缓存
       try {
-        await fetch('http://localhost:8081/api/v1/admin/reload-config', { method: 'POST' })
+        await fetch('/api/v1/admin/reload-config', { method: 'POST' })
       } catch (e) {
         console.warn('热更新失败:', e)
       }

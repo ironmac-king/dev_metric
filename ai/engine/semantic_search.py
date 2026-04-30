@@ -8,6 +8,7 @@ import numpy as np
 import httpx
 import json
 import os
+from ai.config.runtime import get_go_api_base
 from ai.engine.embedding_client import embedding_client, alibaba_embedding_client
 from ai.client.http_client import get_http_client
 
@@ -33,8 +34,8 @@ class SemanticSearch:
     _cache_timestamp: float = 0
     _CACHE_TTL: int = 300  # 缓存5分钟
 
-    def __init__(self, api_base: str = "http://localhost:8080"):
-        self.api_base = api_base
+    def __init__(self, api_base: Optional[str] = None):
+        self.api_base = api_base or get_go_api_base()
         # 内存向量存储
         self._intent_vectors: Dict[str, np.ndarray] = {}  # text -> embedding
         self._intent_types: Dict[str, str] = {}  # text -> intent_type

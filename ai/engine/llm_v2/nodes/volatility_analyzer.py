@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, AsyncGenerator
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from ai.engine.llm import get_llm_engine
 from ..streaming import StreamEvent, SSSEvent
 
@@ -51,6 +52,7 @@ class VolatilityAnalyzer:
 
     def __init__(self):
         self._llm_engine = get_llm_engine()
+        self._go_api_base = get_go_api_base()
 
     async def calculate_basic_stats(
         self,
@@ -241,7 +243,7 @@ class VolatilityAnalyzer:
             import httpx
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    "http://localhost:8080/api/v1/query/execute",
+                    f"{self._go_api_base}/api/v1/query/execute",
                     json={"sql": sql, "timeout": 30},
                 )
                 data = resp.json()
@@ -306,17 +308,9 @@ class VolatilityAnalyzer:
         prev_start = current_start - timedelta(days=day_count)
         prev_end = current_end - timedelta(days=day_count)
 
-        # 构建维度过滤条件（去重）
+        # 构建维度过滤条件（去重）- SKU 粒度查询不加维度过滤，看整体 top/bottom SKU
+        # （dimension_filters 来自 metric 定义，对 SKU 粒度查询会过度约束导致 0 行）
         dim_filter_clause = ""
-        if dimension_filters:
-            seen = set()
-            for f in dimension_filters:
-                col = f.get("column", "")
-                val = f.get("value", "")
-                key = f"{col}={val}"
-                if col and val and key not in seen:
-                    seen.add(key)
-                    dim_filter_clause += f" AND {col} = '{val}'"
 
         async def query_sku(sql: str) -> List[Dict]:
             """执行 SQL 并返回按 SKU 分组的结果"""
@@ -324,20 +318,29 @@ class VolatilityAnalyzer:
                 import httpx
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.post(
-                        "http://localhost:8080/api/v1/query/execute",
+                        f"{self._go_api_base}/api/v1/query/execute",
                         json={"sql": sql, "timeout": 30},
                     )
                     data = resp.json()
+                    logger.info(f"[_query_sku_dimension_data] API响应: code={data.get('code')}, keys={list(data.keys())}, count={data.get('count')}")
+                    # Go API 返回格式: {code: 0, data: {data: [...], columns: [...]}} 或 {cached: True, columns: [...], count: 0, data: null}
+                    rows = None
                     if data.get("code") == 0 and data.get("data"):
                         inner = data["data"]
                         rows = inner.get("data") if isinstance(inner, dict) else inner
-                        result = []
-                        for row in rows:
-                            sku = row.get("SKU") or row.get("sku") or row.get(list(row.keys())[0]) if row else None
-                            val = row.get(metric_field) or row.get(list(row.keys())[1]) if row else None
-                            if sku is not None and val is not None:
-                                result.append({"dimension": str(sku), "value": float(val)})
-                        return result
+                    elif "columns" in data:
+                        # 无 code 字段的响应格式
+                        rows = data.get("data")
+                    if rows is None or not isinstance(rows, list):
+                        logger.warning(f"[_query_sku_dimension_data] rows无效, rows={rows}, sql={sql[:100]}")
+                        return []
+                    result = []
+                    for row in rows:
+                        sku = row.get("SKU") or row.get("sku") or row.get(list(row.keys())[0]) if row else None
+                        val = row.get(metric_field) or row.get(list(row.keys())[1]) if row else None
+                        if sku is not None and val is not None:
+                            result.append({"dimension": str(sku), "value": float(val)})
+                    return result
             except Exception as e:
                 logger.warning(f"[_query_sku_dimension_data] SKU查询失败: {e}, sql={sql[:100]}")
             return []
@@ -445,7 +448,7 @@ ORDER BY 月份, SKU
                 import httpx
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.post(
-                        "http://localhost:8080/api/v1/query/execute",
+                        f"{self._go_api_base}/api/v1/query/execute",
                         json={"sql": sql, "timeout": 30},
                     )
                     data = resp.json()
@@ -765,7 +768,7 @@ ORDER BY 月份, SKU
         related_block = "无关联数据"
         current_ind = related_indicators.get("current", [])
         prev_ind = related_indicators.get("prev", [])
-        if current_ind:
+        if current_ind and len(current_ind) > 0:
             def to_float(val):
                 try:
                     return float(val)
@@ -789,9 +792,14 @@ ORDER BY 月份, SKU
                 prev_m = prev_months_sorted[i] if i < len(prev_months_sorted) else None
                 month_pos_map[curr_m] = prev_m
 
-            # 生成对比文本，每一行都给到 LLM
+            # 生成对比文本：top 5（正向驱动）+ bottom 5（负向拖累），避免超出 context limit
+            sorted_rows = sorted(current_ind, key=lambda r: abs(to_float(r.get("销售额")) or 0), reverse=True)
+            top_rows = sorted_rows[:5]
+            bottom_rows = sorted_rows[-5:] if len(sorted_rows) >= 5 else sorted_rows
+            all_selected = top_rows + bottom_rows
+
             related_lines = []
-            for row in current_ind:
+            for row in all_selected:
                 month = str(row.get("月份", ""))
                 sku = str(row.get("SKU", ""))
                 c_sales = to_float(row.get("销售额"))

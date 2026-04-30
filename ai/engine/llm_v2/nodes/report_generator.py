@@ -10,6 +10,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from ai.config.runtime import get_go_api_base
 from ai.engine.llm import get_llm_engine
 from ai.engine.llm_v2.nodes.sql_executor import SQLExecutor
 from ai.engine.prompt_manager import get_prompt_manager
@@ -203,7 +204,7 @@ class ReportGeneratorNode:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
-                    "http://localhost:8080/api/v1/nlp/sql-templates",
+                    f"{get_go_api_base()}/api/v1/nlp/sql-templates",
                     params={
                         "type": "drilldown",
                         "drilldown_category": category

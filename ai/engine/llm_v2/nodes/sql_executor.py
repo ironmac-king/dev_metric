@@ -9,6 +9,7 @@
 import time
 from typing import Dict, Any, Optional
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from ..schema import MQLSchema, SQLResult
 from ..permission import RowLevelPermission
 
@@ -94,7 +95,7 @@ class SQLExecutor:
         """
         import httpx
 
-        go_api_base = "http://localhost:8080"
+        go_api_base = get_go_api_base()
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:

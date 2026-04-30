@@ -7,6 +7,7 @@ import time
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from ai.client.metric_client import MetricClient, get_http_client
 from ai.engine.semantic_search import SemanticSearch
 
@@ -35,9 +36,9 @@ class SlotClarificationEngine:
     _shared_slot_dependencies: Dict[str, List] = {}
     _shared_slot_relations: List[Dict] = {}
 
-    def __init__(self, api_base: str = "http://localhost:8080"):
-        self.api_base = api_base
-        self.metric_client = MetricClient(api_base)
+    def __init__(self, api_base: Optional[str] = None):
+        self.api_base = api_base or get_go_api_base()
+        self.metric_client = MetricClient(self.api_base)
 
         # 如果已经初始化过，直接使用类级缓存
         if SlotClarificationEngine._initialized:

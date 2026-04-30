@@ -13,6 +13,7 @@ import time
 from typing import Dict, Optional
 
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from ai.client.http_client import get_http_client
 
 logger = get_logger("ai.text_normalizer")
@@ -44,8 +45,8 @@ class TextNormalizer:
         "|[\U00002600-\U000026FF]"  # Miscellaneous Symbols
     )
 
-    def __init__(self, api_base: str = "http://localhost:8080"):
-        self.api_base = api_base
+    def __init__(self, api_base: Optional[str] = None):
+        self.api_base = api_base or get_go_api_base()
         self._synonyms_cache: Dict[str, str] = {}  # {同义词(小写): 标准术语}
         self._synonyms_cache_time: float = 0
         self._synonyms_ttl: float = 3600  # 1小时缓存

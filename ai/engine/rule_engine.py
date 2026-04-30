@@ -10,6 +10,7 @@ import httpx
 from typing import Optional, Dict, Any, List, Tuple
 from ai.graph.state import IntentResult, SQLGenerationResult
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from ai.client.http_client import get_http_client
 
 logger = get_logger("ai.rule_engine")
@@ -25,8 +26,8 @@ class RuleEngine:
     _shared_intent_patterns: List[Dict] = []
     _shared_sql_templates: Dict[str, str] = {}
 
-    def __init__(self, api_base: str = "http://localhost:8080", use_ml: bool = True):
-        self.api_base = api_base
+    def __init__(self, api_base: Optional[str] = None, use_ml: bool = True):
+        self.api_base = api_base or get_go_api_base()
         self.use_ml = use_ml
         # 如果已经初始化过，直接使用类级缓存
         if RuleEngine._initialized:

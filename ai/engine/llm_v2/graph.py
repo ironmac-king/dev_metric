@@ -18,6 +18,7 @@ from typing import Dict, Any, Literal, Optional, Tuple
 from datetime import datetime
 
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from .schema import V2State, MQLSchema, MQLDimension, push_history
 from .observability import get_tracer, create_trace_context
 from ai.client.metric_client import MetricClient
@@ -852,7 +853,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
                         import httpx
                         async with httpx.AsyncClient(timeout=30) as client:
                             resp = await client.post(
-                                "http://localhost:18080/api/v1/query/execute",
+                                f"{get_go_api_base()}/api/v1/query/execute",
                                 json={"sql": prev_sql, "timeout": 30},
                             )
                             data = resp.json()

@@ -2,6 +2,20 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import path from 'path'
 
+const forwardAuthHeader = (proxyReq, req) => {
+  if (req.headers['authorization']) {
+    proxyReq.setHeader('authorization', req.headers['authorization'])
+  }
+}
+
+const disableSseBuffering = (proxy) => {
+  proxy.on('proxyRes', (proxyRes) => {
+    if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
+      proxyRes.headers['x-accel-buffering'] = 'no'
+    }
+  })
+}
+
 export default defineConfig({
   plugins: [vue()],
   resolve: {
@@ -10,48 +24,25 @@ export default defineConfig({
     }
   },
   server: {
-    port: 3000,
-    host: '0.0.0.0',  // 监听所有网络接口，允许其他电脑访问
+    port: 3002,
+    host: '0.0.0.0',
     proxy: {
-      // LLM.V1 API 转发到 Python AI 服务
-      '/api/v1/llm-ask': {
-        target: 'http://localhost:8081',
+      '/api/v1/admin': {
+        target: 'http://localhost:18081',
         changeOrigin: true,
-        // 显式转发 Authorization header
-        onProxyReq: (proxyReq, req) => {
-          if (req.headers['authorization']) {
-            proxyReq.setHeader('authorization', req.headers['authorization'])
-          }
-        },
-        // 禁用代理缓冲，实现实时流式
-        configure: (proxy) => {
-          proxy.on('proxyRes', (proxyRes) => {
-            // 确保 SSE 流不被缓冲
-            if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
-              proxyRes.headers['x-accel-buffering'] = 'no'
-            }
-          })
-        }
+        onProxyReq: forwardAuthHeader
       },
-      // 其他 API 转发到 Go 后端
-      '/api': {
-        target: 'http://localhost:8080',
+      '/api/v1/llm-ask/v2': {
+        target: 'http://localhost:18081',
         changeOrigin: true,
-        // 显式转发 Authorization header
-        onProxyReq: (proxyReq, req) => {
-          if (req.headers['authorization']) {
-            proxyReq.setHeader('authorization', req.headers['authorization'])
-          }
-        },
-        // 禁用代理缓冲，实现实时流式
-        configure: (proxy) => {
-          proxy.on('proxyRes', (proxyRes) => {
-            // 确保 SSE 流不被缓冲
-            if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
-              proxyRes.headers['x-accel-buffering'] = 'no'
-            }
-          })
-        }
+        onProxyReq: forwardAuthHeader,
+        configure: disableSseBuffering
+      },
+      '/api': {
+        target: 'http://localhost:18080',
+        changeOrigin: true,
+        onProxyReq: forwardAuthHeader,
+        configure: disableSseBuffering
       }
     }
   }

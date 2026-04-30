@@ -11,6 +11,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from ai.graph.state import IntentResult, SQLGenerationResult, ClarificationDecision
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from ai.engine.prompt_manager import get_prompt_manager
 
 # 全局单例
@@ -97,7 +98,7 @@ class LLMEngine:
             from ai.client.http_client import get_http_client
             client = get_http_client()
             response = client.get(
-                f"http://localhost:8080/api/v1/llm/configs",
+                f"{get_go_api_base()}/api/v1/llm/configs",
                 timeout=5
             )
             if response.status_code == 200:
@@ -710,7 +711,7 @@ class LLMEngine:
             from ai.client.http_client import get_http_client
             client = get_http_client()
             response = client.get(
-                f"http://localhost:8080/api/v1/metadata/metrics",
+                f"{get_go_api_base()}/api/v1/metadata/metrics",
                 timeout=10
             )
             if response.status_code == 200:

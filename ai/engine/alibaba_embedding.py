@@ -3,8 +3,10 @@
 使用 dashscope SDK
 """
 from typing import List, Optional
-from dashscope import TextEmbedding
 import os
+from dashscope import TextEmbedding
+
+from ai.config.runtime import get_go_api_base
 
 class AlibabaEmbedding:
     """阿里 text-embedding-v2 客户端"""
@@ -31,7 +33,7 @@ class AlibabaEmbedding:
         try:
             import httpx
             response = httpx.get(
-                "http://localhost:8080/api/v1/llm/configs",
+                f"{get_go_api_base()}/api/v1/llm/configs",
                 timeout=5
             )
             if response.status_code == 200:

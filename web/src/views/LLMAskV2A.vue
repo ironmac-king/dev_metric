@@ -888,7 +888,6 @@ async function handleSend() {
 
     currentThinkingSteps.value = finalSteps
     stepsVersion.value++
-    currentSql.value = finalSql
 
     // 自动触发波动分析：追问"为什么"类问题且数据适合做波动分析时
     // answer_ready 之后 mom/yoy 才有正确值，所以延迟到 nextTick 再判断
@@ -906,10 +905,10 @@ async function handleSend() {
         if (!latestMsg.yoyChange && latestMsg.analysis?.kpi?.yoy != null) {
           latestMsg.yoyChange = latestMsg.analysis.kpi.yoy / 100
         }
-        // 如果 timeRange 为空，从 thinkingStepsMap 里取最新的 MQL time
+        // 如果 timeRange 为空，从最终的 thinking steps 里取最新的 MQL time
         if (!latestMsg.timeRange || !latestMsg.timeRange.start) {
-          for (let i = thinkingStepsMap.size - 1; i >= 0; i--) {
-            const step = thinkingStepsMap.get(i)
+          for (let i = finalSteps.length - 1; i >= 0; i--) {
+            const step = finalSteps[i]
             if (step?.mql?.time?.start) {
               latestMsg.timeRange = step.mql.time
               break
@@ -931,19 +930,6 @@ async function handleSend() {
     loading.value = false
     scrollToBottom()
   }
-}
-
-async function updateThinkingSteps() {
-  const newSteps = Array.from(thinkingStepsMap.values()).map(s => ({
-    step: s.step,
-    status: s.status,
-    content: s.content,
-    duration: s.duration,
-    entities: s.entities || [],
-    llm_used: s.llm_used || false
-  }))
-  currentThinkingSteps.value = newSteps
-  await nextTick()
 }
 
 /**
