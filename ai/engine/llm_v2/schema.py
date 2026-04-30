@@ -399,6 +399,11 @@ class MQLSchema:
         if metric_data:
             schema.metric = MQLMetric(**metric_data)
 
+        # 多指标
+        for metric_item in data.get("metrics", []) or []:
+            if metric_item:
+                schema.metrics.append(MQLMetric(**metric_item))
+
         # 时间
         time_data = data.get("time")
         if time_data:
@@ -419,6 +424,52 @@ class MQLSchema:
         # Filters
         for filter_data in data.get("filters", []):
             schema.filters.append(MQLFilter(**filter_data))
+
+        # comparison
+        comparison_data = data.get("comparison")
+        if comparison_data:
+            schema.comparison = ComparisonSpec(**comparison_data)
+
+        # cross metric
+        cross_metric_data = data.get("cross_metric")
+        if cross_metric_data:
+            schema.cross_metric = CrossMetricSpec(**cross_metric_data)
+
+        # pagination
+        pagination_data = data.get("pagination")
+        if pagination_data:
+            schema.pagination = PaginationSpec(**pagination_data)
+
+        # order by
+        order_by_data = data.get("order_by")
+        if order_by_data:
+            schema.order_by = OrderBySpec(**order_by_data)
+
+        # drill down
+        drill_down_data = data.get("drill_down")
+        if drill_down_data:
+            schema.drill_down = DrillDownSpec(**drill_down_data)
+
+        # calculation patterns
+        for pattern in data.get("calculation_patterns", []) or []:
+            try:
+                schema.calculation_patterns.append(CalculationPattern(pattern))
+            except ValueError:
+                pass
+
+        # molecule / denominator
+        molecule_data = data.get("molecule_metric")
+        if molecule_data:
+            schema.molecule_metric = MQLMetric(**molecule_data)
+
+        denominator_data = data.get("denominator_metric")
+        if denominator_data:
+            schema.denominator_metric = MQLMetric(**denominator_data)
+
+        schema.top_n = data.get("top_n", 0)
+        schema.bottom_n = data.get("bottom_n", 0)
+        schema.original_question = data.get("original_question", "")
+        schema.resolved_question = data.get("resolved_question", "")
 
         return schema
 
@@ -512,6 +563,92 @@ class AnomalyAnnotation:
             "suggestion": self.suggestion,
         }
 
+@dataclass
+class ContextScope:
+    """Typed V2 context cache with dict-style compatibility for legacy callers."""
+
+    clarification_message: Optional[str] = None
+    clarification_options: List[Dict[str, Any]] = field(default_factory=list)
+    similar_cases: List[Dict[str, Any]] = field(default_factory=list)
+    suggestions: List[str] = field(default_factory=list)
+    drilldown_type: Optional[str] = None
+    comparison_results: Optional[Any] = None
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+    _KNOWN_KEYS = {
+        "clarification_message",
+        "clarification_options",
+        "similar_cases",
+        "suggestions",
+        "drilldown_type",
+        "comparison_results",
+    }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self._KNOWN_KEYS:
+            value = getattr(self, key)
+            return default if value is None else value
+        return self.extras.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self._KNOWN_KEYS:
+            return getattr(self, key)
+        return self.extras[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self._KNOWN_KEYS:
+            setattr(self, key, value)
+            return
+        self.extras[key] = value
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        if key in self._KNOWN_KEYS:
+            value = getattr(self, key)
+            setattr(self, key, None)
+            return default if value is None else value
+        return self.extras.pop(key, default)
+
+    def __bool__(self) -> bool:
+        return any(
+            [
+                self.clarification_message,
+                self.clarification_options,
+                self.similar_cases,
+                self.suggestions,
+                self.drilldown_type,
+                self.comparison_results,
+                self.extras,
+            ]
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "clarification_message": self.clarification_message,
+            "clarification_options": list(self.clarification_options),
+            "similar_cases": list(self.similar_cases),
+            "suggestions": list(self.suggestions),
+            "drilldown_type": self.drilldown_type,
+            "comparison_results": self.comparison_results,
+        }
+        payload.update(self.extras)
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ContextScope":
+        if not data:
+            return cls()
+
+        extras = {key: value for key, value in data.items() if key not in cls._KNOWN_KEYS}
+        return cls(
+            clarification_message=data.get("clarification_message"),
+            clarification_options=data.get("clarification_options") or [],
+            similar_cases=data.get("similar_cases") or [],
+            suggestions=data.get("suggestions") or [],
+            drilldown_type=data.get("drilldown_type"),
+            comparison_results=data.get("comparison_results"),
+            extras=extras,
+        )
+
 
 @dataclass
 class V2State:
@@ -551,7 +688,11 @@ class V2State:
     inherited_mql: Optional[MQLSchema] = None  # 继承的 MQL（用于多轮对话）
 
     # ===== 临时缓存 =====
-    context_cache: Dict[str, Any] = field(default_factory=dict)  # RAG 结果等
+    context_cache: ContextScope = field(default_factory=ContextScope)  # RAG 结果等
+    session_state: Optional[Dict[str, Any]] = None
+    multi_metric_mode: bool = False
+    drilldown_category: Optional[str] = None
+    conversation_summary: Optional[Dict[str, Any]] = None
 
     # ===== 元数据 =====
     created_at: str = ""               # 创建时间
@@ -621,6 +762,11 @@ class V2State:
             "error": self.error,
             "thinking_steps": [s.to_dict() for s in self.thinking_steps],
             "history_stack": self.history_stack,
+            "context_cache": self.context_cache.to_dict(),
+            "session_state": self.session_state,
+            "multi_metric_mode": self.multi_metric_mode,
+            "drilldown_category": self.drilldown_category,
+            "conversation_summary": self.conversation_summary,
             "current_step": self.current_step,
             "retry_count": self.retry_count,
         }
@@ -685,6 +831,11 @@ def v2state_to_dict(state: V2State) -> Dict[str, Any]:
         "error": state.error,
         "thinking_steps": [s.to_dict() for s in state.thinking_steps],
         "history_stack": state.history_stack,
+        "context_cache": state.context_cache.to_dict(),
+        "session_state": state.session_state,
+        "multi_metric_mode": state.multi_metric_mode,
+        "drilldown_category": state.drilldown_category,
+        "conversation_summary": state.conversation_summary,
         "current_step": state.current_step,
         "retry_count": state.retry_count,
     }
@@ -706,7 +857,11 @@ def create_v2_state(session_id: str = "", user_id: str = "default",
         thinking_steps=[],
         history_stack=[],
         inherited_mql=None,
-        context_cache={},
+        context_cache=ContextScope(),
+        session_state=None,
+        multi_metric_mode=False,
+        drilldown_category=None,
+        conversation_summary=None,
         created_at=created_at or datetime.now().isoformat(),
         updated_at=datetime.now().isoformat(),
         current_step="",

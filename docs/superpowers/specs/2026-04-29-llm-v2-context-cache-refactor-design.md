@@ -1,5 +1,25 @@
 # LLM.V2 缓存/上下文/继承体系整理设计
 
+## Implementation Status
+
+截至 2026-04-30，以下内容已落地：
+
+- `v2_session_mql` 已从 router 移除，`router` / `state_manager` 共用 `V2SessionStore`
+- `V2SessionStore` 当前实现为 **Redis 持久化 + 进程内 memory fallback**
+- `V2State.context_cache` 已类型化为 `ContextScope`
+- `session_state` / `multi_metric_mode` / `drilldown_category` / `conversation_summary` 已迁入 `V2State` 一等字段
+- `original_question` / `suggested_mql` / `quality_warnings` / `anomalies` 的写入点已删除
+- `metric_info_cache` 已不再写入，也不再作为 `ContextScope` 一等字段保留
+
+仍保留在 `ContextScope` 的是外部链路仍在读取的字段：
+
+- `clarification_message`
+- `clarification_options`
+- `similar_cases`
+- `suggestions`
+- `drilldown_type`
+- `comparison_results`
+
 ## Context
 
 大哥反馈：LLM.V2 里缓存、上下文、继承体系混乱，难以维护。
@@ -29,40 +49,37 @@
 
 ### 方案
 
-新建 `ai/engine/llm_v2/session_store.py`，引入 `V2SessionStore`：
+新建 `ai/engine/llm_v2/session_store.py`，引入 `V2SessionStore`。
+
+当前实现不是最初草案中的纯内存 LRU，而是：
+
+- 优先使用 Redis
+- Redis 异常时自动回退到进程内 memory store
+- router / state_manager 共享同一个单例
+
+核心形态如下：
 
 ```python
-class SessionEntry:
-    mql: Optional[MQLSchema]
-    v2state: Optional[V2State]
-    created_at: float
-    last_accessed: float
-
-    def is_expired(self, ttl_seconds: float) -> bool:
-        return time.time() - self.last_accessed > ttl_seconds
-
 class V2SessionStore:
-    DEFAULT_TTL = 1800      # 30 分钟无访问则过期
-    MAX_SIZE = 10000       # LRU 淘汰上限
+    DEFAULT_TTL = 7 * 24 * 3600
 
-    def __init__(self, ttl_seconds=1800, max_size=10000):
-        self._store: OrderedDict[str, SessionEntry] = OrderedDict()
-        self._lock = threading.RLock()
+    def __init__(self, redis_url=None, ttl_seconds=DEFAULT_TTL, redis_client=None):
+        ...
 
-    def set(self, session_id, mql=None, v2state=None): ...
-    def get(self, session_id) -> Optional[SessionEntry]: ...
+    def set(self, session_id, mql=None, history_stack=None, conversation_summary=None, user_id="default"): ...
     def get_mql(self, session_id) -> Optional[MQLSchema]: ...
     def get_state(self, session_id) -> Optional[V2State]: ...
+    def set_state(self, state: V2State) -> None: ...
     def delete(self, session_id): ...
-    def clear_expired(self) -> int: ...  # 惰性清理
-    def stats(self) -> dict: ...
+    def clear_all(self) -> None: ...
 ```
 
 **关键设计**：
 - **单例模式**：router 和 state_manager 共享同一个 `V2SessionStore` 实例
-- **LRU + TTL 双保险**：按访问时间过期，同时限制最大容量防止内存泄漏
-- **读写分离**：`get_mql()` 供 router 快速恢复上下文，`get_state()` 供 state_manager 操作完整状态
-- **惰性清理**：过期条目在下次 `get()` 时清理，不阻塞主线程
+- **Redis 持久化**：多轮上下文不再依赖单进程内存
+- **memory fallback**：本地开发/测试不会因 Redis 不可用直接阻塞
+- **读写分离**：`get_context()` / `get_mql()` / `get_state()` 面向不同调用面
+- **状态持久化收口**：`set_state()` 只持久化 durable 字段，不再从 `context_cache` 兜底读取内部状态
 
 ### 迁移
 
@@ -91,7 +108,8 @@ _session_store.set(session_id, mql=mql)
 |------|------|------|
 | 跨节点通信 | `clarification_message`, `clarification_options`, `similar_cases`, `suggestions`, `drilldown_type` | 保留，移入 `ContextScope` |
 | 内部状态泄漏 | `session_state`, `multi_metric_mode`, `drilldown_category`, `conversation_summary` | 移入 `V2State` 作为一等字段 |
-| 死字段 | `metric_info_cache`, `original_question`, `suggested_mql`, `quality_warnings`, `anomalies` | 删除写入点 + 删除字段 |
+| 死字段 | `original_question`, `suggested_mql`, `quality_warnings`, `anomalies` | 删除写入点 + 删除字段 |
+| 兼容残留 | `metric_info_cache` | 不再写入，不再保留为 `ContextScope` 一等字段；旧值仅通过 `extras` 兼容 |
 | 幽灵字段 | `comparison_results` | 暂时不动，标记 @deprecated |
 
 ### ContextScope dataclass
@@ -113,11 +131,6 @@ class ContextScope:
     similar_cases: List[Dict[str, Any]] = field(default_factory=list)
     suggestions: List[str] = field(default_factory=list)
     drilldown_type: Optional[str] = None
-
-    # === 临时缓存（待验证）===
-    # 注意：_preload_metric_info 写入了此字段，但探索时未找到明确读者
-    # 实施时先 grep 确认是否被读取，如无读者则删除写入点
-    metric_info_cache: Optional[Dict[str, Any]] = None
 
     # === 幽灵字段（暂时不动）===
     @deprecated("幽灵字段：写入点缺失，暂不动")
@@ -149,9 +162,9 @@ class V2State:
 | `suggested_mql` | graph.py context_enhancer 行206 |
 | `quality_warnings` | graph.py data_quality_checker 行636 |
 | `anomalies` | graph.py result_analyzer 行1102 |
-| `metric_info_cache` | graph.py _preload_metric_info 行67 — **需先确认是否真的无人读取** |
+| `metric_info_cache` | graph.py _preload_metric_info 行67（写入点已删除，一等字段已移除） |
 
-> 注意：`metric_info_cache` 由 `_preload_metric_info` 写入，但探索时未找到读者。需实施前确认。
+> `metric_info_cache` 最终按“无人读取”处理：删除写入点，并从 `ContextScope` 一等字段降级为普通兼容 `extras`。
 
 ---
 
@@ -190,9 +203,10 @@ class V2State:
 ### Phase 2：ContextScope + V2State 一等字段
 1. schema.py 新增 `ContextScope` dataclass
 2. `V2State.context_cache` 类型从 `Dict[str, Any]` 改为 `ContextScope`
-3. graph.py 所有 `context_cache["xxx"]` → `context_cache.xxx`
+3. 内部状态迁入 `V2State` 一等字段，`context_cache` 只保留外部链路仍在读取的字段
 4. 删除死字段写入点
-5. 验证：服务正常启动
+5. 保留 dict-style 兼容接口，避免一次性打断旧调用
+6. 验证：服务正常启动
 
 ### Phase 3：废弃标记
 1. 各 DEPRECATED 位置确认
@@ -206,6 +220,8 @@ class V2State:
 2. **TTL 验证**：30 分钟无访问后会话过期
 3. **启动测试**：Python 服务正常启动，无类型错误
 4. **死字段检查**：grep 搜索 `original_question`/`quality_warnings` 等确认无新写入
+5. **当前已执行**：`python -m unittest test_llm_v2_refactor_unittest.py -v`
+6. **当前已执行**：`python -m py_compile ai/engine/llm_v2/schema.py ai/engine/llm_v2/session_store.py ai/engine/llm_v2/nodes/state_manager.py ai/engine/llm_v2/graph.py ai/engine/llm_v2/router.py`
 
 ---
 

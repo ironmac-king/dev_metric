@@ -71,6 +71,14 @@ TIME_EXPRESSION_MAP = {
     # 此处仅作快速匹配备用
 }
 
+# 下钻类型 → 中文语义标签（用于显示和 LLM 输入）
+DRILLDOWN_LABELS = {
+    "sales": "销售经营分析",
+    "ad": "广告投放分析",
+    "inventory": "库存供应链分析",
+    "cost": "成本毛利分析",
+}
+
 
 class IntentRouter:
     """
@@ -116,7 +124,7 @@ class IntentRouter:
             try:
                 from .local_intent_model import get_local_intent_model
                 self._local_model = get_local_intent_model()
-                logger.info("[IntentRouter] 本地 Joint BERT 模型加载成功")
+                logger.warning(f"[IntentRouter] ★★★ 本地模型加载成功, model_path={getattr(self._local_model, 'model_path', 'unknown')}")
             except Exception as e:
                 logger.warning(f"[IntentRouter] 本地模型加载失败: {e}")
                 self._local_model = None
@@ -216,7 +224,7 @@ class IntentRouter:
         # 单独的 "？" 不算短追问（可能是完整问题的结尾）
         if question.strip() == "？" or question.strip() == "？":
             return False
-        short_keywords = ["呢", "呢？", "啊", "哦", "嗯", "再", "还有", "还要", "还在", "环比呢", "同比呢", "趋势呢"]
+        short_keywords = ["呢", "呢？", "啊", "哦", "嗯", "再", "还有", "还要", "还在", "环比呢", "同比呢", "趋势呢", "增加", "加上", "加个", "多个", "一并", "加一个"]
         if any(kw in question for kw in short_keywords):
             return True
 
@@ -497,93 +505,31 @@ class IntentRouter:
                 "source": "followup",
             }
 
-        # 检测是否是单个维度类型代码（如 FSITECODE、FSITE、PLATFORM 等）
-        dimension_codes = {
-            "FSITECODE", "FSITE", "PLATFORM", "FCHANNEL", "FBRANDS", "FPRODUCTLINE",
-            "FADTYPE", "GROUP_1", "GROUP_2", "GROUP_3", "GROUP_4", "SKU", "ASIN",
-            "FCOUNTRY", "REGION", "FDATE", "MONTHS", "WEEKS", "YEARS", "QUARTERS",
-            "PRODUCT_STATUS", "PRODUCT_LEVEL", "MODEL", "PEOPLEGROUP", "ADSDIRECTOR",
-            "PEOPLEGROUP_CHARGE", "PEOPLEGROUP_DIRECTOR"
-        }
-        upper_question = question.upper()
-        is_dimension_code = question in dimension_codes or upper_question in dimension_codes
+        mql = self._build_followup_mql(inherited_mql, question)
 
-        # 继承上轮 MQL
-        mql = MQLSchema()
-        mql.session_id = inherited_mql.session_id
-        mql.parent_state_id = inherited_mql.session_id  # 关联父状态
-
-        # 如果问题是维度代码，使用它作为维度
-        if is_dimension_code:
-            dim_code = upper_question if upper_question in dimension_codes else question
-            mql.intent = inherited_mql.intent
-            mql.metric = inherited_mql.metric
-            mql.metrics = inherited_mql.metrics
-            mql.time = inherited_mql.time
-            mql.dimensions = [MQLDimension(type=dim_code, value=None)]
-            mql.order_by = inherited_mql.order_by
-            mql.top_n = inherited_mql.top_n
-            mql.original_question = inherited_mql.original_question or question
-            logger.info(f"[IntentRouter] 检测到维度选择: {dim_code}，替换维度")
-            return {
-                "mql": mql,
-                "needs_clarification": False,
-                "source": "followup",
-            }
-
-        # 检测是否是"按XX"格式的维度选择（如"按一级品类"、"按站点"等）
-        # 前端发送 option.label（如"按一级品类"），后端需要转换为维度代码
-        if question.startswith("按") and len(question) >= 3:
-            dim_label = question[1:]  # 去掉"按"字，得到如"一级品类"
-            # 加载维度类型映射（如果尚未加载）
-            if self._dimension_type_mappings is None:
-                self._load_dimension_mappings()
-            if self._dimension_type_mappings:
-                # 建立 中文维度名 -> 维度代码 的映射
-                dim_label_to_code = {}
-                for m in self._dimension_type_mappings:
-                    dim_type = m.get("dimension_type", "") or m.get("dimension_name", "") or ""
-                    column_name = m.get("column_name", "") or ""
-                    if dim_type and column_name:
-                        dim_label_to_code[dim_type] = column_name
-                        dim_label_to_code[f"按{dim_type}"] = column_name  # 也包含完整label格式
-                if dim_label in dim_label_to_code:
-                    dim_code = dim_label_to_code[dim_label]
-                    mql.intent = inherited_mql.intent
-                    mql.metric = inherited_mql.metric
-                    mql.metrics = inherited_mql.metrics
-                    mql.time = inherited_mql.time
-                    mql.dimensions = [MQLDimension(type=dim_code, value=None)]
-                    mql.order_by = inherited_mql.order_by
-                    mql.top_n = inherited_mql.top_n
-                    mql.original_question = inherited_mql.original_question or question
-                    logger.info(f"[IntentRouter] 检测到中文维度选择: {question} -> {dim_code}，替换维度")
-                    return {
-                        "mql": mql,
-                        "needs_clarification": False,
-                        "source": "followup",
-                    }
-                # 模糊匹配：检查 dim_label 是否包含在某维度名中
-                for dim_type, dim_code in dim_label_to_code.items():
-                    if dim_label in dim_type or dim_type in dim_label:
-                        mql.intent = inherited_mql.intent
-                        mql.metric = inherited_mql.metric
-                        mql.metrics = inherited_mql.metrics
-                        mql.time = inherited_mql.time
-                        mql.dimensions = [MQLDimension(type=dim_code, value=None)]
-                        mql.order_by = inherited_mql.order_by
-                        mql.top_n = inherited_mql.top_n
-                        mql.original_question = inherited_mql.original_question or question
-                        logger.info(f"[IntentRouter] 检测到中文维度选择(模糊): {question} -> {dim_code}，替换维度")
-                        return {
-                            "mql": mql,
-                            "needs_clarification": False,
-                            "source": "followup",
-                        }
+        dimension_selection_result = self._handle_dimension_selection_followup(question, mql)
+        if dimension_selection_result:
+            return dimension_selection_result
 
         # 根据追问内容更新意图
         from ..schema import ComparisonSpec
+        metric_add_keywords = ["增加", "加上", "加个", "多个", "一并", "加一个"]
+        is_add_metric = any(kw in question for kw in metric_add_keywords)
+        metric_remove_keywords = ["去掉", "去除", "移除", "删除", "删掉", "不要", "不看"]
+        is_remove_metric_or_dim = any(kw in question for kw in metric_remove_keywords)
+
+        if is_add_metric:
+            addition_result = self._handle_addition_followup(question, mql, inherited_mql, metric_add_keywords)
+            if addition_result:
+                return addition_result
+
+        if is_remove_metric_or_dim:
+            removal_result = self._handle_removal_followup(question, mql, inherited_mql, metric_remove_keywords)
+            if removal_result:
+                return removal_result
+
         # 检查是否是新的独立问题（不应该继承上轮指标）
+        # 注意：增加类追问已经处理过了，这里不会匹配到
         new_question_keywords = ["多少", "总额", "金额", "抽走", "赚了", "亏了", "收入", "支出", "利润", "成本"]
         is_new_question = any(kw in question for kw in new_question_keywords)
 
@@ -596,6 +542,7 @@ class IntentRouter:
                 "source": "llm",  # 改为 llm，让系统重新识别
             }
 
+        # 处理环比/同比/趋势类追问
         if "环比" in question:
             mql.intent = MQLIntent.QUERY_COMPARISON
             mql.comparison = inherited_mql.comparison if inherited_mql.comparison else ComparisonSpec()
@@ -612,11 +559,6 @@ class IntentRouter:
             # 继承上轮意图（仅当确实是追问时）
             mql.intent = inherited_mql.intent
 
-        # 继承指标和时间（仅当不是新问题时）
-        mql.metric = inherited_mql.metric
-        mql.metrics = inherited_mql.metrics
-        mql.time = inherited_mql.time
-        mql.dimensions = inherited_mql.dimensions
         _debug_info = f"[DEBUG: inherited_metric={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}, inherited_dims={[(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else []}]"
         mql.resolved_question = f"{_debug_info} | question={question}"
 
@@ -625,6 +567,323 @@ class IntentRouter:
             "needs_clarification": False,
             "source": "followup",
         }
+
+    def _handle_dimension_selection_followup(self, question: str, mql: MQLSchema) -> Optional[Dict[str, Any]]:
+        """Handle dimension replacement follow-ups like `ASIN` or `按站点`."""
+        dimension_codes = {
+            "FSITECODE", "FSITE", "PLATFORM", "FCHANNEL", "FBRANDS", "FPRODUCTLINE",
+            "FADTYPE", "GROUP_1", "GROUP_2", "GROUP_3", "GROUP_4", "SKU", "ASIN",
+            "FCOUNTRY", "REGION", "FDATE", "MONTHS", "WEEKS", "YEARS", "QUARTERS",
+            "PRODUCT_STATUS", "PRODUCT_LEVEL", "MODEL", "PEOPLEGROUP", "ADSDIRECTOR",
+            "PEOPLEGROUP_CHARGE", "PEOPLEGROUP_DIRECTOR",
+        }
+        upper_question = question.upper()
+        is_dimension_code = question in dimension_codes or upper_question in dimension_codes
+
+        if is_dimension_code:
+            dim_code = upper_question if upper_question in dimension_codes else question
+            mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+            logger.info(f"[IntentRouter] 检测到维度选择: {dim_code}，替换维度")
+            return {"mql": mql, "needs_clarification": False, "source": "followup"}
+
+        if not (question.startswith("按") and len(question) >= 3):
+            return None
+
+        dim_label = question[1:]
+        if self._dimension_type_mappings is None:
+            self._load_dimension_mappings()
+        if not self._dimension_type_mappings:
+            return None
+
+        dim_label_to_code = self._build_dimension_label_to_code_map()
+        if dim_label in dim_label_to_code:
+            dim_code = dim_label_to_code[dim_label]
+            mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+            logger.info(f"[IntentRouter] 检测到中文维度选择: {question} -> {dim_code}，替换维度")
+            return {"mql": mql, "needs_clarification": False, "source": "followup"}
+
+        for dim_type, dim_code in dim_label_to_code.items():
+            if dim_label in dim_type or dim_type in dim_label:
+                mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+                logger.info(f"[IntentRouter] 检测到中文维度选择(模糊): {question} -> {dim_code}，替换维度")
+                return {"mql": mql, "needs_clarification": False, "source": "followup"}
+
+        return None
+
+    def _handle_addition_followup(
+        self,
+        question: str,
+        mql: MQLSchema,
+        inherited_mql: MQLSchema,
+        add_keywords: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        detected_dimensions = self._resolve_additional_dimensions(question, add_keywords)
+        detected_metrics = self._resolve_additional_metrics(question, add_keywords)
+        if not (detected_metrics or detected_dimensions):
+            return None
+
+        self._append_dimensions(mql, detected_dimensions)
+        self._append_metrics(mql, detected_metrics)
+
+        mql.original_question = inherited_mql.original_question or question
+        logger.info(
+            f"[IntentRouter] 处理追加追问: 新增指标={[m.get('name') for m in detected_metrics]}, "
+            f"新增维度={[d.get('column_name') for d in detected_dimensions]}, "
+            f"继承指标={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}"
+        )
+        return {
+            "mql": mql,
+            "needs_clarification": False,
+            "source": "followup_add_metric" if detected_metrics else "followup_add_dimension",
+        }
+
+    def _handle_removal_followup(
+        self,
+        question: str,
+        mql: MQLSchema,
+        inherited_mql: MQLSchema,
+        remove_keywords: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        removed_dimensions = self._resolve_additional_dimensions(question, remove_keywords)
+        removed_metrics = self._resolve_additional_metrics(question, remove_keywords)
+        if not (removed_metrics or removed_dimensions):
+            return None
+
+        self._remove_dimensions(mql, removed_dimensions)
+        removal_error = self._remove_metrics(mql, removed_metrics)
+        if removal_error:
+            return removal_error
+
+        mql.original_question = inherited_mql.original_question or question
+        logger.info(
+            f"[IntentRouter] 处理去掉追问: 去掉指标={[m.get('name') for m in removed_metrics]}, "
+            f"去掉维度={[d.get('column_name') for d in removed_dimensions]}"
+        )
+        return {
+            "mql": mql,
+            "needs_clarification": False,
+            "source": "followup_remove_metric" if removed_metrics else "followup_remove_dimension",
+        }
+
+    def _extract_additional_metric_candidates(self, question: str, add_keywords: List[str]) -> List[str]:
+        """从“增加指标”类追问中提取候选指标词。"""
+        normalized = question
+        for keyword in add_keywords:
+            normalized = normalized.replace(keyword, " ")
+
+        for filler in ["指标", "一下", "看看", "也", "再", "再加", "顺便"]:
+            normalized = normalized.replace(filler, " ")
+
+        for separator in ["以及", "还有", "和", "、", "，", ",", "/", "及"]:
+            normalized = normalized.replace(separator, "|")
+
+        candidates = [normalized.strip()]
+        candidates.extend(part.strip() for part in normalized.split("|"))
+
+        deduped = []
+        for candidate in candidates:
+            if candidate and candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
+
+    def _build_followup_mql(self, inherited_mql: MQLSchema, question: str) -> MQLSchema:
+        """Create a mutable follow-up MQL seeded from the inherited state."""
+        mql = MQLSchema()
+        mql.session_id = inherited_mql.session_id
+        mql.parent_state_id = inherited_mql.session_id
+        mql.intent = inherited_mql.intent
+        mql.metric = inherited_mql.metric
+        mql.metrics = list(inherited_mql.metrics) if inherited_mql.metrics else []
+        mql.time = inherited_mql.time
+        mql.dimensions = list(inherited_mql.dimensions) if inherited_mql.dimensions else []
+        mql.order_by = inherited_mql.order_by
+        mql.top_n = inherited_mql.top_n
+        mql.comparison = inherited_mql.comparison
+        mql.original_question = inherited_mql.original_question or question
+        return mql
+
+    def _build_dimension_label_to_code_map(self) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for item in self._dimension_type_mappings or []:
+            dim_type = item.get("dimension_type", "") or item.get("dimension_name", "") or ""
+            column_name = item.get("column_name", "") or ""
+            if dim_type and column_name:
+                mapping[dim_type] = column_name
+                mapping[f"按{dim_type}"] = column_name
+        return mapping
+
+    def _append_dimensions(self, mql: MQLSchema, detected_dimensions: List[Dict[str, str]]) -> None:
+        existing_dimension_types = {d.type for d in mql.dimensions if d and d.type}
+        for dimension_info in detected_dimensions:
+            dim_code = dimension_info.get("column_name", "")
+            if dim_code and dim_code not in existing_dimension_types:
+                mql.dimensions.append(MQLDimension(type=dim_code, value=None))
+                existing_dimension_types.add(dim_code)
+                logger.info(f"[IntentRouter] 检测到追加维度: {dimension_info.get('label', dim_code)} ({dim_code})")
+
+    def _append_metrics(self, mql: MQLSchema, detected_metrics: List[Dict[str, Any]]) -> None:
+        from ..schema import MQLMetric
+
+        existing_names = {m.name for m in [mql.metric] + mql.metrics if m and m.name}
+        existing_codes = {m.code for m in [mql.metric] + mql.metrics if m and m.code}
+        for metric_info in detected_metrics:
+            metric_name = metric_info.get("name", "")
+            metric_code = metric_info.get("metric_code", "") or metric_info.get("code", "")
+            if metric_name in existing_names or metric_code in existing_codes:
+                continue
+
+            mql.metrics.append(MQLMetric(
+                code=metric_code,
+                name=metric_name,
+                table=metric_info.get("starrocks_table", "") or metric_info.get("table", ""),
+                field=metric_info.get("starrocks_field", "") or metric_info.get("field", ""),
+                unit=metric_info.get("unit", ""),
+                starrocks_sql=metric_info.get("starrocks_sql", ""),
+            ))
+            existing_names.add(metric_name)
+            if metric_code:
+                existing_codes.add(metric_code)
+            logger.info(f"[IntentRouter] 检测到追加指标: {metric_name} ({metric_code})")
+
+    def _remove_dimensions(self, mql: MQLSchema, removed_dimensions: List[Dict[str, str]]) -> None:
+        removed_dim_codes = {d.get("column_name", "") for d in removed_dimensions if d.get("column_name")}
+        if not removed_dim_codes:
+            return
+
+        mql.dimensions = [
+            dim for dim in mql.dimensions
+            if dim.type not in removed_dim_codes and dim.column not in removed_dim_codes
+        ]
+        logger.info(f"[IntentRouter] 去掉维度: {sorted(removed_dim_codes)}")
+
+    def _remove_metrics(self, mql: MQLSchema, removed_metrics: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        removed_metric_names = {m.get("name", "") for m in removed_metrics if m.get("name")}
+        removed_metric_codes = {
+            m.get("metric_code", "") or m.get("code", "")
+            for m in removed_metrics
+            if (m.get("metric_code", "") or m.get("code", ""))
+        }
+        if not (removed_metric_names or removed_metric_codes):
+            return None
+
+        def _should_remove(metric_obj):
+            if not metric_obj:
+                return False
+            return (
+                (metric_obj.name and metric_obj.name in removed_metric_names) or
+                (metric_obj.code and metric_obj.code in removed_metric_codes)
+            )
+
+        current_removed = _should_remove(mql.metric)
+        remaining_metrics = [metric for metric in mql.metrics if not _should_remove(metric)]
+
+        if current_removed:
+            if remaining_metrics:
+                mql.metric = remaining_metrics[0]
+                mql.metrics = remaining_metrics[1:]
+            else:
+                return {
+                    "mql": None,
+                    "needs_clarification": True,
+                    "clarification_message": "至少需要保留一个指标，当前没有可继续查询的指标。",
+                    "source": "followup_remove_metric",
+                }
+        else:
+            mql.metrics = remaining_metrics
+
+        logger.info(
+            f"[IntentRouter] 去掉指标: names={sorted(removed_metric_names)}, codes={sorted(removed_metric_codes)}"
+        )
+        return None
+
+    def _resolve_additional_metrics(self, question: str, add_keywords: List[str]) -> List[Dict[str, Any]]:
+        """通过指标元数据和同义词表解析追问里追加的指标。"""
+        try:
+            from ai.client.metric_client import MetricClient
+
+            client = MetricClient()
+            candidates = self._extract_additional_metric_candidates(question, add_keywords)
+            resolved = []
+            seen_keys = set()
+
+            for candidate in candidates:
+                metric_info = client.get_metric_by_name(candidate)
+                if not metric_info:
+                    search_results = client.search_metrics(candidate, limit=3)
+                    if search_results:
+                        first = search_results[0]
+                        metric_info = client.get_metric_by_name(first.get("name", "")) or first
+
+                if not metric_info:
+                    continue
+
+                metric_name = metric_info.get("name", "")
+                metric_code = metric_info.get("metric_code", "") or metric_info.get("code", "")
+                dedupe_key = metric_code or metric_name
+                if not dedupe_key or dedupe_key in seen_keys:
+                    continue
+
+                seen_keys.add(dedupe_key)
+                resolved.append(metric_info)
+
+            return resolved
+        except Exception as e:
+            logger.warning(f"[IntentRouter] 解析追加指标失败: {e}")
+            return []
+
+    def _resolve_additional_dimensions(self, question: str, add_keywords: List[str]) -> List[Dict[str, str]]:
+        """通过维度映射和维度同义词解析追问里追加的维度。"""
+        try:
+            dim_service = self._get_dimension_service()
+            if self._dimension_type_mappings is None:
+                self._load_dimension_mappings()
+
+            candidates = self._extract_additional_metric_candidates(question, add_keywords)
+            resolved = []
+            seen_codes = set()
+
+            dim_label_to_code = {}
+            if self._dimension_type_mappings:
+                for mapping in self._dimension_type_mappings:
+                    dim_type = mapping.get("dimension_type", "") or mapping.get("dimension_name", "") or ""
+                    column_name = mapping.get("column_name", "") or ""
+                    if dim_type and column_name:
+                        dim_label_to_code[dim_type] = column_name
+                        dim_label_to_code[column_name] = column_name
+
+            for candidate in candidates:
+                if not candidate:
+                    continue
+
+                dim_code = ""
+                dim_label = candidate
+                upper_candidate = candidate.upper()
+
+                if upper_candidate in dim_label_to_code:
+                    dim_code = dim_label_to_code[upper_candidate]
+                elif candidate in dim_label_to_code:
+                    dim_code = dim_label_to_code[candidate]
+                elif dim_service:
+                    dim_code = dim_service.find_column_by_type(candidate) or ""
+                    if not dim_code:
+                        dim_info = dim_service.find_dimension_info(candidate)
+                        if dim_info and dim_info.get("is_generic"):
+                            dim_code = dim_info.get("column_name", "") or ""
+                            dim_label = dim_info.get("dimension_type", candidate)
+
+                if not dim_code or dim_code in seen_codes:
+                    continue
+
+                seen_codes.add(dim_code)
+                resolved.append({
+                    "column_name": dim_code,
+                    "label": dim_label,
+                })
+
+            return resolved
+        except Exception as e:
+            logger.warning(f"[IntentRouter] 解析追加维度失败: {e}")
+            return []
 
     def _handle_greeting(self) -> Dict[str, Any]:
         """处理寒暄"""
@@ -653,11 +912,15 @@ class IntentRouter:
             logger.warning(f"[_handle_drilldown] 解析失败: {e}")
             drilldown_type = None
 
+        # 映射为中文语义（用于存储和 LLM 输入）
+        chinese_label = DRILLDOWN_LABELS.get(drilldown_type, drilldown_type or question)
+        resolved_question = f"请做{chinese_label}"
+
         mql = MQLSchema()
         mql.intent = MQLIntent.QUERY_VALUE  # 假装是查询值，实际 trigger_analyzer 会处理
         mql.confidence = 1.0
-        mql.original_question = question
-        mql.resolved_question = question
+        mql.original_question = resolved_question  # 中文语义，供后续步骤和存储使用
+        mql.resolved_question = resolved_question  # 同上
 
         # 继承 inherited_mql 的上下文（时间、维度、指标等）
         if inherited_mql:
@@ -787,6 +1050,12 @@ class IntentRouter:
         # 解析实体
         entities = local_result.get('entities', [])
 
+        # 打印完整的 local_result 供调试
+        logger.warning(f"[IntentRouter] ═══════════════════════════════════════")
+        logger.warning(f"[IntentRouter] ★★★ local_result 完整内容: {local_result}")
+        logger.warning(f"[IntentRouter] ★本地模型原始 entities: {entities}")
+        logger.warning(f"[IntentRouter] ═══════════════════════════════════════")
+
         # 指标实体（必须）
         metric_entities = [e for e in entities if e['type'] == 'METRIC']
         if metric_entities:
@@ -912,23 +1181,42 @@ class IntentRouter:
                     continue
 
                 if dim_info["is_generic"]:
-                    mql.dimensions.append(MQLDimension(
-                        type=dim_info["dimension_type"],
-                        column=dim_info.get("column_name", ""),
-                        field="",
-                        value=None,
-                    ))
-                    logger.info(f"[IntentRouter] 检测到泛指维度: {dim_info['dimension_type']}")
+                    # 去重：检查是否已存在相同的 type+column
+                    dim_type = dim_info["dimension_type"]
+                    column_name = dim_info.get("column_name", "")
+                    if any(d.type == dim_type and d.column == column_name for d in mql.dimensions):
+                        logger.info(f"[IntentRouter] 泛指维度已存在，跳过: {dim_type}({column_name})")
+                    else:
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_type,
+                            column=column_name,
+                            field="",
+                            value=None,
+                        ))
+                        logger.info(f"[IntentRouter] 检测到泛指维度: {dim_info['dimension_type']}")
                 else:
                     column_name = dim_info["column_name"]
                     dim_type = column_to_dim_name.get(column_name.upper(), dim_info["dimension_type"])
-                    mql.dimensions.append(MQLDimension(
-                        type=dim_type,
-                        column=column_name,
-                        field="",
-                        value=dim_value,
-                    ))
-                    logger.info(f"[IntentRouter] 本地模型提取维度值: {dim_type}({column_name}) = {dim_value}")
+                    # 如果维度值等于维度类型名（如"店铺"=="店铺"），说明是泛指维度，触发追问
+                    if dim_value == dim_type:
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_type,
+                            column=column_name,
+                            field="",
+                            value=None,  # 泛指，没有具体值
+                        ))
+                        logger.info(f"[IntentRouter] 泛指维度(值=类型): {dim_type}({column_name})")
+                    # 去重：检查是否已存在相同的 type+value
+                    elif any(d.type == dim_type and d.value == dim_value for d in mql.dimensions):
+                        logger.info(f"[IntentRouter] 维度值已存在，跳过: {dim_type}={dim_value}")
+                    else:
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_type,
+                            column=column_name,
+                            field="",
+                            value=dim_value,
+                        ))
+                        logger.info(f"[IntentRouter] 本地模型提取维度值: {dim_type}({column_name}) = {dim_value}")
 
         # 单独 DIM_VALUE（无对应 DIM 类型）：通过 dimension_service 反查 column_name
         if dim_value_entities and not dim_entities:
@@ -957,25 +1245,43 @@ class IntentRouter:
                     continue
 
                 if dim_info["is_generic"]:
-                    # 泛指类型 → 注入维度（value=None）触发追问
-                    mql.dimensions.append(MQLDimension(
-                        type=dim_info["dimension_type"],  # 如"品类"
-                        column=dim_info.get("column_name", ""),
-                        field="",
-                        value=None,  # 泛指，没有具体值
-                    ))
-                    logger.info(f"[IntentRouter] 检测到泛指维度: {dim_info['dimension_type']}")
+                    # 去重：检查是否已存在相同的 type+column
+                    dim_type = dim_info["dimension_type"]
+                    column_name = dim_info.get("column_name", "")
+                    if any(d.type == dim_type and d.column == column_name for d in mql.dimensions):
+                        logger.info(f"[IntentRouter] 泛指维度已存在，跳过: {dim_type}({column_name})")
+                    else:
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_type,
+                            column=column_name,
+                            field="",
+                            value=None,
+                        ))
+                        logger.info(f"[IntentRouter] 检测到泛指维度: {dim_info['dimension_type']}")
                 else:
                     # 具体值 → 正常处理
                     column_name = dim_info["column_name"]
                     dim_type = column_to_dim_name.get(column_name.upper(), dim_info["dimension_type"])
-                    mql.dimensions.append(MQLDimension(
-                        type=dim_type,
-                        column=column_name,
-                        field="",
-                        value=dim_value,
-                    ))
-                    logger.info(f"[IntentRouter] 本地模型提取维度值(DIM_VALUE 反查): {dim_type}({column_name}) = {dim_value}")
+                    # 如果维度值等于维度类型名（如"店铺"=="店铺"），说明是泛指维度，触发追问
+                    if dim_value == dim_type:
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_type,
+                            column=column_name,
+                            field="",
+                            value=None,  # 泛指，没有具体值
+                        ))
+                        logger.info(f"[IntentRouter] 泛指维度(值=类型): {dim_type}({column_name})")
+                    # 去重：检查是否已存在相同的 type+value
+                    elif any(d.type == dim_type and d.value == dim_value for d in mql.dimensions):
+                        logger.info(f"[IntentRouter] 维度值已存在，跳过(DIM_VALUE反查): {dim_type}={dim_value}")
+                    else:
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_type,
+                            column=column_name,
+                            field="",
+                            value=dim_value,
+                        ))
+                        logger.info(f"[IntentRouter] 本地模型提取维度值(DIM_VALUE 反查): {dim_type}({column_name}) = {dim_value}")
 
         # 单独 DIM 实体（无对应 DIM_VALUE）：查找 column_name 并加入 dimensions
         # 例如：用户问"销售额排名前三的站点" → BERT 识别到 DIM='站点' 但没有 DIM_VALUE
@@ -1027,7 +1333,22 @@ class IntentRouter:
                     ))
                     logger.info(f"[IntentRouter] 本地模型提取分组维度(独立DIM): {dim_text} → {target_col}")
                 else:
-                    # 查不到列名，尝试用泛指维度处理
+                    # 查不到列名，说明 dim_text 可能不是维度类型，而是未识别的维度值
+                    # 回退到 find_dimension_info 查找它是否是具体维度值（如"德国亚马逊"）
+                    if dim_service:
+                        dim_info = dim_service.find_dimension_info(dim_text)
+                        if dim_info and not dim_info.get("is_generic"):
+                            column_name = dim_info["column_name"]
+                            dim_type = column_to_dim_name.get(column_name.upper(), dim_info["dimension_type"])
+                            mql.dimensions.append(MQLDimension(
+                                type=dim_type,
+                                column=column_name,
+                                field="",
+                                value=dim_text,
+                            ))
+                            logger.info(f"[IntentRouter] DIM回退为VALUE查找: {dim_text} → {dim_type}({column_name})={dim_text}")
+                            continue
+                    # 真的查不到，当作泛指维度处理
                     mql.dimensions.append(MQLDimension(
                         type=dim_text,
                         column="",

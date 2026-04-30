@@ -7,13 +7,11 @@ import json
 from typing import Dict, Any, Optional
 from ai.config.logging_config import get_logger
 from ai.client.http_client import get_http_client
+from ai.config.runtime import get_go_api_base, get_redis_settings
 
 logger = get_logger("ai.prompt_manager")
 
 # Redis 配置
-REDIS_HOST = "localhost"
-REDIS_PORT = 6379
-REDIS_DB = 0
 REDIS_KEY_PREFIX = "prompt:"
 REDIS_TTL = 300  # 5分钟
 
@@ -23,8 +21,8 @@ class PromptManager:
 
     _redis_client: Optional[redis.Redis] = None
 
-    def __init__(self, base_url: str = "http://localhost:8080"):
-        self.base_url = base_url
+    def __init__(self, base_url: Optional[str] = None):
+        self.base_url = base_url or get_go_api_base()
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_version: Dict[str, int] = {}
         self._init_redis()
@@ -32,16 +30,17 @@ class PromptManager:
     def _init_redis(self):
         """初始化 Redis 客户端"""
         try:
+            redis_host, redis_port, redis_db = get_redis_settings()
             PromptManager._redis_client = redis.Redis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                db=REDIS_DB,
+                host=redis_host,
+                port=redis_port,
+                db=redis_db,
                 decode_responses=True,
                 socket_connect_timeout=2
             )
             # 测试连接
             PromptManager._redis_client.ping()
-            logger.info(f"[PromptManager] Redis 连接成功: {REDIS_HOST}:{REDIS_PORT}")
+            logger.info(f"[PromptManager] Redis 连接成功: {redis_host}:{redis_port}")
         except Exception as e:
             logger.warning(f"[PromptManager] Redis 连接失败: {e}，将使用 DB + 内存缓存")
             PromptManager._redis_client = None

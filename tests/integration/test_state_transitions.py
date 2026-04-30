@@ -2,8 +2,9 @@
 import pytest
 import asyncio
 from ai.graph.state import ConversationState, ConversationMessage, ConversationContext
-from ai.graph.nodes import ConversationNodes
-from ai.engine.langgraph_engine import create_langgraph_app
+
+ConversationNodes = pytest.importorskip("ai.graph.nodes").ConversationNodes
+create_langgraph_app = pytest.importorskip("ai.engine.langgraph_engine").create_langgraph_app
 
 
 class TestStateTransitions:

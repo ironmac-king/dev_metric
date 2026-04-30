@@ -119,6 +119,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		llmAsk := v1.Group("/llm-ask")
 		{
 			llmAsk.POST("/v2/stream", handler.LLMAskV2Stream)
+			llmAsk.GET("/history/:session_id", handler.LLMAskV2History)
 		}
 
 		// 问数分析 API（需要认证）
@@ -152,6 +153,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		{
 			internalAsk.POST("/clear", handler.ClearSessionInternal)
 			internalAsk.GET("/suggest-v2", handler.GetV2InitialSuggestions)
+			internalAsk.POST("/v2-session", handler.SaveV2SessionInternal)
 		}
 
 		// 指标元数据 API（供 AI 服务调用）

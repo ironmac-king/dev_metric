@@ -155,12 +155,15 @@
                     </svg>
                   </div>
                   <div class="message-content" :class="{ loading: msg.loading }">
+                    <div v-if="msg.mql?.time?.start" class="message-date-range">
+                      {{ formatDateRange(msg.mql.time.start, msg.mql.time.end) }}
+                    </div>
                     <div v-if="msg.loading" class="loading-dots">
                       <span></span><span></span><span></span>
                     </div>
                     <template v-else>
                       <div class="message-text" v-html="formatMessage(msg.content)"></div>
-                      <div class="message-time">{{ msg.time }}</div>
+                      <div class="message-time">{{ formatTime(msg.time) }}</div>
                       <div v-if="msg.role === 'assistant'" class="message-actions">
                         <button class="action-btn" @click="copyMessage(msg)" title="复制">
                           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -250,17 +253,6 @@
                       class="message-chart"
                     />
 
-                    <!-- 快速下钻 - 仅当有有效 category 时显示（由 trigger_analyzer 设置） -->
-                    <div v-if="msg.role === 'assistant' && msg.resultData && msg.resultData.length > 0 && msg.category" class="analysis-drilldown">
-                      <div class="drilldown-title">快速下钻</div>
-                      <div class="drilldown-list">
-                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'sales' })">📊 看销售</button>
-                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'ad' })">📢 看广告</button>
-                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'inventory' })">📦 看库存</button>
-                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'profit' })">💰 看利润</button>
-                      </div>
-                    </div>
-
                     <!-- 多指标分析报告 - 紧凑卡片样式 -->
                     <div v-if="msg.analysis" class="chat-report-card" :class="'theme-' + msg.category">
                       <div class="report-header">
@@ -314,8 +306,8 @@
                       </div>
                     </div>
 
-                    <!-- 思考过程 -->
-                    <div v-if="msg.thinkingSteps && msg.thinkingSteps.length > 0" class="thinking-panel">
+                    <!-- 思考过程（默认隐藏） -->
+                    <div v-if="false && msg.thinkingSteps && msg.thinkingSteps.length > 0" class="thinking-panel">
                       <button class="thinking-toggle" @click="toggleThinking(idx)">
                         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                           <circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.2"/>
@@ -347,21 +339,34 @@
                     </div>
 
                     <!-- 建议问题 -->
-                    <div v-if="msg.suggest && msg.suggest.length > 0" class="suggest-list">
-                      <span class="suggest-label">建议：</span>
-                      <button
-                        v-for="s in msg.suggest"
-                        :key="s"
-                        class="suggest-btn"
-                        @click="selectSuggestion(s)"
-                      >
-                        {{ s }}
-                      </button>
+                    <div v-if="msg.suggest && msg.suggest.length > 0" class="suggest-row">
+                      <span class="suggest-label">为你推荐</span>
+                      <div class="suggest-items">
+                        <button
+                          v-for="s in msg.suggest"
+                          :key="s"
+                          class="suggest-item"
+                          @click="selectSuggestion(s)"
+                        >
+                          {{ s }}
+                        </button>
+                      </div>
                     </div>
 
-                    <!-- 波动分析按钮 -->
+                    <!-- 决策分析 - 仅当有有效 category 时显示（由 trigger_analyzer 设置） -->
+                    <div v-if="msg.role === 'assistant' && msg.resultData && msg.resultData.length > 0 && msg.category" class="analysis-drilldown">
+                      <div class="drilldown-title">决策分析</div>
+                      <div class="drilldown-list">
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'sales' })">📊 看销售</button>
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'ad' })">📢 看广告</button>
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'inventory' })">📦 看库存</button>
+                        <button class="drilldown-btn" @click="handleDrilldown({ check: 'profit' })">💰 看利润</button>
+                      </div>
+                    </div>
+
+                    <!-- 波动分析按钮（默认隐藏，对比问题自动触发） -->
                     <button
-                      v-if="msg.resultData && msg.resultData.length > 0 && canDoVolatilityAnalysis(msg.resultData)"
+                      v-if="false && msg.resultData && msg.resultData.length > 0 && canDoVolatilityAnalysis(msg.resultData)"
                       class="attribution-btn"
                       @click="openAttribution(msg)"
                     >
@@ -473,6 +478,10 @@
 import { ref, h, nextTick, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { llmAskApi, sessionApi } from '../api/llmAsk'
+import { askAPI } from '../api'
+import { runLlmAskStream } from '../composables/useLlmAskStream'
+import { decodeStoredAskMessage } from '../utils/llmAskMessageCodec'
+import { createLlmAskStreamAccumulator } from '../utils/llmAskStreamAccumulator'
 import LogicChainDrawer from '../components/ask/LogicChainDrawer.vue'
 import ClarificationCard from '../components/ask/ClarificationCard.vue'
 import PlanConfirmCard from '../components/ask/PlanConfirmCard.vue'
@@ -485,6 +494,14 @@ import lottie from 'lottie-web'
 const router = useRouter()
 const $route = useRoute()
 const question = ref('')
+
+// 下钻类型 → 中文标签（用于用户消息显示）
+const DRILLDOWN_LABELS = {
+  sales: '销售经营分析',
+  ad: '广告投放分析',
+  inventory: '库存供应链分析',
+  cost: '成本毛利分析',
+}
 const activeMode = ref('query')
 const messages = ref([])
 const loading = ref(false)
@@ -500,9 +517,17 @@ const expandedInterpretation = ref({})
 const showCommandPanel = ref(false)
 const commandSelectedIndex = ref(0)
 
+// SSE AbortController，用于取消正在进行的请求
+let abortController = null
+
 // 对话状态持久化到 localStorage
 const STORAGE_KEY = 'llm_ask_state'
 const resetState = () => {
+  // 取消正在进行的 SSE 请求
+  if (abortController) {
+    abortController.abort()
+    abortController = null
+  }
   // 点击导航时重置状态，显示初始化页面
   messages.value = []
   sessionId.value = ''
@@ -515,11 +540,25 @@ async function handleSelectSession(session) {
   try {
     // 加载该会话的消息
     const res = await llmAskApi.getHistory(session.session_id)
+    console.log('[handleSelectSession] res:', res)
+    console.log('[handleSelectSession] res.code:', res.code)
+    console.log('[handleSelectSession] res.data:', res.data)
     if (res.code === 0 && res.data) {
-      messages.value = res.data.messages || []
+      const transformedMessages = (res.data.messages || []).map(decodeStoredAskMessage)
+      messages.value = transformedMessages
       sessionId.value = session.session_id
       expandedThinking.value = {}
       expandedInterpretation.value = {}
+      // Debug: 查看恢复的消息数据
+      const assistantMsg = transformedMessages.find(m => m.role === 'assistant')
+      if (assistantMsg) {
+        console.log('[handleSelectSession] 恢复的消息:', JSON.stringify({
+          role: assistantMsg.role,
+          resultData: assistantMsg.resultData,
+          metricName: assistantMsg.metricName,
+          columns: assistantMsg.columns,
+        }).slice(0, 500))
+      }
     }
   } catch (e) {
     console.error('加载会话失败:', e)
@@ -606,6 +645,7 @@ const trendData = ref([])
 const volatilityPanelRef = ref(null)
 const currentMetricName = ref('')
 const volatilityApiUrl = '/api/v1/llm-ask/v2/volatility/stream'
+let pendingAutoVolatilityQuestion = ''  // 暂存当前问题，判断是否自动触发波动分析
 
 // Report data
 const reportTitle = ref('')
@@ -655,9 +695,13 @@ onMounted(async () => {
   // 获取初始快捷提问
   await fetchInitialSuggestions()
 
-  // 每次进入页面都重置（解决 SPA 内路由切换时状态残留问题）
+  // 每次进入页面都显示初始化界面
+  // 新建会话或从历史会话选择时由相应函数处理
   resetState()
-  console.log('[LLMAskV2A] after reset, messages count:', messages.value.length)
+
+  // 如果有 sessionId，清除它（回到初始化）
+  sessionId.value = ''
+  console.log('[LLMAskV2A] after mount, messages count:', messages.value.length, 'sessionId:', sessionId.value)
 
   // 滚动到底部展示最新消息
   scrollToBottom()
@@ -761,10 +805,22 @@ async function handleSend() {
 
   const userQuestion = question.value.trim()
   question.value = ''
+  pendingAutoVolatilityQuestion = userQuestion  // 暂存，支持自动触发波动分析
+
+  // 将 __DRILLDOWN__:xxx__ 格式映射为中文显示（API 请求体仍用原始格式）
+  let displayQuestion = userQuestion
+  if (userQuestion.startsWith('__DRILLDOWN__:')) {
+    const match = userQuestion.match(/^__DRILLDOWN__:(.+?)__$/)
+    if (match) {
+      const type = match[1]
+      const label = DRILLDOWN_LABELS[type] || type
+      displayQuestion = `请做${label}`
+    }
+  }
 
   messages.value.push({
     role: 'user',
-    content: userQuestion,
+    content: displayQuestion,
     time: getCurrentTime()
   })
 
@@ -776,281 +832,93 @@ async function handleSend() {
   currentThinkingSteps.value = []
   currentSql.value = ''
 
-  // 流式响应数据
-  let finalAnswer = ''
-  let finalSql = ''
-  let finalResultData = []
-  let finalMetricName = ''
-  let finalMetricNames = []
-  let finalAnalysis = null
-  let finalMultiMetricData = []
-  let finalDimensionalData = {}
-  let finalCategory = ''
-  let finalSuggest = []
-  let finalClarificationOptions = []
-  let finalClarificationMessage = ''
-  let finalNeedsClarification = false
-  let finalThinkingClarificationMessage = ''
-  let finalThinkingClarificationOptions = []
-  let finalThinkingOriginalQuestion = ''
-  let thinkingStepsMap = new Map()
-  let finalStarrocksSql = ''
-  let finalMomChange = null
-  let finalYoyChange = null
-  let currentMqlDimensions = []  // 捕获最近一次 thinking 事件的 mql.dimensions（用于传给波动分析）
-  let currentMqlTime = null  // 捕获最近一次 thinking 事件的 mql.time（用于传给波动分析）
+  const streamAccumulator = createLlmAskStreamAccumulator({
+    onThinkingStepsChange: (steps) => {
+      currentThinkingSteps.value = steps
+      stepsVersion.value++
+    },
+    onSqlChange: (sql) => {
+      currentSql.value = sql
+    },
+    onSessionConnected: (incomingSessionId) => {
+      sessionId.value = incomingSessionId
+    },
+    onDone: () => {
+      if (sessionId.value) {
+        sessionHistoryRef.value?.refreshSessions?.()
+      }
+    },
+    onError: (error) => {
+      console.error('SSE Error:', error)
+    },
+  })
 
   try {
+    // 取消之前的请求
+    if (abortController) {
+      abortController.abort()
+    }
+    abortController = new AbortController()
     const token = localStorage.getItem('token') || ''
-
-    const response = await fetch('/api/v1/llm-ask/v2/stream', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': token ? `Bearer ${token}` : '',
-      },
-      body: JSON.stringify({
-        question: userQuestion,
-        user_id: (() => {
-          try {
-            const userInfo = localStorage.getItem('user_info')
-            if (userInfo) {
-              const user = JSON.parse(userInfo)
-              return user && user.id ? String(user.id) : 'default'
-            }
-          } catch (e) {}
-          return 'default'
-        })(),
-        session_id: sessionId.value || undefined,
-      }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let currentEvent = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop()
-
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim()
-          continue
+    const resolvedUserId = (() => {
+      try {
+        const userInfo = localStorage.getItem('user_info')
+        if (userInfo) {
+          const user = JSON.parse(userInfo)
+          return user && user.id ? String(user.id) : 'default'
         }
-        if (line.startsWith('data: ')) {
-          const dataStr = line.slice(6).trim()
-          if (!dataStr) continue
-
-          try {
-            const data = JSON.parse(dataStr)
-
-            if (currentEvent === 'step_start') {
-              const stepName = data.step
-              thinkingStepsMap.set(stepName, {
-                step: stepName,
-                status: 'in_progress',
-                content: '',
-                duration: ''
-              })
-              // 同步更新 + 触发 Vue 重渲染
-              currentThinkingSteps.value = Array.from(thinkingStepsMap.values())
-              stepsVersion.value++
-            } else if (currentEvent === 'step_complete') {
-              const stepName = data.step
-              const existing = thinkingStepsMap.get(stepName) || { step: stepName }
-              thinkingStepsMap.set(stepName, {
-                ...existing,
-                status: 'completed',
-                duration: data.duration_ms ? `${data.duration_ms}ms` : ''
-              })
-              currentThinkingSteps.value = Array.from(thinkingStepsMap.values())
-              stepsVersion.value++
-            } else if (currentEvent === 'thinking') {
-              const stepName = data.step
-              const existing = thinkingStepsMap.get(stepName) || { step: stepName }
-              thinkingStepsMap.set(stepName, {
-                ...existing,
-                content: data.content,
-                entities: data.entities || [],
-                llm_used: data.llm_used || false,
-                source: data.source || null,
-                mql: data.mql || null,
-                needsClarification: data.needs_clarification || false,
-                clarificationMessage: data.clarification_message || '',
-                clarificationOptions: data.clarification_options || [],
-                originalQuestion: data.original_question || ''
-              })
-              // 捕获 mql dimensions（包含 GROUP_2 等维度过滤）用于传给波动分析
-              if (data.mql && data.mql.dimensions && data.mql.dimensions.length > 0) {
-                currentMqlDimensions = data.mql.dimensions
-              }
-              // 捕获 mql time（包含 start/end）用于传给波动分析计算 MoM/YoY
-              if (data.mql && data.mql.time) {
-                currentMqlTime = data.mql.time
-              }
-              // 追问信息优先从 thinking 事件获取（泛指维度时流程在 intent_router 就中断了）
-              if (data.needs_clarification) {
-                finalNeedsClarification = true
-                finalThinkingClarificationMessage = data.clarification_message || ''
-                finalThinkingClarificationOptions = data.clarification_options || []
-                finalThinkingOriginalQuestion = data.original_question || ''
-              }
-              currentThinkingSteps.value = Array.from(thinkingStepsMap.values())
-              stepsVersion.value++
-            } else if (currentEvent === 'sql_ready') {
-              finalSql = data.sql
-              currentSql.value = data.sql
-            } else if (currentEvent === 'result_ready') {
-              finalResultData = data.result_data || []
-              finalMetricName = data.metric_name || ''
-              finalMetricNames = data.metric_names || []
-              finalAnalysis = data.analysis || null
-              finalMultiMetricData = data.multi_metric_data || []
-              finalDimensionalData = data.dimensional_data || {}
-              finalCategory = data.category || ''
-              finalStarrocksSql = data.starrocks_sql || ''
-              finalMomChange = data.mom_change ?? null
-              finalYoyChange = data.yoy_change ?? null
-            } else if (currentEvent === 'answer_ready') {
-              finalAnswer = data.answer
-              finalSuggest = data.suggestions || []
-              finalClarificationOptions = data.clarification_options || []
-              finalClarificationMessage = data.clarification_message || ''
-              // 多指标下钻分析数据
-              if (data.analysis) finalAnalysis = data.analysis
-              if (data.multi_metric_data) finalMultiMetricData = data.multi_metric_data
-              if (data.dimensional_data) finalDimensionalData = data.dimensional_data
-              if (data.category) finalCategory = data.category
-            } else if (currentEvent === 'connected') {
-              // 保存 session_id 用于多轮对话
-              if (data.session_id) {
-                sessionId.value = data.session_id
-              }
-            } else if (currentEvent === 'done') {
-              // 完成 - 保存会话摘要
-              if (sessionId.value) {
-                const firstQuestion = messages.value.find(m => m.role === 'user')?.content || ''
-                if (firstQuestion) {
-                  console.log('[DEBUG] 保存会话摘要:', sessionId.value, firstQuestion.slice(0, 30))
-                  sessionApi.save({
-                    session_id: sessionId.value,
-                    title: firstQuestion.slice(0, 50),
-                    first_question: firstQuestion
-                  }).then(res => {
-                    console.log('[DEBUG] 保存会话结果:', res)
-                    // 刷新会话列表
-                    sessionHistoryRef.value?.refreshSessions?.()
-                  }).catch(e => console.error('保存会话失败:', e))
-                }
-              }
-            } else if (currentEvent === 'error') {
-              console.error('SSE Error:', data.error)
-            }
-          } catch (e) {
-            // 忽略解析错误
-          }
-          currentEvent = ''
-        }
-      }
-    }
-
-    const finalSteps = Array.from(thinkingStepsMap.values()).map(s => ({
-      step: s.step,
-      status: s.status,
-      content: s.content,
-      duration: s.duration,
-      entities: s.entities || [],
-      llm_used: s.llm_used || false,
-      source: s.source || null,
-      mql: s.mql || null
-    }))
-
-    // 当有结果数据但没有文字回答时，生成默认回答
-    let displayAnswer = finalAnswer
-    if (!displayAnswer && finalResultData && finalResultData.length > 0) {
-      const firstRow = finalResultData[0]
-      const keys = Object.keys(firstRow)
-      if (keys.length === 1) {
-        const val = firstRow[keys[0]]
-        if (!isNaN(parseFloat(val))) {
-          const num = parseFloat(val)
-          let formatted = num.toLocaleString()
-          if (num >= 100000000) formatted = (num / 100000000).toFixed(2) + '亿'
-          else if (num >= 10000) formatted = (num / 10000).toFixed(2) + '万'
-          displayAnswer = `查询结果：${formatted}`
-        }
-      }
-    }
-    // 如果有图表数据，不显示文字回答（只通过图表卡片展示）
-    // 追问时优先显示追问消息
-    let finalContent = ''
-    if (finalNeedsClarification && finalThinkingClarificationMessage) {
-      finalContent = finalThinkingClarificationMessage
-    } else if (finalResultData && finalResultData.length > 0) {
-      finalContent = ''
-    } else {
-      finalContent = displayAnswer || '抱歉，我没有找到相关数据。'
-    }
-
-    // 追问选项优先从 thinking 事件获取（泛指维度时流程在 intent_router 就中断了）
-    const effectiveClarificationOptions = finalNeedsClarification && finalThinkingClarificationOptions.length > 0
-      ? finalThinkingClarificationOptions
-      : finalClarificationOptions
-    const effectiveClarificationMessage = finalNeedsClarification && finalThinkingClarificationMessage
-      ? finalThinkingClarificationMessage
-      : finalClarificationMessage
-
-    // 从 thinkingSteps 中提取最后一个有效的 mql
-    const extractedMql = (() => {
-      for (let i = finalSteps.length - 1; i >= 0; i--) {
-        if (finalSteps[i].mql) {
-          return finalSteps[i].mql
-        }
-      }
-      return null
+      } catch (e) {}
+      return 'default'
     })()
 
-    messages.value.push({
-      role: 'assistant',
-      content: finalContent,
-      sql: finalSql,
-      thinkingSteps: finalSteps,
-      mql: extractedMql,
-      resultData: finalResultData,
-      metricName: finalMetricName,
-      metricNames: finalMetricNames,
-      analysis: finalAnalysis,
-      multiMetricData: finalMultiMetricData,
-      dimensionalData: finalDimensionalData,
-      category: finalCategory,
-      suggest: finalSuggest,
-      needsClarification: finalNeedsClarification || effectiveClarificationOptions.length > 0,
-      clarificationOptions: effectiveClarificationOptions,
-      clarificationMessage: effectiveClarificationMessage,
-      originalQuestion: finalThinkingOriginalQuestion,
-      starrocksSql: finalStarrocksSql,
-      momChange: finalMomChange,
-      yoyChange: finalYoyChange,
-      dimensionFilters: currentMqlDimensions,
-      timeRange: currentMqlTime,
-      time: getCurrentTime()
+    await runLlmAskStream({
+      question: userQuestion,
+      sessionId: sessionId.value,
+      token,
+      userId: resolvedUserId,
+      signal: abortController.signal,
+      onEvent: (currentEvent, data) => streamAccumulator.handleEvent(currentEvent, data),
     })
+
+    const finalSteps = streamAccumulator.getFinalSteps()
+
+    messages.value.push(streamAccumulator.buildMessage(getCurrentTime()))
 
     expandedThinking.value[messages.value.length - 1] = false
 
     currentThinkingSteps.value = finalSteps
     stepsVersion.value++
     currentSql.value = finalSql
+
+    // 自动触发波动分析：追问"为什么"类问题且数据适合做波动分析时
+    // answer_ready 之后 mom/yoy 才有正确值，所以延迟到 nextTick 再判断
+    await nextTick()
+    const latestMsg = messages.value[messages.value.length - 1]
+    const latestResultData = streamAccumulator.getFinalResultData()
+    if (latestMsg && latestResultData && latestResultData.length > 0) {
+      const q = pendingAutoVolatilityQuestion || ''
+      const isComparisonQuestion = /为什么|为啥|为什么.比|为啥.比|哪个.高|哪个.低|对比|比较|差异/.test(q)
+      if (isComparisonQuestion && canDoVolatilityAnalysis(latestResultData)) {
+        // 如果 mom/yoy 为空，尝试从 analysis.kpi 取值
+        if (!latestMsg.momChange && latestMsg.analysis?.kpi?.mom != null) {
+          latestMsg.momChange = latestMsg.analysis.kpi.mom / 100  // trigger_analyzer 返回的是百分比值如 -100.0，需转小数
+        }
+        if (!latestMsg.yoyChange && latestMsg.analysis?.kpi?.yoy != null) {
+          latestMsg.yoyChange = latestMsg.analysis.kpi.yoy / 100
+        }
+        // 如果 timeRange 为空，从 thinkingStepsMap 里取最新的 MQL time
+        if (!latestMsg.timeRange || !latestMsg.timeRange.start) {
+          for (let i = thinkingStepsMap.size - 1; i >= 0; i--) {
+            const step = thinkingStepsMap.get(i)
+            if (step?.mql?.time?.start) {
+              latestMsg.timeRange = step.mql.time
+              break
+            }
+          }
+        }
+        openAttribution(latestMsg)
+      }
+    }
 
   } catch (e) {
     console.error('流式请求失败:', e)
@@ -1086,13 +954,17 @@ async function updateThinkingSteps() {
 function canDoVolatilityAnalysis(resultData) {
   if (!resultData || resultData.length === 0) return false
 
-  // 单行数据不适合
-  if (resultData.length === 1) return false
-
   const firstRow = resultData[0]
   if (!firstRow) return false
 
   const keys = Object.keys(firstRow)
+
+  // 单行比较数据（有"当前值"和"环比值"）适合做波动分析
+  const isComparisonRow = keys.includes('当前值') && keys.includes('环比值')
+  if (isComparisonRow) return true
+
+  // 单行数据不适合
+  if (resultData.length === 1) return false
 
   // 检查是否有维度列（GROUP_X 或其他维度列）
   const hasDimensionColumn = keys.some(k =>
@@ -1131,7 +1003,43 @@ function prepareAttributionData(data) {
 
 function openAttribution(msg) {
   // Deep copy to avoid reactive proxy issues
-  const resultDataCopy = JSON.parse(JSON.stringify(msg.resultData || []))
+  let resultDataCopy = JSON.parse(JSON.stringify(msg.resultData || []))
+  let timeRange = msg.timeRange ? { start: msg.timeRange.start, end: msg.timeRange.end } : null
+
+  // 如果是比较结果（单行含"当前值"和"环比值"），转换成两行时间序列格式
+  if (resultDataCopy.length === 1) {
+    const row = resultDataCopy[0]
+    const hasCurrent = '当前值' in row
+    const hasPrev = '环比值' in row
+    if (hasCurrent && hasPrev) {
+      const currentVal = parseFloat(row['当前值']) || 0
+      const prevVal = parseFloat(row['环比值']) || 0
+      // 从 timeRange 解析出当期和上期月份
+      let currentDate = ''
+      let prevDate = ''
+      if (timeRange && timeRange.start) {
+        currentDate = timeRange.start // 如 2026-03-01
+        // 上期往前推一个月
+        const d = new Date(timeRange.start)
+        d.setMonth(d.getMonth() - 1)
+        prevDate = d.toISOString().slice(0, 10) // 如 2026-02-01
+      }
+      resultDataCopy = [
+        { date: currentDate, value: currentVal },
+        { date: prevDate, value: prevVal }
+      ]
+      // 用比较值计算 mom（不再让 volatility 重新算）
+      const momFromMsg = msg.momChange ?? (prevVal !== 0 ? (currentVal - prevVal) / prevVal : null)
+      const yoyFromMsg = msg.yoyChange ?? null
+      // 更新 timeRange 为包含两个月的范围（回写到 msg，保证 volatility 收到正确的时间范围）
+      if (prevDate && currentDate) {
+        timeRange = { start: prevDate, end: currentDate }
+        msg.timeRange = timeRange
+      }
+      msg.momChange = momFromMsg
+      msg.yoyChange = yoyFromMsg
+    }
+  }
 
   // 设置当前指标名称
   currentMetricName.value = msg.metricName || '指标'
@@ -1153,7 +1061,7 @@ function openAttribution(msg) {
         value: d.value || ''
       })),
       // 传 MQL time range（start/end）用于计算正确的 MoM/YoY
-      time_range: msg.timeRange ? { start: msg.timeRange.start, end: msg.timeRange.end } : null
+      time_range: timeRange
     })
   }
 }
@@ -1208,11 +1116,21 @@ function toggleInterpretation(idx) {
   expandedInterpretation.value[idx] = !expandedInterpretation.value[idx]
 }
 
-function rateMessage(msg, rating) {
+async function rateMessage(msg, rating) {
+  // 切换本地状态
   if (msg.rating === rating) {
     msg.rating = null
   } else {
     msg.rating = rating
+  }
+  // 调用后端 API 保存反馈
+  try {
+    await askAPI.sendFeedback({
+      session_id: sessionId.value,
+      feedback: rating
+    })
+  } catch (err) {
+    console.error('反馈提交失败:', err)
   }
 }
 
@@ -1361,11 +1279,26 @@ function formatMessage(text) {
   return text.replace(/\n/g, '<br>')
 }
 
+function formatDateRange(start, end) {
+  if (!start) return ''
+  const s = start ? start.slice(0, 10) : ''
+  const e = end ? end.slice(0, 10) : ''
+  if (s && e && s !== e) {
+    return `${s} ~ ${e}`
+  }
+  return s
+}
+
 function getCurrentTime() {
   const now = new Date()
-  const hours = String(now.getHours()).padStart(2, '0')
-  const minutes = String(now.getMinutes()).padStart(2, '0')
-  return `${hours}:${minutes}`
+  return now.toISOString()
+}
+
+function formatTime(isoString) {
+  if (!isoString) return ''
+  const d = new Date(isoString)
+  const pad = n => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 function getHealthClass(score) {
@@ -1376,7 +1309,65 @@ function getHealthClass(score) {
 
 async function copyMessage(msg) {
   try {
-    await navigator.clipboard.writeText(msg.content)
+    // 优先复制图表数据（resultData）
+    if (msg.resultData && msg.resultData.length > 0) {
+      const keys = Object.keys(msg.resultData[0])
+      // 转为 CSV 格式
+      const header = keys.join('\t')
+      const rows = msg.resultData.map(row =>
+        keys.map(k => row[k] ?? '').join('\t')
+      )
+      const csvText = [header, ...rows].join('\n')
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(csvText)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = csvText
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      }
+      return
+    }
+
+    // 其次复制 SQL
+    if (msg.sql) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(msg.sql)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = msg.sql
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      }
+      return
+    }
+
+    // 最后复制纯文本
+    if (msg.content) {
+      const plainText = msg.content.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(plainText)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = plainText
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      }
+      return
+    }
   } catch (err) {
     console.error('复制失败:', err)
   }
@@ -1796,6 +1787,19 @@ function scrollToBottom() {
   color: #fff;
 }
 
+.message-date-range {
+  font-size: 11px;
+  color: #909399;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed #ebeef5;
+}
+
+.message-item.user .message-date-range {
+  color: rgba(255, 255, 255, 0.7);
+  border-bottom-color: rgba(255, 255, 255, 0.2);
+}
+
 .message-time {
   font-size: 10px;
   color: #c0c4cc;
@@ -2091,39 +2095,42 @@ function scrollToBottom() {
   max-width: 300px;
 }
 
-/* 建议问题 */
-.suggest-list {
+/* 建议问题 - 轻量文字标签 */
+.suggest-row {
   margin-top: 10px;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
 }
 
 .suggest-label {
-  font-size: 12px;
+  font-size: 13px;
   color: #9ca3af;
+  white-space: nowrap;
+  line-height: 28px;
 }
 
-.suggest-btn {
-  padding: 8px 16px;
-  background: rgba(99, 102, 241, 0.08);
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  border-radius: 16px;
+.suggest-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.suggest-item {
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
   font-size: 13px;
-  font-weight: 500;
   color: #6366F1;
   cursor: pointer;
-  transition: all 0.2s ease;
-  white-space: nowrap;
+  transition: all 0.15s ease;
+  line-height: 1.4;
 }
 
-.suggest-btn:hover {
-  background: #6366F1;
-  color: #fff;
-  border-color: #6366F1;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+.suggest-item:hover {
+  background: rgba(99, 102, 241, 0.06);
+  border-color: rgba(99, 102, 241, 0.3);
 }
 
 /* 快速下钻 */
@@ -2745,78 +2752,94 @@ function scrollToBottom() {
     gap: 16px;
     height: calc(100vh - 60px);
     height: calc(100dvh - 60px);
+    max-width: 100%;
   }
 
   .init-view {
     padding: 60px 16px 24px;
+    max-width: 100%;
+    justify-content: flex-start;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .greeting-section {
     flex-direction: column;
     align-items: center;
     text-align: center;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
+    max-width: 100%;
   }
 
   .avatar-wrapper {
-    width: 64px;
-    height: 64px;
+    width: 48px;
+    height: 48px;
   }
 
   .avatar-wrapper svg {
-    width: 64px;
-    height: 64px;
+    width: 48px;
+    height: 48px;
   }
 
   .welcome-text {
-    font-size: 20px;
+    font-size: 16px;
+    line-height: 1.4;
   }
 
   .mode-tabs {
-    gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 8px;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  .mode-tab {
-    height: 36px;
-    padding: 0 14px;
-    font-size: 14px;
-    flex-shrink: 0;
+    display: none;
   }
 
   .init-input-section {
-    margin-bottom: 24px;
+    width: 100%;
+    max-width: 100%;
+    margin-bottom: 12px;
   }
 
   .init-input-section .chat-input-wrapper {
-    padding: 14px 18px;
-    min-height: 80px;
-    border-radius: 16px;
+    padding: 12px 16px;
+    min-height: 56px;
+    border-radius: 14px;
   }
 
   .init-input-section .chat-input {
-    font-size: 16px;
-    min-height: 52px;
+    font-size: 15px;
+    min-height: 32px;
   }
 
   .init-input-section .send-btn {
-    width: 44px;
-    height: 44px;
-    margin-left: 12px;
+    width: 40px;
+    height: 40px;
+    margin-left: 10px;
+    flex-shrink: 0;
+  }
+
+  .suggestions-section {
+    width: 100%;
+    max-width: 100%;
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .suggestions-grid {
     grid-template-columns: 1fr;
-    gap: 12px;
+    gap: 10px;
+  }
+
+  .suggestion-card .card-content p {
+    display: none;
   }
 
   .suggestion-card {
-    padding: 14px;
+    padding: 10px 12px;
     min-height: auto;
-    flex-direction: column;
-    align-items: flex-start;
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .card-content h4 {
+    font-size: 14px;
   }
 
   .card-icon {
@@ -2826,8 +2849,12 @@ function scrollToBottom() {
   }
 
   .suggestions-title {
-    font-size: 16px;
-    margin-bottom: 12px;
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+
+  .input-tools-bar {
+    display: none;
   }
 
   /* Chat view responsive */
@@ -2836,21 +2863,38 @@ function scrollToBottom() {
   }
 
   .messages-container {
-    padding: 16px 12px;
+    padding: 12px 8px;
+  }
+
+  .message-item {
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .message-avatar {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+  }
+
+  .message-avatar img,
+  .message-avatar svg {
+    width: 32px;
+    height: 32px;
   }
 
   .message-content {
-    max-width: 85%;
+    max-width: 80%;
     min-width: unset;
-    padding: 14px 18px;
+    padding: 10px 14px;
   }
 
   .message-item.assistant .message-content {
-    border-radius: 16px 16px 16px 4px;
+    border-radius: 14px 14px 14px 4px;
   }
 
   .message-item.user .message-content {
-    border-radius: 16px 16px 4px 16px;
+    border-radius: 14px 14px 4px 14px;
   }
 
   .input-section {
@@ -2893,72 +2937,224 @@ function scrollToBottom() {
   /* 按钮触控热区 */
   .send-btn,
   .action-btn,
-  .suggest-btn,
   .clarification-tag {
     min-height: 44px;
     min-width: 44px;
   }
 
-  /* 建议标签横向滑动 */
-  .suggest-list {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 8px;
-  }
-
-  .suggest-btn {
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-
   /* 用户气泡优化 */
   .message-item.user .message-content {
-    background: hsl(250, 60%, 55%);
+    background: linear-gradient(135deg, #6366F1 0%, #7C3AED 100%);
+    color: #fff;
+    border: none;
+    padding: 10px 14px;
+    border-radius: 18px 18px 4px 18px;
+    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+  }
+
+  .message-item.user .message-text {
+    color: #fff;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .message-item.user .message-time {
+    color: rgba(255, 255, 255, 0.7);
   }
 
   /* placeholder 可读性 */
   .chat-input::placeholder {
     color: #666;
   }
+
+  /* 快速下钻移动端适配 */
+  .analysis-drilldown {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .drilldown-list {
+    gap: 6px;
+  }
+
+  .drilldown-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
 }
 
 @media (max-width: 480px) {
   .main-container {
     padding: 70px 12px 16px;
+    max-width: 100%;
   }
 
   .init-view {
     padding: 50px 12px 16px;
+    max-width: 100%;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .greeting-section {
+    max-width: 100%;
+    margin-bottom: 12px;
   }
 
   .welcome-text {
-    font-size: 18px;
+    font-size: 15px;
   }
 
   .avatar-wrapper {
-    width: 56px;
-    height: 56px;
+    width: 44px;
+    height: 44px;
   }
 
   .avatar-wrapper svg {
-    width: 56px;
-    height: 56px;
+    width: 44px;
+    height: 44px;
   }
 
-  .message-content {
-    max-width: 90%;
-    padding: 12px 14px;
+  .mode-tabs {
+    display: none;
+  }
+
+  .init-input-section {
+    margin-bottom: 10px;
+  }
+
+  .init-input-section .chat-input-wrapper {
+    padding: 10px 14px;
+    min-height: 48px;
+  }
+
+  .init-input-section .chat-input {
+    font-size: 14px;
+    min-height: 28px;
+  }
+
+  .init-input-section .send-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .input-tools-bar {
+    display: none;
+  }
+
+  .suggestions-section {
+    max-width: 100%;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .suggestions-title {
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+
+  .suggestions-grid {
+    gap: 8px;
+  }
+
+  .suggestion-card .card-content p {
+    display: none;
   }
 
   .suggestion-card {
     flex-direction: row;
     align-items: center;
+    padding: 8px 10px;
+  }
+
+  .card-content h4 {
+    font-size: 13px;
   }
 
   .card-icon {
+    width: 36px;
+    height: 36px;
     margin-bottom: 0;
-    margin-right: 12px;
+    margin-right: 10px;
+  }
+
+  .message-content {
+    max-width: 90%;
+    padding: 10px 12px;
+  }
+
+  .chat-view {
+    padding: 0;
+  }
+
+  .messages-container {
+    padding: 10px 6px;
+  }
+
+  .message-item {
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .message-avatar {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+  }
+
+  .message-avatar img,
+  .message-avatar svg {
+    width: 28px;
+    height: 28px;
+  }
+
+  .message-item.assistant .message-content {
+    border-radius: 12px 12px 12px 4px;
+  }
+
+  .message-item.user .message-content {
+    border-radius: 12px 12px 4px 12px;
+  }
+
+  .input-section {
+    padding: 10px 12px 12px;
+  }
+
+  .chat-input-wrapper {
+    padding: 10px 14px;
+    border-radius: 18px;
+    min-height: 60px;
+  }
+
+  .chat-input {
+    font-size: 15px;
+    min-height: 36px;
+  }
+
+  .send-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    margin-left: 10px;
+  }
+
+  /* 快速下钻移动端适配 */
+  .analysis-drilldown {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .drilldown-list {
+    gap: 6px;
+  }
+
+  .drilldown-btn {
+    padding: 6px 10px;
+    font-size: 12px;
   }
 }
 </style>

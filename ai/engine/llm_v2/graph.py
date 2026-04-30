@@ -48,12 +48,11 @@ def _extract_entities_from_mql(mql) -> list:
 
 async def _preload_metric_info(state: V2State) -> None:
     """
-    预加载指标信息到 context_cache（优化：提前调用 MetricClient）
+    预热指标信息查询链路。
 
-    在 context_enhancer 阶段提前获取 starrocks_sql 等关键字段，
-    存入 state.context_cache["metric_info_cache"]，
-    供后续 mql_generator / sql_generator / mql_semantic_validator 复用，
-    避免重复的 HTTP 调用。
+    历史上这里会把结果写入 context_cache["metric_info_cache"]，但当前
+    LLM.V2 链路里已经没有读者。保留这次查询仅用于兼容观察和日志，
+    不再向状态里写入未使用缓存字段。
     """
     try:
         metric = state.inherited_mql.metric if state.inherited_mql else None
@@ -64,7 +63,6 @@ async def _preload_metric_info(state: V2State) -> None:
         # 通过名称查找，获取完整的 starrocks_sql 等信息
         metric_info = client.get_metric_by_name(metric.name)
         if metric_info:
-            state.context_cache["metric_info_cache"] = metric_info
             logger.info(f"[_preload_metric_info] 预加载指标: name={metric.name}, code={metric_info.get('metric_code')}")
     except Exception as e:
         logger.warning(f"[_preload_metric_info] 预加载失败: {e}")
@@ -113,16 +111,15 @@ async def intent_router(state: V2State):
 
             # 保存 drilldown_type（用于四类下钻）
             if result.get("drilldown_type"):
-                state.context_cache["drilldown_type"] = result["drilldown_type"]
+                state.context_cache.drilldown_type = result["drilldown_type"]
                 logger.info(f"[intent_router] 保存 drilldown_type: {result['drilldown_type']}")
 
             # 处理泛指维度 vs 真正追问的区分
             if result.get("needs_clarification"):
                 # 泛指维度 or 真正追问：都中断流程，返回追问让用户选择
                 state.error = "needs_clarification"
-                state.context_cache["clarification_message"] = result.get("clarification_message", "")
-                state.context_cache["clarification_options"] = result.get("clarification_options", [])
-                state.context_cache["original_question"] = result.get("original_question", "")
+                state.context_cache.clarification_message = result.get("clarification_message", "")
+                state.context_cache.clarification_options = result.get("clarification_options", [])
 
                 # 泛指维度：设置 is_generic_result 标记
                 if result.get("is_generic"):
@@ -201,9 +198,7 @@ async def context_enhancer(state: V2State) -> V2State:
 
         # 更新上下文缓存
         if rag_result.get("similar_cases"):
-            state.context_cache["similar_cases"] = rag_result["similar_cases"]
-        if rag_result.get("suggested_mql"):
-            state.context_cache["suggested_mql"] = rag_result["suggested_mql"]
+            state.context_cache.similar_cases = rag_result["similar_cases"]
 
         # 预加载 metric_info（优化：提前调用 MetricClient，后续节点可复用缓存）
         await _preload_metric_info(state)
@@ -244,12 +239,19 @@ async def mql_generator(state: V2State) -> V2State:
         generator = MQLGenerator()
 
         # 获取 RAG 上下文
-        rag_context = state.context_cache.get("similar_cases", [])
+        rag_context = state.context_cache.similar_cases or []
 
-        # 当 intent_router 本地模型成功识别或下钻时，传入已生成的 MQL 跳过 LLM 调用
+        # 当 intent_router 已经构建出可直接使用的 MQL 时，传入该结果跳过 LLM 调用
         source = getattr(state, 'source', '')
         logger.info(f"[mql_generator] state.source={source!r}, state.mql.metric.name={state.mql.metric.name if state.mql and state.mql.metric else None}")
-        intent_router_mql = state.mql if source in ('local_model', 'drilldown') else None
+        intent_router_mql = state.mql if source in (
+            'local_model',
+            'drilldown',
+            'followup_add_metric',
+            'followup_add_dimension',
+            'followup_remove_metric',
+            'followup_remove_dimension',
+        ) else None
 
         # 生成 MQL
         mql = await generator.generate(
@@ -633,7 +635,7 @@ async def data_quality_checker(state: V2State) -> V2State:
             )
         else:
             if warnings:
-                state.context_cache["quality_warnings"] = warnings
+                logger.warning(f"[data_quality_checker] 数据质量警告: {warnings}")
 
             state.add_thinking_step(
                 "data_quality_checker",
@@ -850,7 +852,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
                         import httpx
                         async with httpx.AsyncClient(timeout=30) as client:
                             resp = await client.post(
-                                "http://localhost:8080/api/v1/query/execute",
+                                "http://localhost:18080/api/v1/query/execute",
                                 json={"sql": prev_sql, "timeout": 30},
                             )
                             data = resp.json()
@@ -880,7 +882,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
 
         # P0-3 fix: 设置 session_state 用于 ContextTrigger
         if state.mql and state.mql.metric:
-            state.context_cache["session_state"] = {
+            state.session_state = {
                 "last_query_type": "metric",
                 "last_metric": state.mql.metric.name if hasattr(state.mql.metric, 'name') else None,
                 "last_metric_code": state.mql.metric.code if hasattr(state.mql.metric, 'code') else None,
@@ -889,28 +891,30 @@ async def trigger_analyzer(state: V2State) -> V2State:
             }
 
         # 获取会话状态（用于 ContextTrigger）
-        session_state = state.context_cache.get("session_state", {})
+        session_state = state.session_state or {}
 
         # 传递 drilldown_type 到 trigger_analyzer
-        drilldown_type = state.context_cache.get("drilldown_type")
+        drilldown_type = state.context_cache.drilldown_type
         if drilldown_type:
             session_state["drilldown_type"] = drilldown_type
+            state.session_state = session_state
             # 设置多指标模式标记，用于后续 ReportGeneratorNode 调用
-            state.context_cache["multi_metric_mode"] = True
-            state.context_cache["drilldown_category"] = drilldown_type
+            state.multi_metric_mode = True
+            state.drilldown_category = drilldown_type
             logger.info(f"[trigger_analyzer] 多指标下钻模式: category={drilldown_type}")
 
         # ============================================================
         # 多指标下钻模式：调用 ReportGeneratorNode 生成分析报告
         # ============================================================
-        if state.context_cache.get("multi_metric_mode"):
+        drilldown_category = state.drilldown_category
+        if state.multi_metric_mode:
             from .nodes.report_generator import ReportGeneratorNode
             try:
                 report_gen = ReportGeneratorNode()
 
                 # 1. 执行该 category 下所有模板，合并结果
                 merged_data = await report_gen.execute_all_templates(
-                    category=state.context_cache.get("drilldown_category"),
+                    category=drilldown_category,
                     time_range={
                         "start": state.mql.time.start if state.mql and state.mql.time else "",
                         "end": state.mql.time.end if state.mql and state.mql.time else "",
@@ -932,12 +936,12 @@ async def trigger_analyzer(state: V2State) -> V2State:
                     state.multi_metric_data = []
                     state.dimensional_data = {}
                     # ✶ 修复：仍然设置 category，让前端能显示下钻按钮
-                    state.category = state.context_cache.get("drilldown_category") or ""
+                    state.category = drilldown_category or ""
                 else:
                     # 2. LLM 生成分析报告
                     analysis = await report_gen.generate_analysis(
                         multi_metric_data=merged_data,
-                        category=state.context_cache.get("drilldown_category"),
+                        category=drilldown_category,
                         time_range={
                             "start": state.mql.time.start if state.mql and state.mql.time else "",
                             "end": state.mql.time.end if state.mql and state.mql.time else "",
@@ -951,7 +955,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
                     state.analysis = analysis
                     state.multi_metric_data = multi_metric_data
                     state.dimensional_data = dimensional_data
-                    state.category = state.context_cache.get("drilldown_category")
+                    state.category = drilldown_category
 
                     logger.info(
                         f"[trigger_analyzer] 多指标下钻分析完成: "
@@ -963,7 +967,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
                 state.add_thinking_step(
                     "trigger_analyzer",
                     status="completed",
-                    content=f"多指标下钻分析: {state.context_cache.get('drilldown_category')}",
+                    content=f"多指标下钻分析: {drilldown_category}",
                     llm_used=True,
                     duration_ms=int((time.time() - start_time) * 1000),
                 )
@@ -976,7 +980,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
                 state.analysis = None
                 state.multi_metric_data = []
                 state.dimensional_data = {}
-                state.category = state.context_cache.get("drilldown_category")
+                state.category = drilldown_category
                 state.add_thinking_step(
                     "trigger_analyzer",
                     status="completed",
@@ -1091,19 +1095,17 @@ async def result_analyzer(state: V2State) -> V2State:
             sql_result=state.sql_result,
             question=state.question,
             is_generic_result=state.is_generic_result,
-            clarification_message=state.context_cache.get("clarification_message", ""),
-            clarification_options=state.context_cache.get("clarification_options", []),
+            clarification_message=state.context_cache.clarification_message or "",
+            clarification_options=state.context_cache.clarification_options or [],
             analysis=state.analysis,
         )
 
         state.answer = result.get("answer", "")
-        state.context_cache["suggestions"] = result.get("suggestions", [])
-        if result.get("anomalies"):
-            state.context_cache["anomalies"] = result.get("anomalies")
+        state.context_cache.suggestions = result.get("suggestions", [])
         # 保存结构化的追问选项（供前端渲染按钮）
         if result.get("clarification_options"):
-            state.context_cache["clarification_options"] = result.get("clarification_options")
-            state.context_cache["clarification_message"] = result.get("clarification_message", "")
+            state.context_cache.clarification_options = result.get("clarification_options")
+            state.context_cache.clarification_message = result.get("clarification_message", "")
 
         state.add_thinking_step(
             "result_analyzer",

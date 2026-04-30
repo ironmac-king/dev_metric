@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 from .schema import V2State, MQLSchema, create_v2_state
 from .graph import get_v2_graph
 from .streaming import (
@@ -35,10 +36,33 @@ logger = get_logger("ai.llm_v2.router")
 router = APIRouter(prefix="/api/v1/llm-ask", tags=["LLM.V2"])
 
 # V2 Session 存储：保存每个 session_id 对应的上轮 MQL（用于多轮对话上下文继承）
-v2_session_mql: Dict[str, MQLSchema] = {}
+# 已迁移至 Redis（V2SessionStore），见 session_store.py
+from .session_store import get_session_store
+_session_store = get_session_store()
 
-# Go 后端日志 API 地址
-GO_ASK_ANALYSIS_LOG_URL = "http://localhost:8080/api/v1/internal/ask-analysis/logs/v2"
+# 下钻类型 → 中文语义标签（用于 CONNECTED 事件显示）
+DRILLDOWN_LABELS = {
+    "sales": "销售经营分析",
+    "ad": "广告投放分析",
+    "inventory": "库存供应链分析",
+    "cost": "成本毛利分析",
+}
+
+
+def _map_drilldown_question(question: str) -> str:
+    """将 __DRILLDOWN__:xxx__ 格式映射为中文语义"""
+    if question.startswith("__DRILLDOWN__:"):
+        try:
+            drilldown_type = question.replace("__DRILLDOWN__:", "").replace("__", "").strip()
+            chinese_label = DRILLDOWN_LABELS.get(drilldown_type, drilldown_type)
+            return f"请做{chinese_label}"
+        except Exception:
+            return question
+    return question
+
+# Go 后端 API 地址
+GO_API_BASE = get_go_api_base()
+GO_ASK_ANALYSIS_LOG_URL = f"{GO_API_BASE}/api/v1/internal/ask-analysis/logs/v2"
 
 
 async def _send_log_to_go(
@@ -158,84 +182,64 @@ class AskResponseV2(BaseModel):
     mode: Optional[str] = "direct"  # "direct" or "triggered"
 
 
-# ==================== 会话落库辅助函数 ====================
+# ==================== 会话持久化辅助函数 ====================
 
-def _save_v2_session_to_db(
+async def _save_v2_session_to_go(
     session_id: str,
     user_id: str,
     question: str,
-    answer: str,
-    sql: str,
-    result_data: Any,
-    comparison_results: Any,
+    result_state: "V2State",
 ) -> None:
-    """
-    将 V2 会话保存到 PostgreSQL（ask_session_summaries + ask_messages 表）
-    """
+    """Persist V2 summary and messages through the Go backend."""
     try:
-        import psycopg2
-        import json
-
-        conn = psycopg2.connect(
-            host="192.168.1.225",
-            port=5432,
-            database="dev_metric",
-            user="postgres",
-            password="admin123",
+        result_data = result_state.sql_result.data if result_state.sql_result else None
+        comparison_results = result_state.context_cache.comparison_results if result_state.context_cache else None
+        thinking_steps_json = json.dumps(
+            [step.to_dict() for step in result_state.thinking_steps],
+            ensure_ascii=False,
+            default=str,
         )
+        extra_data = {
+            "resultData": result_data,
+            "metricName": _get_metric_name(result_state.mql) if result_state.mql else "",
+            "metricNames": _get_metric_names(result_state.mql) if result_state.mql else [],
+            "analysis": result_state.analysis,
+            "multiMetricData": getattr(result_state, "multi_metric_data", []),
+            "dimensionalData": getattr(result_state, "dimensional_data", {}),
+            "category": getattr(result_state, "category", ""),
+            "suggest": result_state.context_cache.suggestions if result_state.context_cache else [],
+            "columns": result_state.sql_result.columns if result_state.sql_result else [],
+            "mql": result_state.mql.to_dict() if result_state.mql else None,
+            "timeRange": result_state.mql.time.to_dict() if result_state.mql and result_state.mql.time else None,
+            "starrocksSql": result_state.sql,
+            "momChange": getattr(result_state, "mom_change", None),
+            "yoyChange": getattr(result_state, "yoy_change", None),
+            "dimensionFilters": [d.to_dict() for d in (result_state.mql.dimensions or [])] if result_state.mql else [],
+            "thinkingSteps": [step.to_dict() for step in result_state.thinking_steps],
+            "needsClarification": result_state.error == "needs_clarification" or result_state.is_generic_result,
+            "clarificationOptions": result_state.context_cache.clarification_options if result_state.context_cache else [],
+            "clarificationMessage": result_state.context_cache.clarification_message if result_state.context_cache else "",
+        }
 
-        now = datetime.now()
+        payload = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "question": question,
+            "answer": result_state.answer or "",
+            "sql": result_state.sql or "",
+            "result_data": json.dumps(result_data, ensure_ascii=False, default=str) if result_data is not None else "",
+            "comparison_results": json.dumps(comparison_results, ensure_ascii=False, default=str) if comparison_results is not None else "",
+            "thinking_steps": thinking_steps_json,
+            "extra_data": json.dumps(extra_data, ensure_ascii=False, default=str),
+            "metric_code": result_state.mql.metric.code if result_state.mql and result_state.mql.metric else "",
+        }
 
-        # 序列化 result_data
-        result_data_str = ""
-        if result_data is not None:
-            try:
-                result_data_str = json.dumps(result_data, ensure_ascii=False, default=str)
-            except Exception:
-                result_data_str = ""
-
-        # 序列化 comparison_results
-        comparison_str = ""
-        if comparison_results is not None:
-            try:
-                comparison_str = json.dumps(comparison_results, ensure_ascii=False, default=str)
-            except Exception:
-                comparison_str = ""
-
-        with conn:
-            with conn.cursor() as cur:
-                # Upsert ask_session_summaries
-                cur.execute("""
-                    INSERT INTO ask_session_summaries (session_id, title, first_question, message_count, starred, user_id, created_at, updated_at)
-                    VALUES (%s, %s, %s, 2, false, %s, %s, %s)
-                    ON CONFLICT (session_id) DO UPDATE SET
-                        updated_at = EXCLUDED.updated_at,
-                        message_count = ask_session_summaries.message_count + 2
-                """, (
-                    session_id,
-                    question[:128] if question else "",
-                    question,
-                    user_id,
-                    now,
-                    now,
-                ))
-
-                # 插入用户消息
-                cur.execute("""
-                    INSERT INTO ask_messages (session_id, role, content, sql, result_data, comparison_results, created_at)
-                    VALUES (%s, 'user', %s, '', '', '', %s)
-                """, (session_id, question, now))
-
-                # 插入助手消息
-                cur.execute("""
-                    INSERT INTO ask_messages (session_id, role, content, sql, result_data, comparison_results, created_at)
-                    VALUES (%s, 'assistant', %s, %s, %s, %s, %s)
-                """, (session_id, answer, sql or "", result_data_str, comparison_str, now))
-
-        conn.close()
-        logger.info(f"[_save_v2_session_to_db] 会话已保存: session_id={session_id}")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(f"{GO_API_BASE}/api/v1/internal/ask/v2-session", json=payload)
+            response.raise_for_status()
+        logger.info(f"[_save_v2_session_to_go] 会话已保存: session_id={session_id}")
     except Exception as e:
-        logger.warning(f"[_save_v2_session_to_db] 保存失败: {e}")
+        logger.warning(f"[_save_v2_session_to_go] 保存失败: {e}")
 
 
 @router.post("/v2", response_model=AskResponseV2)
@@ -263,13 +267,16 @@ async def ask_question_v2(req: AskRequestV2):
             created_at=datetime.now().isoformat(),
         )
 
-        # 恢复上轮 MQL（用于多轮对话上下文继承）
-        inherited_mql = v2_session_mql.get(session_id)
+        # 恢复上轮会话上下文（用于多轮对话上下文继承）
+        restored_context = _session_store.get_context(session_id, user_id=req.user_id)
+        inherited_mql = restored_context.get("mql") if restored_context else None
         if inherited_mql:
             state.inherited_mql = inherited_mql
+            state.history_stack = list(restored_context.get("history_stack") or [])
+            state.conversation_summary = restored_context.get("conversation_summary")
             logger.info(f"[V2] 恢复上轮 MQL: session_id={session_id}, intent={inherited_mql.intent.value if inherited_mql else 'N/A'}, metric={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}, dims={[(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else None}")
         else:
-            logger.info(f"[V2] 未找到上轮 MQL: session_id={session_id}, v2_session_mql keys={list(v2_session_mql.keys())}")
+            logger.info(f"[V2] 未找到上轮 MQL: session_id={session_id}")
 
         # 2. 获取 V2 Graph
         v2_graph = get_v2_graph()
@@ -293,14 +300,14 @@ async def ask_question_v2(req: AskRequestV2):
         if result_state.error == "needs_clarification":
             needs_clarification = True
             # 优先从 context_cache 读取追问消息（intent_router 设置的）
-            clarification_message = result_state.context_cache.get("clarification_message") or result_state.answer
+            clarification_message = result_state.context_cache.clarification_message or result_state.answer
         elif result_state.is_generic_result:
             # 泛指维度：流程已继续执行，但需要显示追问标签让用户切换级别
             needs_clarification = True
-            clarification_message = result_state.context_cache.get("clarification_message", "")
+            clarification_message = result_state.context_cache.clarification_message or ""
 
         # 5. 提取建议
-        suggestions = result_state.context_cache.get("suggestions", [])
+        suggestions = result_state.context_cache.suggestions or []
         if not suggestions:
             suggestions = _generate_default_suggestions(result_state)
 
@@ -329,7 +336,7 @@ async def ask_question_v2(req: AskRequestV2):
             ],
             needs_clarification=needs_clarification,
             clarification_message=clarification_message,
-            clarification_options=result_state.context_cache.get("clarification_options") if needs_clarification else None,
+            clarification_options=result_state.context_cache.clarification_options if needs_clarification else None,
             error=result_state.error if not result_state.answer else None,
             result_data=result_state.sql_result.data if result_state.sql_result else None,
             total=result_state.sql_result.total if result_state.sql_result else 0,
@@ -357,25 +364,16 @@ async def ask_question_v2(req: AskRequestV2):
 
         logger.info(f"[V2] 回答完成: {response.answer[:50]}..., 耗时 {duration_ms}ms")
 
-        # 保存当前 MQL 到 session store（用于多轮对话上下文继承）
-        _saved_session_info = f"session_id={session_id}, keys={list(v2_session_mql.keys())}"
+        # 保存当前会话状态到 session store（用于多轮对话上下文继承）
+        if result_state:
+            _session_store.set_state(result_state)
         if result_state and result_state.mql:
-            v2_session_mql[session_id] = result_state.mql
             _saved_filters = [(f.field, f.value) for f in result_state.mql.filters] if result_state.mql.filters else []
-            _saved_session_info = f"session_id={session_id}, saved_metric={result_state.mql.metric.name if result_state.mql.metric else None}, saved_dims={[(d.type, d.value) for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}, saved_filters={_saved_filters}"
-            logger.info(f"[V2] 保存 MQL 到 session: {_saved_session_info}")
+            logger.info(f"[V2] 保存 MQL 到 session: session_id={session_id}, saved_metric={result_state.mql.metric.name if result_state.mql.metric else None}, saved_dims={[(d.type, d.value) for d in result_state.mql.dimensions] if result_state.mql.dimensions else []}, saved_filters={_saved_filters}")
 
-        # 保存会话到 PostgreSQL（ask_session_summaries + ask_messages）
+        # 通过 Go 后端统一保存会话摘要和消息
         if result_state and result_state.answer:
-            _save_v2_session_to_db(
-                session_id=session_id,
-                user_id=req.user_id,
-                question=req.question,
-                answer=result_state.answer or "",
-                sql=result_state.sql or "",
-                result_data=result_state.sql_result.data if result_state.sql_result else None,
-                comparison_results=result_state.context_cache.get("comparison_results") if result_state.context_cache else None,
-            )
+            await _save_v2_session_to_go(session_id=session_id, user_id=req.user_id, question=req.question, result_state=result_state)
 
         # 发送日志到 Go 后端
         try:
@@ -479,11 +477,12 @@ async def ask_question_v2_stream(req: AskRequestV2):
         tracker = get_performance_tracker()
 
         try:
-            # 发送连接事件
+            # 发送连接事件（将 __DRILLDOWN__:xxx__ 映射为中文）
+            display_question = _map_drilldown_question(req.question)
             yield StreamEvent(SSSEvent.CONNECTED, {
                 "request_id": request_id,
                 "session_id": session_id,
-                "question": req.question,
+                "question": display_question,
             }).to_sse()
 
             # 初始化状态
@@ -494,10 +493,13 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 created_at=datetime.now().isoformat(),
             )
 
-            # 恢复上轮 MQL（用于多轮对话上下文继承）
-            inherited_mql = v2_session_mql.get(session_id)
+            # 恢复上轮会话上下文（用于多轮对话上下文继承）
+            restored_context = _session_store.get_context(session_id, user_id=req.user_id)
+            inherited_mql = restored_context.get("mql") if restored_context else None
             if inherited_mql:
                 state.inherited_mql = inherited_mql
+                state.history_stack = list(restored_context.get("history_stack") or [])
+                state.conversation_summary = restored_context.get("conversation_summary")
                 logger.info(f"[V2 Stream] 恢复上轮 MQL: session_id={session_id}, intent={inherited_mql.intent.value if inherited_mql else 'N/A'}")
 
             # 获取 Graph
@@ -602,9 +604,10 @@ async def ask_question_v2_stream(req: AskRequestV2):
             }).to_sse()
 
         finally:
-            # 保存当前 MQL 到 session store（用于下一轮多轮对话）
+            # 保存当前会话状态到 session store（用于下一轮多轮对话）
+            if state:
+                _session_store.set_state(state)
             if state and state.mql:
-                v2_session_mql[session_id] = state.mql
                 logger.info(f"[V2 Stream] 保存 MQL 到 session: session_id={session_id}, intent={state.mql.intent.value if state.mql else 'N/A'}, dimensions={[d.type for d in state.mql.dimensions] if state.mql.dimensions else []}")
 
             # 发送日志到 Go 后端
@@ -651,21 +654,14 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 except Exception as log_err:
                     logger.warning(f"[V2 Stream] 发送日志失败: {log_err}")
 
-            # 保存会话到 PostgreSQL
+            # 通过 Go 后端统一保存会话摘要和消息
             if state and answer:
                 try:
-                    sql_result = getattr(state, 'sql_result', None)
-                    result_data = sql_result.data if sql_result and hasattr(sql_result, 'data') else None
-                    context_cache = getattr(state, 'context_cache', None)
-                    comparison_results = context_cache.get("comparison_results") if context_cache else None
-                    _save_v2_session_to_db(
+                    await _save_v2_session_to_go(
                         session_id=session_id,
                         user_id=req.user_id,
                         question=req.question,
-                        answer=answer,
-                        sql=sql,
-                        result_data=result_data,
-                        comparison_results=comparison_results,
+                        result_state=state,
                     )
                 except Exception as db_err:
                     logger.warning(f"[V2 Stream] 保存会话到数据库失败: {db_err}")
@@ -711,7 +707,7 @@ async def _stream_graph(graph, state: V2State):
                 answer = getattr(state_update, 'answer', '') or ''
                 suggestions = []
                 if hasattr(state_update, 'context_cache') and state_update.context_cache:
-                    suggestions = state_update.context_cache.get("suggestions", [])
+                    suggestions = state_update.context_cache.suggestions or []
 
                 # 获取触发分析结果
                 analysis = getattr(state_update, 'analysis', None)
@@ -979,7 +975,7 @@ async def get_v2_history(session_id: str):
         # 2. 查消息列表
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT role, content, sql, result_data, comparison_results, created_at "
+                "SELECT role, content, sql, result_data, comparison_results, thinking_steps, extra_data, created_at "
                 "FROM ask_messages WHERE session_id = %s ORDER BY created_at ASC",
                 (session_id,)
             )
@@ -998,13 +994,27 @@ async def get_v2_history(session_id: str):
                         comparison_results = json.loads(r[4])
                     except:
                         pass
+                thinking_steps = None
+                if r[5]:
+                    try:
+                        thinking_steps = json.loads(r[5])
+                    except:
+                        pass
+                extra_data = None
+                if r[6]:
+                    try:
+                        extra_data = json.loads(r[6])
+                    except:
+                        pass
                 messages.append({
                     "role": r[0],
                     "content": r[1],
                     "sql": r[2],
                     "result_data": result_data,
                     "comparison_results": comparison_results,
-                    "created_at": r[5].isoformat() if r[5] else None,
+                    "thinking_steps": thinking_steps,
+                    "extra_data": extra_data,
+                    "created_at": r[7].isoformat() if r[7] else None,
                 })
 
         conn.close()

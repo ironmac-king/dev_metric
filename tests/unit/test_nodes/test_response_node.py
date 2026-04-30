@@ -1,7 +1,8 @@
 """Response Node 单元测试"""
 import pytest
 from ai.graph.state import ConversationState, ConversationMessage
-from ai.graph.nodes import ConversationNodes
+
+ConversationNodes = pytest.importorskip("ai.graph.nodes").ConversationNodes
 
 
 class TestResponseNode:

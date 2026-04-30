@@ -4,16 +4,23 @@ pytest 配置和 fixtures
 import pytest
 import asyncio
 import sys
+import importlib
 from pathlib import Path
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ai.engine.legacy_engine import LegacyEngine
-from ai.engine.langgraph_engine import LangGraphEngine
-
 # 导入 mock fixtures 模块以注册到 pytest
 from tests.mocks import mock_go_api, mock_starrocks, mock_llm  # noqa: F401
+
+
+def _load_optional_engine(module_name: str, class_name: str):
+    """Load optional engine modules lazily so unrelated tests can still run."""
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        pytest.skip(f"optional engine module unavailable: {module_name} ({exc})")
+    return getattr(module, class_name)
 
 
 @pytest.fixture(autouse=True)
@@ -41,13 +48,15 @@ def event_loop():
 @pytest.fixture
 def legacy_engine():
     """Legacy 引擎 fixture"""
-    return LegacyEngine()
+    engine_cls = _load_optional_engine("ai.engine.legacy_engine", "LegacyEngine")
+    return engine_cls()
 
 
 @pytest.fixture
 def langgraph_engine():
     """LangGraph 引擎 fixture"""
-    return LangGraphEngine()
+    engine_cls = _load_optional_engine("ai.engine.langgraph_engine", "LangGraphEngine")
+    return engine_cls()
 
 
 @pytest.fixture

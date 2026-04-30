@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import threading
 
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_redis_settings
 
 logger = get_logger("ai.llm_v2.cache")
 
@@ -115,29 +116,30 @@ class L2RedisCache:
     - 1 小时过期
     """
 
-    REDIS_HOST = "localhost"
-    REDIS_PORT = 6379
-    REDIS_DB = 0
     KEY_PREFIX = "v2:cache:"
     TTL_SECONDS = 3600  # 1 小时
 
     def __init__(self):
         self._redis = None
+        self._redis_host = ""
+        self._redis_port = 0
+        self._redis_db = 0
         self._init_redis()
 
     def _init_redis(self):
         """初始化 Redis 连接"""
         try:
             import redis
+            self._redis_host, self._redis_port, self._redis_db = get_redis_settings()
             self._redis = redis.Redis(
-                host=self.REDIS_HOST,
-                port=self.REDIS_PORT,
-                db=self.REDIS_DB,
+                host=self._redis_host,
+                port=self._redis_port,
+                db=self._redis_db,
                 decode_responses=True,
                 socket_connect_timeout=2
             )
             self._redis.ping()
-            logger.info(f"[L2Cache] Redis 连接成功: {self.REDIS_HOST}:{self.REDIS_PORT}")
+            logger.info(f"[L2Cache] Redis 连接成功: {self._redis_host}:{self._redis_port}/{self._redis_db}")
         except Exception as e:
             logger.warning(f"[L2Cache] Redis 连接失败: {e}，L2 缓存将不可用")
             self._redis = None

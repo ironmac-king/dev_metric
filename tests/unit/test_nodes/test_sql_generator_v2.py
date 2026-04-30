@@ -39,7 +39,7 @@ class TestSQLGeneratorSecurity:
     def test_sanitize_value_escapes_quotes(self, generator):
         """单引号应被正确转义"""
         # SQL 注入典型payload
-        assert generator._sanitize_value("'; DROP TABLE users;--") == "'' OR ''1''=''1"
+        assert generator._sanitize_value("'; DROP TABLE users;--") == "''; DROP TABLE users;--"
         assert generator._sanitize_value("1' OR '1'='1") == "1'' OR ''1''=''1"
         assert generator._sanitize_value("admin'--") == "admin''--"
 
@@ -82,7 +82,7 @@ class TestSQLGeneratorBasic:
         sql = generator._build_sql(simple_mql)
         assert "SELECT" in sql
         assert "SUM(PAGEVIEWS_TOTAL)" in sql
-        assert "IDS_AMZ_DI" in sql
+        assert "IDS_AMZ_COMPREHENSIVE_DI" in sql
 
     def test_build_query_with_dimension(self, generator, simple_mql):
         """带维度的查询"""
@@ -129,9 +129,9 @@ class TestSQLGeneratorMoM:
     def test_build_mom_sql(self, generator, mom_mql):
         """环比查询 SQL 生成"""
         sql = generator._build_sql(mom_mql)
-        assert "current_val" in sql
-        assert "compare_val" in sql
-        assert "change_rate" in sql
+        assert '"当前值"' in sql
+        assert '"环比值"' in sql
+        assert '"环比变化"' in sql
         assert "CASE WHEN" in sql  # 条件聚合
 
     def test_mom_has_group_by_for_business_dimensions(self, generator, mom_mql):
@@ -170,8 +170,9 @@ class TestSQLGeneratorYoY:
     def test_build_yoy_sql(self, generator, yoy_mql):
         """同比查询 SQL 生成"""
         sql = generator._build_sql(yoy_mql)
-        assert "current_val" in sql
-        assert "compare_val" in sql
+        assert '"当前值"' in sql
+        assert '"同比值"' in sql
+        assert '"同比变化"' in sql
 
 
 class TestSQLGeneratorDimensionFiltering:

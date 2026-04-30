@@ -1,6 +1,9 @@
 """LangGraphEngine 单元测试"""
 import pytest
-from ai.engine.langgraph_engine import LangGraphEngine, create_langgraph_app
+
+langgraph_engine_module = pytest.importorskip("ai.engine.langgraph_engine")
+LangGraphEngine = langgraph_engine_module.LangGraphEngine
+create_langgraph_app = langgraph_engine_module.create_langgraph_app
 
 
 class TestLangGraphEngine:

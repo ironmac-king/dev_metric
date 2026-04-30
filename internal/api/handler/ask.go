@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // GetUserIDFromContext 从 gin.Context 获取当前用户ID
@@ -76,7 +77,7 @@ func AskQuestion(c *gin.Context) {
 	}
 
 	// 调用 Python AI 服务
-	aiURL := fmt.Sprintf("http://localhost:8081/api/v1/ask")
+	aiURL := fmt.Sprintf("%s/api/v1/ask", aiBaseURL())
 
 	payload := map[string]interface{}{
 		"question":    req.Question,
@@ -498,7 +499,7 @@ func GetAskHistory(c *gin.Context) {
 	userID := GetUserIDFromContext(c)
 
 	// 调用 Python AI 服务（传递 user_id 用于隔离）
-	resp, err := http.Get(fmt.Sprintf("http://localhost:8081/api/v1/ask/history?session_id=%s&user_id=%d", sessionID, userID))
+	resp, err := http.Get(fmt.Sprintf("%s/api/v1/ask/history?session_id=%s&user_id=%d", aiBaseURL(), sessionID, userID))
 	if err != nil {
 		response.Success(c, gin.H{
 			"session_id": sessionID,
@@ -515,6 +516,45 @@ func GetAskHistory(c *gin.Context) {
 	response.Success(c, aiResp)
 }
 
+// LLMAskV2History 获取 V2 会话历史
+func LLMAskV2History(c *gin.Context) {
+	sessionID := c.Param("session_id")
+	if sessionID == "" {
+		response.Error(c, response.CodeBadRequest, "session_id 不能为空")
+		return
+	}
+
+	// 透传到 Python AI 服务
+	pythonURL := fmt.Sprintf("%s/api/v1/llm-ask/history/%s", aiBaseURL(), sessionID)
+	resp, err := http.Get(pythonURL)
+	if err != nil {
+		response.Success(c, gin.H{
+			"session_id": sessionID,
+			"messages":   []interface{}{},
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		response.Success(c, gin.H{
+			"session_id": sessionID,
+			"messages":   []interface{}{},
+		})
+		return
+	}
+
+	// 前端期望 {code: 0, data: {messages: [...]}}
+	// Python 返回 {sessions, session_id, messages}，提取 messages 字段
+	messages, _ := result["messages"].([]interface{})
+	sessionInfo := gin.H{
+		"session_id": sessionID,
+		"messages":   messages,
+	}
+	response.Success(c, sessionInfo)
+}
+
 // ClearSession 清除会话
 func ClearSession(c *gin.Context) {
 	var req struct {
@@ -527,7 +567,7 @@ func ClearSession(c *gin.Context) {
 	}
 
 	// 调用 Python AI 服务
-	pythonURL := fmt.Sprintf("http://localhost:8081/api/v1/ask/clear?session_id=%s", req.SessionID)
+	pythonURL := fmt.Sprintf("%s/api/v1/ask/clear?session_id=%s", aiBaseURL(), req.SessionID)
 	resp, err := http.Post(pythonURL, "application/json", nil)
 	if err != nil {
 		response.Error(c, response.CodeInternalError, "AI 服务调用失败")
@@ -550,7 +590,7 @@ func ClearSessionInternal(c *gin.Context) {
 	}
 
 	// 调用 Python AI 服务
-	pythonURL := fmt.Sprintf("http://localhost:8081/api/v1/ask/clear?session_id=%s", sessionID)
+	pythonURL := fmt.Sprintf("%s/api/v1/ask/clear?session_id=%s", aiBaseURL(), sessionID)
 	resp, err := http.Post(pythonURL, "application/json", nil)
 	if err != nil {
 		response.Error(c, response.CodeInternalError, "AI 服务调用失败")
@@ -581,7 +621,7 @@ func SubmitFeedback(c *gin.Context) {
 	}
 
 	// 调用 Python AI 服务
-	aiURL := "http://localhost:8081/api/v1/ask/feedback"
+	aiURL := fmt.Sprintf("%s/api/v1/ask/feedback", aiBaseURL())
 	payload := map[string]interface{}{
 		"session_id":            req.SessionID,
 		"turn_index":            req.TurnIndex,
@@ -612,7 +652,7 @@ func SubmitFeedback(c *gin.Context) {
 
 // GetAskSuggest 获取问题建议
 func GetAskSuggest(c *gin.Context) {
-	resp, err := http.Get("http://localhost:8081/api/v1/ask/suggest")
+	resp, err := http.Get(fmt.Sprintf("%s/api/v1/ask/suggest", aiBaseURL()))
 	if err != nil {
 		response.Success(c, []string{
 			"昨天的访客数是多少",
@@ -710,7 +750,7 @@ func DrillDownQuestion(c *gin.Context) {
 	}
 
 	// 调用 Python AI 服务的下钻接口
-	aiURL := "http://localhost:8081/api/v1/ask/drill_down"
+	aiURL := fmt.Sprintf("%s/api/v1/ask/drill_down", aiBaseURL())
 	payload := map[string]interface{}{
 		"session_id":       req.SessionID,
 		"dimension_names":   req.DimensionNames,
@@ -753,6 +793,7 @@ func SaveMessage(c *gin.Context) {
 		Breadcrumbs     string `json:"breadcrumbs"`
 		MetricCode      string `json:"metric_code"`
 		ThinkingSteps   string `json:"thinking_steps"` // 思考过程
+		ExtraData       string `json:"extra_data"`      // V2完整消息额外数据
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -775,6 +816,7 @@ func SaveMessage(c *gin.Context) {
 		Breadcrumbs:     req.Breadcrumbs,
 		MetricCode:      req.MetricCode,
 		ThinkingSteps:   req.ThinkingSteps,
+		ExtraData:       req.ExtraData,
 	}
 
 	// 同步写 Redis（7天过期）
@@ -791,6 +833,92 @@ ctx := context.Background()
 	go func() {
 		postgres.Get().Create(&msg)
 	}()
+
+	response.Success(c, gin.H{"saved": true})
+}
+
+// SaveV2SessionInternal 批量保存 LLM.V2 会话摘要和两条消息
+func SaveV2SessionInternal(c *gin.Context) {
+	var req struct {
+		SessionID         string `json:"session_id" binding:"required"`
+		UserID            string `json:"user_id"`
+		Question          string `json:"question" binding:"required"`
+		Answer            string `json:"answer" binding:"required"`
+		SQL               string `json:"sql"`
+		ResultData        string `json:"result_data"`
+		ComparisonResults string `json:"comparison_results"`
+		ThinkingSteps     string `json:"thinking_steps"`
+		ExtraData         string `json:"extra_data"`
+		MetricCode        string `json:"metric_code"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, response.CodeBadRequest, "参数错误")
+		return
+	}
+
+	userID := strings.TrimSpace(req.UserID)
+	if userID == "" {
+		userID = "default"
+	}
+
+	now := time.Now()
+	db := postgres.Get()
+
+	summary := model.AskSessionSummary{
+		SessionID:     req.SessionID,
+		Title:         req.Question,
+		FirstQuestion: req.Question,
+		MessageCount:  2,
+		UserID:        userID,
+		UpdatedAt:     now,
+	}
+
+	userMsg := model.AskMessage{
+		SessionID: req.SessionID,
+		Role:      "user",
+		Content:   req.Question,
+		SQL:       "",
+	}
+
+	assistantMsg := model.AskMessage{
+		SessionID:          req.SessionID,
+		Role:               "assistant",
+		Content:            req.Answer,
+		SQL:                req.SQL,
+		ResultData:         req.ResultData,
+		ComparisonResults:  req.ComparisonResults,
+		ThinkingSteps:      req.ThinkingSteps,
+		ExtraData:          req.ExtraData,
+		MetricCode:         req.MetricCode,
+	}
+
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("session_id = ? AND user_id = ?", req.SessionID, userID).
+			Assign(summary).
+			FirstOrCreate(&model.AskSessionSummary{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&userMsg).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&assistantMsg).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		response.Error(c, response.CodeInternalError, "保存失败")
+		return
+	}
+
+	ctx := context.Background()
+	cacheKey := fmt.Sprintf("ask:messages:%s", req.SessionID)
+	var existing []model.AskMessage
+	if err := cache.GetJSON(ctx, cacheKey, &existing); err != nil {
+		existing = []model.AskMessage{}
+	}
+	existing = append(existing, userMsg, assistantMsg)
+	cache.SetJSON(ctx, cacheKey, existing, 7*24*time.Hour)
 
 	response.Success(c, gin.H{"saved": true})
 }
@@ -825,6 +953,7 @@ func GetMessages(c *gin.Context) {
 				"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 				"metric_code":         msg.MetricCode,
 				"thinking_steps":      decodeJSON(msg.ThinkingSteps),
+				"extra_data":          decodeJSON(msg.ExtraData),
 			}
 		}
 		response.Success(c, gin.H{"messages": result, "source": "redis"})
@@ -857,6 +986,7 @@ func GetMessages(c *gin.Context) {
 			"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 			"metric_code":         msg.MetricCode,
 			"thinking_steps":      decodeJSON(msg.ThinkingSteps),
+			"extra_data":          decodeJSON(msg.ExtraData),
 		}
 	}
 	response.Success(c, gin.H{"messages": result, "source": "db"})
@@ -967,7 +1097,7 @@ func LLMAskV2Stream(c *gin.Context) {
 		return
 	}
 
-	aiURL := "http://localhost:8081/api/v1/llm-ask/v2/stream"
+	aiURL := fmt.Sprintf("%s/api/v1/llm-ask/v2/stream", aiBaseURL())
 
 	payload := map[string]interface{}{
 		"question":   req.Question,
