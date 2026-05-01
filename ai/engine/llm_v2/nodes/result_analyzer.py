@@ -33,6 +33,106 @@ class ResultAnalyzer:
             self._semantic_service = get_semantic_snapshot_service()
         return self._semantic_service
 
+    def _generate_supplementary_info(
+        self,
+        mql: MQLSchema,
+        sql_result: SQLResult,
+    ) -> List[Dict[str, Any]]:
+        """
+        从语义快照的 capabilities 生成补充信息，用于类型 B 查询。
+
+        Returns:
+            [
+                {"label": "同比", "value": "+12.3%", "trend": "+"},
+                {"label": "环比", "value": "-5.2%", "trend": "-"},
+                {"label": "昨日同期", "value": "100.00万", "trend": "+"},
+                {"label": "本月累计", "value": "3,456.00万", "trend": None},
+            ]
+        """
+        if not mql.metric or not sql_result.data:
+            return []
+
+        metric_code = mql.metric.code or ""
+        if not metric_code:
+            return []
+
+        semantic_svc = self._get_semantic_service()
+        snapshot = semantic_svc.get_active_snapshot() if semantic_svc else None
+        if not snapshot:
+            return []
+
+        capabilities = snapshot.get("capabilities", {}) or {}
+        metric_cap = capabilities.get(f"metric:{metric_code}", {}) or {}
+
+        info: List[Dict[str, Any]] = []
+
+        # 获取当前指标值（从 sql_result）
+        row = sql_result.data[0] if sql_result.data else {}
+        current_val = None
+        for v in row.values():
+            if isinstance(v, (int, float)):
+                current_val = float(v)
+                break
+
+        # YoY 同比
+        if metric_cap.get("supports_yoy"):
+            yoy_val = row.get("yoy_val") or row.get("同比值")
+            yoy_change = row.get("yoy_change") or row.get("同比变化")
+            if yoy_val is not None or yoy_change is not None:
+                try:
+                    if yoy_change is not None:
+                        change_val = float(str(yoy_change).replace("%", "").replace(",", ""))
+                        trend = "+" if change_val > 0 else "-" if change_val < 0 else None
+                        info.append({
+                            "label": "同比",
+                            "value": f"{'+' if change_val > 0 else ''}{yoy_change}",
+                            "trend": trend,
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+        # MoM 环比
+        if metric_cap.get("supports_mom"):
+            mom_val = row.get("mom_val") or row.get("环比值")
+            mom_change = row.get("mom_change") or row.get("环比变化")
+            if mom_val is not None or mom_change is not None:
+                try:
+                    if mom_change is not None:
+                        change_val = float(str(mom_change).replace("%", "").replace(",", ""))
+                        trend = "+" if change_val > 0 else "-" if change_val < 0 else None
+                        info.append({
+                            "label": "环比",
+                            "value": f"{'+' if change_val > 0 else ''}{mom_change}",
+                            "trend": trend,
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+        # 昨日同期（如果时间粒度是天）
+        if mql.time and sql_result.data:
+            time_original = mql.time.original or ""
+            # 只有天粒度才显示"昨日"
+            if any(k in time_original for k in ["今日", "昨天", "日"]):
+                yesterday_val = row.get("yesterday_val") or row.get("昨日值")
+                if yesterday_val is not None:
+                    info.append({
+                        "label": "昨日同期",
+                        "value": self._format_value(yesterday_val),
+                        "trend": None,
+                    })
+
+        # 本月累计（根据指标配置判断是否显示）
+        if metric_cap.get("supports_trend") and current_val is not None:
+            month_total = row.get("month_total") or row.get("本月累计")
+            if month_total is not None:
+                info.append({
+                    "label": "本月累计",
+                    "value": self._format_value(month_total),
+                    "trend": None,
+                })
+
+        return info
+
     def _get_time_context(self, mql: MQLSchema) -> str:
         """从 MQL 获取时间上下文，用于建议问题拼接"""
         if mql.time and mql.time.original:
@@ -264,24 +364,30 @@ class ResultAnalyzer:
                 metric_names = [mql.metric.name] if mql.metric else []
                 metric_names.extend([m.name for m in mql.metrics if m.name])
                 _, alt_label = self._get_alternative_dimensions(None)
+                # 生成补充信息
+                supplementary_info = self._generate_supplementary_info(mql, sql_result)
                 return {
                     "answer": answer,
                     "suggestions": [
                         f"查看{time_context}各{alt_label}{metric_names[0]}趋势变化" if metric_names else f"查看{time_context}各{alt_label}趋势变化",
                         f"按{alt_label}维度对比上月" if metric_names else f"按{alt_label}维度对比上月",
                     ],
+                    "supplementary_info": supplementary_info,
                 }
             else:
                 # 单指标查询
                 value = list(row.values())[0] if row else 0
                 formatted_value = self._format_value(value)
                 _, alt_label = self._get_alternative_dimensions(None)
+                # 生成补充信息
+                supplementary_info = self._generate_supplementary_info(mql, sql_result)
                 return {
                     "answer": f"{metric_name}为 {formatted_value}",
                     "suggestions": [
                         f"查看{time_context}各{alt_label}{metric_name}趋势变化",
                         f"按{alt_label}维度对比上月",
                     ],
+                    "supplementary_info": supplementary_info,
                 }
 
         # 多行数据
