@@ -123,6 +123,22 @@
             </div>
           </div>
 
+          <!-- 文档样式渲染（enableDocumentStyle=true 时） -->
+          <DocumentMessage
+            v-if="enableDocumentStyle && msg.result_data && msg.result_data.length > 0 && msg.role === 'assistant'"
+            :msg="msg"
+            :user-feedback="msg.feedback"
+            @select-suggestion="(item) => $emit('select-suggestion', item)"
+            @export="handleExport"
+            @share="handleShare"
+            @copy="handleCopy"
+            @toggle-thinking="toggleThinking(msg)"
+            @feedback="(value) => $emit('feedback', index, value)"
+            @drilldown="(dimValue) => $emit('drill-down', { ...msg, dimValue })"
+            @retry="handleRetry"
+            @view-alternative="handleViewAlternative"
+          />
+
           <!-- 消息内容（当有result_data时不显示，因为表格里已有结果） -->
           <div class="message-content" v-if="editingMessageIndex !== index && (!msg.needs_clarification || !msg.matched_metrics || msg.matched_metrics.length === 0) && (!msg.result_data || msg.result_data.length === 0) && msg.content && msg.content.trim()" v-html="formatMessage(msg.content)"></div>
 
@@ -415,6 +431,7 @@
 <script setup lang="ts">
 import { ref, nextTick, watch, computed } from 'vue'
 import { formatSQL } from '@/utils/sqlFormatter'
+import DocumentMessage from './DocumentMessage.vue'
 
 const props = defineProps<{
   messages: Array<{
@@ -498,6 +515,9 @@ const emit = defineEmits<{
 
 const messagesContainer = ref<HTMLElement | null>(null)
 const localEditingContent = ref('')
+
+// 文档样式开关（初期 false，之后可改为 true 开启）
+const enableDocumentStyle = ref(false)
 
 // ========== 表格排序状态 ==========
 // 格式: { [messageIndex]: { column: string, order: 'asc' | 'desc' } }
@@ -687,6 +707,32 @@ function getPendingSlotsDisplay(pendingSlots: string[], currentSlotName: string)
     .filter(slot => slot !== currentSlotName)
     .map(slot => slotDisplayNames[slot] || slot)
     .join('、')
+}
+
+// DocumentMessage 事件处理函数
+function handleExport() {
+  // TODO: 实现导出功能
+  console.log('export')
+}
+
+function handleShare() {
+  // TODO: 实现分享功能
+  console.log('share')
+}
+
+function handleCopy() {
+  // TODO: 实现复制功能
+  console.log('copy')
+}
+
+function handleRetry() {
+  // TODO: 实现重试功能
+  console.log('retry')
+}
+
+function handleViewAlternative() {
+  // TODO: 实现查看替代数据功能
+  console.log('view-alternative')
 }
 
 function scrollToBottom() {
