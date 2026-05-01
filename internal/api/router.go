@@ -334,6 +334,45 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			dimensionValues.DELETE("/batch", handler.BatchDeleteDimensionValues)
 		}
 
+		// 语义快照 API（供 Python AI 服务调用）
+		semantic := v1.Group("/semantic")
+		{
+			semantic.GET("/metrics", handler.ListSemanticMetrics)
+			semantic.POST("/metrics", handler.CreateSemanticMetric)
+			semantic.PUT("/metrics/:id", handler.UpdateSemanticMetric)
+			semantic.DELETE("/metrics/:id", handler.DeleteSemanticMetric)
+
+			semantic.GET("/dimensions", handler.ListSemanticDimensions)
+			semantic.POST("/dimensions", handler.CreateSemanticDimension)
+			semantic.PUT("/dimensions/:id", handler.UpdateSemanticDimension)
+			semantic.DELETE("/dimensions/:id", handler.DeleteSemanticDimension)
+
+			semantic.GET("/capabilities", handler.ListSemanticCapabilities)
+			semantic.POST("/capabilities", handler.CreateSemanticCapability)
+			semantic.PUT("/capabilities/:id", handler.UpdateSemanticCapability)
+			semantic.DELETE("/capabilities/:id", handler.DeleteSemanticCapability)
+
+			semantic.GET("/policies", handler.ListSemanticPolicies)
+			semantic.POST("/policies", handler.CreateSemanticPolicy)
+			semantic.PUT("/policies/:id", handler.UpdateSemanticPolicy)
+			semantic.DELETE("/policies/:id", handler.DeleteSemanticPolicy)
+
+			semantic.GET("/actions", handler.ListSemanticActions)
+			semantic.POST("/actions", handler.CreateSemanticAction)
+			semantic.PUT("/actions/:id", handler.UpdateSemanticAction)
+			semantic.DELETE("/actions/:id", handler.DeleteSemanticAction)
+
+			semantic.GET("/snapshots", handler.ListSemanticSnapshots)
+			semantic.GET("/snapshots/active", handler.GetActiveSemanticSnapshot)
+			semantic.POST("/snapshots/compile", handler.CompileSemanticSnapshot)
+			semantic.POST("/snapshots/:id/publish", handler.PublishSemanticSnapshot)
+			semantic.POST("/snapshots/:id/rollback", handler.RollbackSemanticSnapshot)
+			semantic.GET("/snapshots/diff", handler.GetSemanticSnapshotDiff)
+			semantic.GET("/snapshot-audits", handler.ListSemanticSnapshotAudits)
+
+			semantic.POST("/bootstrap", handler.BootstrapSemanticData)
+		}
+
 		// 认证
 		auth := v1.Group("/auth")
 		{
