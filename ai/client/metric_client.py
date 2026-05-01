@@ -4,6 +4,7 @@
 import httpx
 from typing import List, Dict, Any, Optional
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 
 logger = get_logger("ai.metric_client")
 
@@ -60,8 +61,8 @@ class MetricClient:
     _dimensions_cache: Optional[List[Dict[str, Any]]] = None
     _terms_cache: Optional[List[Dict[str, Any]]] = None
 
-    def __init__(self, base_url: str = "http://localhost:8080"):
-        self.base_url = base_url
+    def __init__(self, base_url: str = None):
+        self.base_url = base_url or get_go_api_base()
 
     def get_all_metrics(self) -> List[Dict[str, Any]]:
         """获取所有指标（带类级缓存）"""

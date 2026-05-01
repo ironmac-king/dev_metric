@@ -25,6 +25,7 @@ from ai.feedback.collector import get_feedback_collector, FeedbackType
 from ai.feedback.analyzer import get_feedback_analyzer
 from ai.feedback.rule_optimizer import get_rule_optimizer
 from ai.config.logging_config import setup_logging, get_logger
+from ai.config.runtime import get_go_api_base
 # from ai.engine import get_engine  # 旧引擎工厂，已被 LLM.V1 替代
 # from ai.engine.rule_engine import RuleEngine  # 旧版规则引擎，已被 LLM.V1 替代
 # from ai.graph._result_formatter import ResultFormatter
@@ -35,7 +36,7 @@ setup_logging()
 logger = get_logger("ai")
 
 # Go 后端地址
-GO_API_BASE = "http://localhost:8080"
+GO_API_BASE = get_go_api_base()
 
 def save_message_to_go(session_id: str, role: str, content: str, sql: str = None,
                       result_data: Any = None, comparison_results: Any = None,

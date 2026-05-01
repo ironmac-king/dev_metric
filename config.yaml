@@ -33,7 +33,7 @@ llm:
 # Go 服务配置
 app:
   host: 0.0.0.0
-  port: 8080
+  port: 18080
   jwt_secret: "your-super-secret-key-change-in-production"
   jwt_expire: 3600        # Access Token 过期时间（秒）
   refresh_expire: 604800   # Refresh Token 过期时间（秒）

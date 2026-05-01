@@ -187,6 +187,9 @@ class MQLSemanticValidator:
                                 # 强制用数据库值覆盖 LLM 幻觉的字段
                                 if metric_info_by_name.get("starrocks_field"):
                                     metric.field = metric_info_by_name.get("starrocks_field", "")
+                                # 透出业务口径（供触发分析器 LLM 生成用）
+                                if metric_info_by_name.get("business_summary"):
+                                    metric.business_summary = metric_info_by_name.get("business_summary", "")
                                 logger.info(f"[_validate_metric] 通过 name 找到指标: name={metric.name}, code={metric.code}, sql={metric.starrocks_sql[:50] if metric.starrocks_sql else 'None'}...")
                         # 继续验证 starrocks_sql
                         if metric.starrocks_sql:
@@ -204,6 +207,9 @@ class MQLSemanticValidator:
                 # 强制用数据库值覆盖 LLM 幻觉的字段
                 if metric_info.get("starrocks_field"):
                     metric.field = metric_info.get("starrocks_field", "")
+                # 透出业务口径（供触发分析器 LLM 生成用）
+                if metric_info.get("business_summary"):
+                    metric.business_summary = metric_info.get("business_summary", "")
                 logger.info(f"[_validate_metric] 填充 starrocks_sql: code={metric.code}, sql={metric.starrocks_sql[:80]}...")
             else:
                 logger.warning(f"[_validate_metric] 未找到指标，尝试通过名称查找: code={metric.code}")
@@ -219,6 +225,9 @@ class MQLSemanticValidator:
                         # 强制用数据库值覆盖 LLM 幻觉的字段（LLM 字段名经常是错的）
                         if metric_info.get("starrocks_field"):
                             metric.field = metric_info.get("starrocks_field", "")
+                        # 透出业务口径（供触发分析器 LLM 生成用）
+                        if metric_info.get("business_summary"):
+                            metric.business_summary = metric_info.get("business_summary", "")
                         logger.info(f"[_validate_metric] 通过 name 找到指标: name={metric.name}, code={metric.code}, sql={metric.starrocks_sql[:50] if metric.starrocks_sql else 'None'}...")
 
         # 如果没有 code 但有 name，尝试通过 name 查找
@@ -237,6 +246,9 @@ class MQLSemanticValidator:
                 # 强制用数据库值覆盖 LLM 幻觉的字段
                 if metric_info.get("starrocks_field"):
                     metric.field = metric_info.get("starrocks_field", "")
+                # 透出业务口径（供触发分析器 LLM 生成用）
+                if metric_info.get("business_summary"):
+                    metric.business_summary = metric_info.get("business_summary", "")
                 logger.info(f"[_validate_metric] 通过 name 填充: name={metric.name}, code={metric.code}, field={metric.field}")
             else:
                 # 找不到指标，清空错误的 name，防止下游误用

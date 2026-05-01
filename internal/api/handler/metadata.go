@@ -62,6 +62,13 @@ func GetMetricMetadata(c *gin.Context) {
 		Where("metric_dimensions.metric_id = ?", id).
 		Find(&dimensions)
 
+	// 获取 business_summary（从 semantic_metrics 表）
+	var businessSummary string
+	postgres.Get().Table("semantic_metrics").
+		Where("metric_code = ?", metric.MetricCode).
+		Select("business_summary").
+		Scan(&businessSummary)
+
 	// 返回扁平结构，与 GetAllMetrics 保持一致
 	response.Success(c, gin.H{
 		"id":                  metric.ID,
@@ -75,6 +82,7 @@ func GetMetricMetadata(c *gin.Context) {
 		"metric_type":         metric.MetricType,
 		"business_definition":   metric.BusinessDefinition,
 		"business_rule":        metric.BusinessRule,
+		"business_summary":     businessSummary,
 		"unit":                metric.Unit,
 		"common_dimensions":    metric.CommonDimensions,
 		"frequency":           metric.Frequency,

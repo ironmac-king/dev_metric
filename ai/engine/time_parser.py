@@ -670,9 +670,14 @@ class TimeParser:
         elif time_key == "this_month":
             yesterday = datetime.now() - timedelta(days=1)
             _, last_day = monthrange(year, month)
+            month_start = datetime(year, month, 1)
             month_end = datetime(year, month, last_day)
             # T+1 数据逻辑：结束日期不能超过昨天
-            end_date = min(month_end, yesterday)
+            # 但如果昨天在上月（月初第一天），则 end_date 不能小于 month_start
+            if yesterday < month_start:
+                end_date = yesterday
+            else:
+                end_date = min(month_end, yesterday)
             return (f"{year}-{month:02d}-01", end_date.strftime("%Y-%m-%d"))
         elif time_key == "last_week":
             today = datetime.now()

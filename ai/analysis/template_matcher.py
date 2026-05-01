@@ -7,6 +7,7 @@ import json
 import os
 import numpy as np
 from dataclasses import dataclass
+from ai.config.runtime import get_go_api_base
 
 
 @dataclass
@@ -25,8 +26,8 @@ class TemplateMatcher:
     HIGH_THRESHOLD = 0.85   # >0.85 直接确认
     LOW_THRESHOLD = 0.25    # <0.25 追问用户
 
-    def __init__(self, api_base: str = "http://localhost:8080"):
-        self.api_base = api_base
+    def __init__(self, api_base: str = None):
+        self.api_base = api_base or get_go_api_base()
         self._embeddings_cache: Dict[int, np.ndarray] = {}
         self._initialized = False
 

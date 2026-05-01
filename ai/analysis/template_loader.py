@@ -8,13 +8,14 @@ import os
 import time
 from functools import lru_cache
 from ai.client.http_client import get_http_client
+from ai.config.runtime import get_go_api_base
 
 
 class TemplateLoader:
     """决策分析模板加载器"""
 
-    def __init__(self, api_base: str = "http://localhost:8080"):
-        self.api_base = api_base
+    def __init__(self, api_base: str = None):
+        self.api_base = api_base or get_go_api_base()
         self._cache: Dict[str, Any] = {}
         self._cache_time = 0
         self._cache_ttl = 300  # 5分钟缓存

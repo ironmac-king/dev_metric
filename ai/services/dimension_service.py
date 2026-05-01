@@ -6,6 +6,7 @@ import httpx
 import threading
 from typing import List, Dict, Any, Optional, Set
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 
 logger = get_logger("ai.dimension_service")
 
@@ -38,16 +39,19 @@ class DimensionService:
     _cache_time: Dict[str, float] = {}
     _cache_ttl = 300.0  # 5分钟缓存
 
-    def __new__(cls, base_url: str = "http://localhost:8080"):
+    def __new__(cls, base_url: str = None):
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance._base_url = base_url
+                    cls._instance._base_url = base_url or get_go_api_base()
+        elif base_url:
+            cls._instance._base_url = base_url
         return cls._instance
 
-    def __init__(self, base_url: str = "http://localhost:8080"):
-        self._base_url = base_url
+    def __init__(self, base_url: str = None):
+        if base_url:
+            self._base_url = base_url
 
     def _api_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """调用 Go 后端 API"""
@@ -341,7 +345,7 @@ class DimensionService:
             if values:
                 value_list = [v.get("dimension_value", "") for v in values if v.get("dimension_value")]
                 if value_list:
-                    lines.append(f"  {field}: {', '.join(value_list[:20])}")
+                    lines.append(f"  {field}: {', '.join(value_list[:100])}")
         return "\n".join(lines) if lines else ""
 
     def get_level_keywords(self) -> Dict[str, str]:

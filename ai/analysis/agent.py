@@ -16,6 +16,7 @@ from .insights import get_insight_function, INDUSTRY_BENCHMARKS
 from ..engine.time_parser import TimeParser
 from ..engine.llm import get_llm_engine, get_llm_engine_for_analysis
 from ..client.metric_client import MetricClient
+from ..config.runtime import get_go_api_base
 
 
 # 内置演示模板（当无模板匹配时使用）
@@ -100,14 +101,15 @@ class AnalysisAgent:
         self.template_loader = template_loader
         self.template_matcher = template_matcher
         self.http_client = httpx.AsyncClient(timeout=60)
-        self.metric_client = MetricClient(base_url="http://localhost:8080")
+        self.metric_client = MetricClient()
+        self._go_base = get_go_api_base()
         self._table_dimensions_cache: Dict[str, Dict[str, Dict]] = {}
 
     async def get_last_query_result(self) -> Dict[str, Any]:
         """从 Go 后端获取最近一次问数结果"""
         try:
             response = await self.http_client.get(
-                "http://localhost:8080/api/v1/ask/last-result",
+                f"{self._go_base}/api/v1/ask/last-result",
                 params={"session_id": self.request.session_id}
             )
             if response.status_code == 200:
@@ -188,7 +190,7 @@ class AnalysisAgent:
         """从 Go 后端获取指标元数据，支持按 metric_code、name 或 name_en 查询"""
         try:
             response = await self.http_client.get(
-                "http://localhost:8080/api/v1/metadata/metrics",
+                f"{self._go_base}/api/v1/metadata/metrics",
                 timeout=10
             )
             if response.status_code == 200:
@@ -246,7 +248,7 @@ class AnalysisAgent:
         """通过 Go 后端执行 StarRocks 查询"""
         try:
             response = await self.http_client.post(
-                "http://localhost:8080/api/v1/query/execute",
+                f"{self._go_base}/api/v1/query/execute",
                 json={"sql": sql, "params": {}},
                 timeout=30.0
             )

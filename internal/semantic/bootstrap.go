@@ -929,7 +929,7 @@ func upsertSemanticCapabilities(db *gorm.DB, items []model.SemanticAnalysisCapab
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "subject_type"}, {Name: "subject_key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"supports_value", "supports_trend", "supports_comparison", "supports_yoy", "supports_mom", "supports_ranking", "supports_ratio", "supports_attribution", "supports_drilldown", "allowed_modes", "constraints_json", "status", "version", "updated_by", "updated_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"supports_value", "supports_trend", "supports_comparison", "supports_yo_y", "supports_mo_m", "supports_ranking", "supports_ratio", "supports_attribution", "supports_drilldown", "allowed_modes", "constraints_json", "status", "version", "updated_by", "updated_at"}),
 	}).Create(&items).Error
 }
 

@@ -427,7 +427,7 @@ class SemanticSnapshotService:
         for dim_code in sorted(grouped.keys()):
             display_name = self._normalize_text((dimensions.get(dim_code) or {}).get("display_name"))
             label = f"{dim_code}({display_name})" if display_name else dim_code
-            lines.append(f"  {label}: {', '.join(grouped[dim_code][:20])}")
+            lines.append(f"  {label}: {', '.join(grouped[dim_code][:100])}")
         return "\n".join(lines)
 
     def get_dimension_synonym_context(self, limit: int = 20) -> str:

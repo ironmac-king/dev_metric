@@ -4,6 +4,7 @@
 from typing import List, Dict, Optional
 import httpx
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
 
 logger = get_logger("ai.dim_value_client")
 
@@ -25,8 +26,8 @@ def get_http_client() -> httpx.Client:
 class DimValueClient:
     """维度值查询客户端"""
 
-    def __init__(self, base_url: str = "http://localhost:8080"):
-        self.base_url = base_url
+    def __init__(self, base_url: str = None):
+        self.base_url = base_url or get_go_api_base()
 
     def search_dimension_values(
         self,

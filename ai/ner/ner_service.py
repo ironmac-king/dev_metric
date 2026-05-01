@@ -5,6 +5,7 @@ import time
 import logging
 from typing import List, Dict, Optional
 from ai.ner.trie_ner import DimNER
+from ai.config.runtime import get_go_api_base
 
 logger = logging.getLogger("ai.ner_service")
 
@@ -26,7 +27,7 @@ class NERService:
         self.dim_ner = DimNER()
         self._last_load_time: float = 0
         self._cache_ttl: int = 300  # 5分钟
-        self._base_url: str = "http://localhost:8080"
+        self._base_url: str = get_go_api_base()
         self._terms_count: int = 0
         self._metrics_count: int = 0
 

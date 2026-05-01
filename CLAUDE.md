@@ -13,15 +13,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working in this
 redis-server
 
 # Go 后端 (port 8080)
-cd C:/Users/4014/Desktop/dev_metric/dev_metric
+cd C:/Users/4014/Desktop/DEV2_METRIC/dev_metric
 go run ./cmd/server
 
 # Python AI 服务 (port 8081) - ai/main.py 是 async FastAPI 应用
-cd C:/Users/4014/Desktop/dev_metric/dev_metric
+cd C:/Users/4014/Desktop/DEV2_METRIC/dev_metric
 python -m uvicorn ai.main:app --port 8081
 
 # 前端 (port 3001)
-cd C:/Users/4014/Desktop/dev_metric/dev_metric/web
+cd C:/Users/4014/Desktop/DEV2_METRIC/dev_metric/web
 npm run dev
 
 # 数据库迁移
@@ -193,9 +193,9 @@ current_metric_code, current_metric_name, current_time_expr, current_dimensions
 
 | 服务 | 端口 | 入口 |
 |------|------|------|
-| Go 后端 | 8080 | `go run ./cmd/server` |
-| Python AI | 8081 | `python -m uvicorn ai.main:app --port 8081` |
-| Vue 前端 | 3001 | `cd web && npm run dev` |
+| Go 后端 | 18080 | `go run ./cmd/server` |
+| Python AI | 18081 | `python -m uvicorn ai.main:app --port 18081` |
+| Vue 前端 | 3002 | `cd web && npm run dev` |
 
 ## 数据库
 

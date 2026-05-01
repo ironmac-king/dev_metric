@@ -5,13 +5,14 @@ SQL 生成器 - 优化版
 from typing import Dict, Any, Optional
 import httpx
 from ai.sql_gen.cache import get_sql_cache
+from ai.config.runtime import get_go_api_base
 
 
 class SQLGenerator:
     """SQL 生成和执行"""
 
-    def __init__(self, api_base: str = "http://localhost:8080", use_cache: bool = True):
-        self.api_base = api_base
+    def __init__(self, api_base: str = None, use_cache: bool = True):
+        self.api_base = api_base or get_go_api_base()
         self.use_cache = use_cache
         self._cache = get_sql_cache()
 

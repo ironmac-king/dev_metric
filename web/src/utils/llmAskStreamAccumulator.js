@@ -38,6 +38,34 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
     }
   }
 
+  // 解析 LLM 返回的 JSON 字符串，提取 summary 和 action_items
+  // 返回值：是否成功解析（markdown JSON -> 结构化对象）
+  function _parseAnalysisLLMContent(analysis) {
+    if (!analysis || typeof analysis.summary !== 'string') return false
+    if (!analysis.summary.startsWith('```json')) return false
+
+    let summaryText = analysis.summary
+    const jsonMatch = summaryText.match(/```json\n([\s\S]*?)\n```/)
+    if (!jsonMatch || !jsonMatch[1]) return false
+
+    try {
+      const parsed = JSON.parse(jsonMatch[1].trim())
+      if (parsed.summary) {
+        analysis.summary = parsed.summary
+      }
+      if (parsed.action_items && Array.isArray(parsed.action_items) && parsed.action_items.length > 0) {
+        analysis.action_items = parsed.action_items
+      }
+      return true
+    } catch (e) {
+      return false
+    }
+  }
+
+  // 解析过的内容缓存，防止被后续 SSE 事件覆盖
+  let _cachedParsedSummary = null
+  let _cachedParsedActionItems = null
+
   function handleEvent(currentEvent, data) {
     if (currentEvent === 'step_start') {
       const stepName = data.step
@@ -105,6 +133,13 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       finalMetricName = data.metric_name || ''
       finalMetricNames = data.metric_names || []
       finalAnalysis = data.analysis || null
+      const didParse = _parseAnalysisLLMContent(finalAnalysis)
+      // 只在成功解析 markdown JSON 时更新缓存，防止被后续 result_ready 覆盖
+      if (finalAnalysis && didParse) {
+        _cachedParsedSummary = finalAnalysis.summary
+        _cachedParsedActionItems = finalAnalysis.action_items
+      }
+
       finalMultiMetricData = data.multi_metric_data || []
       finalDimensionalData = data.dimensional_data || {}
       finalCategory = data.category || ''
@@ -119,7 +154,17 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       finalSuggest = data.suggestions || []
       finalClarificationOptions = data.clarification_options || []
       finalClarificationMessage = data.clarification_message || ''
-      if (data.analysis) finalAnalysis = data.analysis
+      if (data.analysis) {
+        finalAnalysis = data.analysis
+        _parseAnalysisLLMContent(finalAnalysis)
+        // 应用缓存的解析结果
+        if (_cachedParsedSummary && finalAnalysis.summary !== _cachedParsedSummary) {
+          finalAnalysis.summary = _cachedParsedSummary
+        }
+        if (_cachedParsedActionItems && finalAnalysis.action_items !== _cachedParsedActionItems) {
+          finalAnalysis.action_items = _cachedParsedActionItems
+        }
+      }
       if (data.multi_metric_data) finalMultiMetricData = data.multi_metric_data
       if (data.dimensional_data) finalDimensionalData = data.dimensional_data
       if (data.category) finalCategory = data.category
@@ -157,7 +202,10 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
   }
 
   function buildMessage(currentTime) {
-    return buildAssistantMessage({
+    // 最终兜底解析：在 build 前确保 finalAnalysis 的 markdown JSON 被解析过
+    _parseAnalysisLLMContent(finalAnalysis)
+
+    const msg = buildAssistantMessage({
       finalAnswer,
       finalSql,
       finalResultData,
@@ -182,6 +230,7 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       currentMqlTime,
       currentTime,
     })
+    return msg
   }
 
   function getFinalResultData() {

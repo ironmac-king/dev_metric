@@ -266,6 +266,12 @@ const highlightItems = computed(() => {
   if (!analysis) return []
   if (Array.isArray(analysis.highlights) && analysis.highlights.length) return analysis.highlights.slice(0, 2)
   if (Array.isArray(analysis.issues) && analysis.issues.length) return analysis.issues.slice(0, 2)
+  if (Array.isArray(analysis.action_items) && analysis.action_items.length) {
+    return analysis.action_items.slice(0, 2).map(item => ({
+      title: item.text || item.title || '重点',
+      reason: item.type ? `[${item.type}]` : undefined,
+    }))
+  }
   return []
 })
 

@@ -34,7 +34,8 @@ class TemplateManager:
             templates_path = os.path.join(base_dir, 'sql_template_engine', 'templates.json')
 
         self.templates_path = templates_path
-        self.api_base = api_base or os.environ.get("GO_API_BASE", "http://localhost:8080")
+        from ai.config.runtime import get_go_api_base
+        self.api_base = api_base or get_go_api_base()
         self._templates: Dict[str, List[SQLTemplate]] = {}  # intent -> [templates]
         self._load_templates()
 
