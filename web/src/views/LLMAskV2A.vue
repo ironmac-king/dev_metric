@@ -17,8 +17,13 @@
           <div v-if="messages.length === 0" class="init-view">
             <!-- 顶部问候区 -->
             <div class="greeting-section">
-              <div class="avatar-wrapper" ref="avatarContainer"></div>
-              <h1 class="welcome-text">{{ greetingText }}，有活别自己干，匀给我一点儿~</h1>
+              <div class="avatar-wrapper">
+                <svg width="68" height="68" viewBox="0 0 68 68" fill="none" aria-hidden="true">
+                  <rect x="8" y="8" width="52" height="52" rx="18" fill="#0F172A"/>
+                  <path d="M22 42V30M34 46V22M46 38V26" stroke="#F8FAFC" stroke-width="5" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <h1 class="welcome-text">{{ greetingText }}，把问题直接抛给我，我先给你结论，再补证据和下一步。</h1>
             </div>
 
             <!-- 快捷功能胶囊栏 -->
@@ -81,24 +86,25 @@
                 </div>
               </div>
               <div class="input-tools-bar">
-                <span class="tool-icon">
+                <span class="tool-label">支持直接提问，也可以用下面的起手问题。</span>
+                <span class="tool-icon" aria-hidden="true">
                   <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
                     <path d="M3 10H17M10 3L17 10L10 17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
                 </span>
-                <span class="tool-icon">
+                <span class="tool-icon" aria-hidden="true">
                   <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
                     <rect x="2" y="4" width="16" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
                     <path d="M6 8L10 12L14 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                   </svg>
                 </span>
-                <span class="tool-hint">/ 唤起快捷词</span>
+                <span class="tool-hint">输入 / 打开快捷词</span>
               </div>
             </div>
 
             <!-- 快捷提问卡片 -->
             <div class="suggestions-section">
-              <div class="suggestions-title">快捷提问：</div>
+              <div class="suggestions-title">你可以这样开场</div>
               <div class="suggestions-grid">
                 <div
                   v-for="suggestion in suggestions"
@@ -123,7 +129,26 @@
             <!-- 消息列表 -->
             <div class="messages-container" ref="messagesContainer">
               <div class="messages-list">
+                <ModernAskMessage
+                  v-for="(msg, idx) in messages"
+                  :key="`modern-${msg.role}-${idx}-${msg.time || msg.created_at || ''}`"
+                  :msg="msg"
+                  :idx="idx"
+                  :expanded-interpretation="!!expandedInterpretation[idx]"
+                  @copy="copyMessage"
+                  @toggle-interpretation="toggleInterpretation"
+                  @rate="rateMessage"
+                  @open-process="openThinkingDrawer"
+                  @select-suggestion="selectSuggestion"
+                  @clarification-select="handleClarificationSelect"
+                  @clarification-confirm="handleClarificationConfirm"
+                  @plan-confirm="handlePlanConfirm"
+                  @plan-modify="handlePlanModify"
+                  @legacy-clarification="selectClarification"
+                  @drilldown="handleDrilldown"
+                />
                 <div
+                  v-if="false"
                   v-for="(msg, idx) in messages"
                   :key="idx"
                   class="message-item"
@@ -475,7 +500,7 @@
 </template>
 
 <script setup>
-import { ref, h, nextTick, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, h, nextTick, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { llmAskApi, sessionApi } from '../api/llmAsk'
 import { askAPI } from '../api'
@@ -489,7 +514,7 @@ import ChartCard from '../components/ask/ChartCard.vue'
 import VolatilityPanel from '../components/ask/VolatilityPanel.vue'
 import ReportPreview from '../components/ask/ReportPreview.vue'
 import SessionHistory from '../components/ask/SessionHistory.vue'
-import lottie from 'lottie-web'
+import ModernAskMessage from '../components/ask/ModernAskMessage.vue'
 
 const router = useRouter()
 const $route = useRoute()
@@ -623,8 +648,6 @@ watch(() => $route.path, (path) => {
 const hasResult = computed(() => messages.value.length > 0)
 const messagesContainer = ref(null)
 const sessionHistoryRef = ref(null)
-const avatarContainer = ref(null)
-let avatarAnimation = null
 
 // Drawer states
 const logicDrawerVisible = ref(false)
@@ -705,26 +728,6 @@ onMounted(async () => {
 
   // 滚动到底部展示最新消息
   scrollToBottom()
-
-  if (!avatarContainer.value) return
-
-  try {
-    avatarAnimation = lottie.loadAnimation({
-      container: avatarContainer.value,
-      renderer: 'svg',
-      loop: true,
-      autoplay: true,
-      path: '/lottie/Assistant-Bot.json'
-    })
-  } catch (e) {
-    console.error('Lottie init error:', e)
-  }
-})
-
-onUnmounted(() => {
-  if (avatarAnimation) {
-    avatarAnimation.destroy()
-  }
 })
 
 // Icon组件
@@ -778,10 +781,10 @@ async function fetchInitialSuggestions() {
     console.error('获取快捷提问失败:', e)
     // 使用默认值
     suggestions.value = [
-      { title: '本月各品类销售额', desc: '查看各品类的销售数据排名', icon: QueryIcon, text: '本月各品类销售额是多少？' },
-      { title: '近30天用户趋势', desc: '分析用户数的变化趋势', icon: TrendIcon, text: '近30天用户数变化趋势' },
-      { title: '指标异常检测', desc: '自动发现数据中的异常波动', icon: AlertIcon, text: '最近有哪些指标出现异常？' },
-      { title: '环比数据对比', desc: '对比不同周期的数据差异', icon: ChartIcon, text: '对比本月与上月数据差异' }
+      { title: '看品类对比', desc: '先看本月各品类规模，再决定要不要继续下钻。', icon: QueryIcon, text: '本月各品类销售额对比一下' },
+      { title: '看近期变化', desc: '用趋势先判断最近 30 天有没有明显拐点。', icon: TrendIcon, text: '近30天用户数变化趋势怎么样' },
+      { title: '找异常波动', desc: '先把异常指标挑出来，再解释为什么变动。', icon: AlertIcon, text: '最近有哪些指标出现异常' },
+      { title: '做环比对比', desc: '先给我本月和上月的关键差异，再看细分。', icon: ChartIcon, text: '对比本月与上月数据差异' }
     ]
   }
 }
@@ -824,11 +827,22 @@ async function handleSend() {
     time: getCurrentTime()
   })
 
+  const pendingMessage = {
+    id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    role: 'assistant',
+    content: '',
+    time: getCurrentTime(),
+    loading: true,
+    processingLabel: '正在分析你的问题…',
+    thinkingSteps: [],
+  }
+  messages.value.push(pendingMessage)
+
   scrollToBottom()
   loading.value = true
 
-  // Open logic drawer when AI starts processing
-  logicDrawerVisible.value = true
+  // 分析过程默认折叠，先在主消息流里给轻量处理中反馈
+  logicDrawerVisible.value = false
   currentThinkingSteps.value = []
   currentSql.value = ''
 
@@ -836,6 +850,9 @@ async function handleSend() {
     onThinkingStepsChange: (steps) => {
       currentThinkingSteps.value = steps
       stepsVersion.value++
+      pendingMessage.thinkingSteps = steps
+      const lastStep = [...steps].reverse().find(step => step.content || step.status === 'in_progress')
+      pendingMessage.processingLabel = lastStep?.content || `正在${getStepName(lastStep?.step || 'intent_router')}…`
     },
     onSqlChange: (sql) => {
       currentSql.value = sql
@@ -881,10 +898,15 @@ async function handleSend() {
     })
 
     const finalSteps = streamAccumulator.getFinalSteps()
-
-    messages.value.push(streamAccumulator.buildMessage(getCurrentTime()))
-
-    expandedThinking.value[messages.value.length - 1] = false
+    const finalMessage = streamAccumulator.buildMessage(getCurrentTime())
+    const pendingIndex = messages.value.findIndex(item => item.id === pendingMessage.id)
+    if (pendingIndex >= 0) {
+      messages.value.splice(pendingIndex, 1, finalMessage)
+      expandedThinking.value[pendingIndex] = false
+    } else {
+      messages.value.push(finalMessage)
+      expandedThinking.value[messages.value.length - 1] = false
+    }
 
     currentThinkingSteps.value = finalSteps
     stepsVersion.value++
@@ -921,11 +943,17 @@ async function handleSend() {
 
   } catch (e) {
     console.error('流式请求失败:', e)
-    messages.value.push({
+    const fallbackMessage = {
       role: 'assistant',
       content: '抱歉，服务出现问题，请稍后再试。',
       time: getCurrentTime()
-    })
+    }
+    const pendingIndex = messages.value.findIndex(item => item.id === pendingMessage.id)
+    if (pendingIndex >= 0) {
+      messages.value.splice(pendingIndex, 1, fallbackMessage)
+    } else {
+      messages.value.push(fallbackMessage)
+    }
   } finally {
     loading.value = false
     scrollToBottom()
@@ -1100,6 +1128,12 @@ function toggleThinking(idx) {
 
 function toggleInterpretation(idx) {
   expandedInterpretation.value[idx] = !expandedInterpretation.value[idx]
+}
+
+function openThinkingDrawer(msg) {
+  currentThinkingSteps.value = Array.isArray(msg.thinkingSteps) ? msg.thinkingSteps : []
+  currentSql.value = msg.sql || msg.starrocksSql || ''
+  logicDrawerVisible.value = true
 }
 
 async function rateMessage(msg, rating) {
@@ -3141,6 +3175,254 @@ function scrollToBottom() {
   .drilldown-btn {
     padding: 6px 10px;
     font-size: 12px;
+  }
+}
+
+/* ========================================
+   2026 Refresh Overrides
+   ======================================== */
+
+.llm-ask-v2 {
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(15, 23, 42, 0.05), transparent 26%),
+    linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+}
+
+.main-container {
+  max-width: 1480px;
+  padding: 20px 24px 20px 96px;
+  gap: 0;
+  height: 100vh;
+}
+
+.content-area {
+  background: transparent;
+}
+
+.chat-wrapper {
+  background: transparent;
+}
+
+.init-view {
+  max-width: 960px;
+  padding: 110px 32px 24px;
+  justify-content: center;
+}
+
+.greeting-section {
+  justify-content: center;
+  text-align: center;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.avatar-wrapper {
+  width: 68px;
+  height: 68px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+}
+
+.welcome-text {
+  font-size: 34px;
+  line-height: 1.35;
+  font-weight: 700;
+  max-width: 760px;
+  background: none;
+  -webkit-text-fill-color: #0f172a;
+  color: #0f172a;
+}
+
+.mode-tabs {
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.mode-tab {
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(226, 232, 240, 0.82);
+  color: #64748b;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mode-tab.active {
+  background: #0f172a;
+  color: #f8fafc;
+  border-color: #0f172a;
+}
+
+.init-input-section,
+.suggestions-section {
+  max-width: 860px;
+}
+
+.init-input-section .chat-input-wrapper,
+.input-section .chat-input-wrapper {
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(16px);
+}
+
+.init-input-section .chat-input-wrapper {
+  min-height: 84px;
+  border-radius: 28px;
+  padding: 16px 18px 16px 22px;
+}
+
+.chat-input {
+  font-size: 17px;
+  color: #0f172a;
+}
+
+.chat-input::placeholder {
+  color: #94a3b8;
+}
+
+.send-btn {
+  background: #0f172a;
+  border-radius: 18px;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.18);
+}
+
+.send-btn:hover:not(:disabled) {
+  background: #111827;
+  box-shadow: 0 20px 44px rgba(15, 23, 42, 0.22);
+}
+
+.suggestions-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.suggestion-card {
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 20px;
+  min-height: 96px;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.04);
+}
+
+.suggestion-card:hover {
+  border-color: #bfdbfe;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.07);
+}
+
+.card-icon {
+  border-radius: 16px;
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.card-content h4 {
+  color: #0f172a;
+}
+
+.card-content p,
+.suggestions-title,
+.tool-hint {
+  color: #64748b;
+}
+
+.suggestions-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-bottom: 10px;
+}
+
+.input-tools-bar {
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.tool-label {
+  margin-right: auto;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.tool-icon {
+  opacity: 0.5;
+}
+
+.tool-hint {
+  font-size: 12px;
+}
+
+.chat-view {
+  max-width: 980px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.messages-container {
+  padding: 36px 24px 20px;
+}
+
+.messages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-bottom: 24px;
+}
+
+.input-section {
+  padding: 12px 24px 28px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0) 0%, rgba(248, 250, 252, 0.88) 32%, rgba(248, 250, 252, 0.98) 100%);
+}
+
+.input-section .chat-input-wrapper {
+  min-height: 76px;
+  border-radius: 26px;
+  padding: 14px 16px 14px 20px;
+}
+
+.command-panel {
+  border-radius: 18px;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.14);
+}
+
+@media (max-width: 1100px) {
+  .main-container {
+    padding: 76px 16px 16px;
+  }
+
+  .chat-view,
+  .init-view,
+  .init-input-section,
+  .suggestions-section {
+    max-width: 100%;
+  }
+
+  .welcome-text {
+    font-size: 24px;
+  }
+
+  .messages-container {
+    padding: 20px 6px 14px;
+  }
+
+  .input-section {
+    padding: 10px 8px 16px;
+  }
+
+  .suggestions-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tool-label {
+    display: none;
   }
 }
 </style>

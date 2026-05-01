@@ -58,10 +58,13 @@ export function buildAssistantMessage({
   let finalContent = ''
   if (finalNeedsClarification && finalThinkingClarificationMessage) {
     finalContent = finalThinkingClarificationMessage
-  } else if (finalResultData && finalResultData.length > 0) {
-    finalContent = ''
   } else {
-    finalContent = displayAnswer || '抱歉，我没有找到相关数据。'
+    finalContent =
+      displayAnswer ||
+      finalAnalysis?.summary ||
+      (finalResultData && finalResultData.length > 0
+        ? `已整理 ${finalResultData.length} 条结果，重点如下。`
+        : '抱歉，我没有找到相关数据。')
   }
 
   return {

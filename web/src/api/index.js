@@ -269,4 +269,42 @@ export const dimensionLabelAPI = {
   delete: (id) => api.delete(`/nlp/labels/${id}`)
 }
 
+export const semanticAPI = {
+  listMetrics: (params) => api.get('/semantic/metrics', { params }),
+  createMetric: (data) => api.post('/semantic/metrics', data),
+  updateMetric: (id, data) => api.put(`/semantic/metrics/${id}`, data),
+  deleteMetric: (id) => api.delete(`/semantic/metrics/${id}`),
+
+  listDimensions: (params) => api.get('/semantic/dimensions', { params }),
+  createDimension: (data) => api.post('/semantic/dimensions', data),
+  updateDimension: (id, data) => api.put(`/semantic/dimensions/${id}`, data),
+  deleteDimension: (id) => api.delete(`/semantic/dimensions/${id}`),
+
+  listCapabilities: (params) => api.get('/semantic/capabilities', { params }),
+  createCapability: (data) => api.post('/semantic/capabilities', data),
+  updateCapability: (id, data) => api.put(`/semantic/capabilities/${id}`, data),
+  deleteCapability: (id) => api.delete(`/semantic/capabilities/${id}`),
+
+  listPolicies: (params) => api.get('/semantic/policies', { params }),
+  createPolicy: (data) => api.post('/semantic/policies', data),
+  updatePolicy: (id, data) => api.put(`/semantic/policies/${id}`, data),
+  deletePolicy: (id) => api.delete(`/semantic/policies/${id}`),
+
+  listActions: (params) => api.get('/semantic/actions', { params }),
+  createAction: (data) => api.post('/semantic/actions', data),
+  updateAction: (id, data) => api.put(`/semantic/actions/${id}`, data),
+  deleteAction: (id) => api.delete(`/semantic/actions/${id}`),
+
+  listSnapshots: () => api.get('/semantic/snapshots'),
+  listSnapshotAudits: (params) => api.get('/semantic/snapshots/audit', { params }),
+  getActiveSnapshot: () => api.get('/semantic/snapshots/active'),
+  diffSnapshot: (snapshotId, baseSnapshotId) => api.get(`/semantic/snapshots/${snapshotId}/diff`, {
+    params: { base_snapshot_id: baseSnapshotId }
+  }),
+  compileSnapshot: (data) => api.post('/semantic/snapshots/compile', data || {}),
+  publishSnapshot: (snapshotId, data) => api.post(`/semantic/snapshots/${snapshotId}/publish`, data || {}),
+  rollbackSnapshot: (snapshotId, data) => api.post(`/semantic/snapshots/${snapshotId}/rollback`, data || {}),
+  bootstrap: () => api.post('/semantic/bootstrap')
+}
+
 export default api
