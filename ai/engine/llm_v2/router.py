@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from ai.config.logging_config import get_logger
 from ai.config.runtime import get_go_api_base
+from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
 from .schema import V2State, MQLSchema, create_v2_state
 from .graph import get_v2_graph
 from .streaming import (
@@ -63,6 +64,14 @@ def _map_drilldown_question(question: str) -> str:
 # Go 后端 API 地址
 GO_API_BASE = get_go_api_base()
 GO_ASK_ANALYSIS_LOG_URL = f"{GO_API_BASE}/api/v1/internal/ask-analysis/logs/v2"
+
+
+def _refresh_semantic_snapshot_for_request() -> None:
+    service = get_semantic_snapshot_service()
+    try:
+        service.get_active_snapshot(force_refresh=True)
+    except Exception as exc:
+        logger.warning(f"[V2 Semantic] refresh failed: {exc}")
 
 
 async def _send_log_to_go(
@@ -259,6 +268,7 @@ async def ask_question_v2(req: AskRequestV2):
     tracker = get_performance_tracker()
 
     try:
+        _refresh_semantic_snapshot_for_request()
         # 1. 初始化 V2State
         state = create_v2_state(
             session_id=session_id,
@@ -274,6 +284,9 @@ async def ask_question_v2(req: AskRequestV2):
             state.inherited_mql = inherited_mql
             state.history_stack = list(restored_context.get("history_stack") or [])
             state.conversation_summary = restored_context.get("conversation_summary")
+            active_task = restored_context.get("active_analysis_task")
+            if active_task:
+                state.session_state = {"active_analysis_task": active_task}
             logger.info(f"[V2] 恢复上轮 MQL: session_id={session_id}, intent={inherited_mql.intent.value if inherited_mql else 'N/A'}, metric={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}, dims={[(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else None}")
         else:
             logger.info(f"[V2] 未找到上轮 MQL: session_id={session_id}")
@@ -485,6 +498,8 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 "question": display_question,
             }).to_sse()
 
+            _refresh_semantic_snapshot_for_request()
+
             # 初始化状态
             state = create_v2_state(
                 session_id=session_id,
@@ -500,6 +515,9 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 state.inherited_mql = inherited_mql
                 state.history_stack = list(restored_context.get("history_stack") or [])
                 state.conversation_summary = restored_context.get("conversation_summary")
+                active_task = restored_context.get("active_analysis_task")
+                if active_task:
+                    state.session_state = {"active_analysis_task": active_task}
                 logger.info(f"[V2 Stream] 恢复上轮 MQL: session_id={session_id}, intent={inherited_mql.intent.value if inherited_mql else 'N/A'}")
 
             # 获取 Graph

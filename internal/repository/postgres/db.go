@@ -83,11 +83,28 @@ func autoMigrate() error {
 		&model.SlotDefinition{},
 		&model.SlotDependency{},
 		&model.SlotRelation{},
+		// 独立语义层
+		&model.SemanticMetric{},
+		&model.SemanticDimension{},
+		&model.SemanticAnalysisCapability{},
+		&model.SemanticInteractionPolicy{},
+		&model.SemanticAction{},
+		&model.SemanticSnapshot{},
+		&model.SemanticSnapshotAudit{},
 	)
 }
 
 func Get() *gorm.DB {
 	return db
+}
+
+// SetForTest temporarily overrides the global DB handle for tests.
+func SetForTest(testDB *gorm.DB) func() {
+	previous := db
+	db = testDB
+	return func() {
+		db = previous
+	}
 }
 
 // GetVectorDB 返回 VectorDB 实例用于向量搜索

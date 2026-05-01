@@ -388,6 +388,7 @@ type AskMessage struct {
 	Breadcrumbs       string `json:"breadcrumbs" gorm:"type:text"`
 	MetricCode        string `json:"metric_code" gorm:"size:64"`
 	ThinkingSteps     string `json:"thinking_steps" gorm:"type:text"` // 思考过程（JSON序列化）
+	ExtraData         string `json:"extra_data" gorm:"type:jsonb"`     // V2完整消息额外数据
 }
 
 func (AskMessage) TableName() string {
