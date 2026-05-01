@@ -27,6 +27,35 @@
       </div>
     </div>
 
+    <!-- 文档样式切换按钮 -->
+    <div v-if="messages.length > 0" class="document-style-toggle">
+      <button
+        class="toggle-btn"
+        :class="{ active: enableDocumentStyle }"
+        @click="enableDocumentStyle = !enableDocumentStyle"
+        title="切换文档样式"
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <rect x="2" y="1" width="10" height="12" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M4 4H10M4 7H10M4 10H8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        <span>{{ enableDocumentStyle ? '文档样式' : '气泡样式' }}</span>
+      </button>
+      <button
+        v-if="enableDocumentStyle"
+        class="toggle-btn secondary"
+        :class="{ active: mergeView }"
+        @click="mergeView = !mergeView"
+        title="合并/分离视图"
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <rect x="1" y="2" width="5" height="10" rx="1" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="8" y="2" width="5" height="10" rx="1" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        <span>{{ mergeView ? '合并视图' : '分离视图' }}</span>
+      </button>
+    </div>
+
     <!-- 消息列表 -->
     <transition-group name="message" tag="div" class="message-list">
       <div
@@ -519,6 +548,9 @@ const localEditingContent = ref('')
 // 文档样式开关（初期 false，之后可改为 true 开启）
 const enableDocumentStyle = ref(false)
 
+// 合并视图开关（文档样式启用时生效）
+const mergeView = ref(false)
+
 // ========== 表格排序状态 ==========
 // 格式: { [messageIndex]: { column: string, order: 'asc' | 'desc' } }
 const sortStates = ref<Record<number, { column: string, order: 'asc' | 'desc' }>>({})
@@ -751,6 +783,54 @@ defineExpose({ scrollToBottom, getContainer: () => messagesContainer.value })
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+  position: relative;
+}
+
+/* 文档样式切换按钮 */
+.document-style-toggle {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+  margin-bottom: 12px;
+  background: linear-gradient(to bottom, var(--bg-primary) 60%, transparent);
+}
+
+.toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-white);
+  border-radius: 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.toggle-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.toggle-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.toggle-btn.secondary {
+  background: var(--bg-primary);
+}
+
+.toggle-btn.secondary.active {
+  background: var(--text-secondary);
+  border-color: var(--text-secondary);
+  color: #fff;
 }
 
 .welcome-screen {
