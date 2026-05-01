@@ -83,6 +83,14 @@ func autoMigrate() error {
 		&model.SlotDefinition{},
 		&model.SlotDependency{},
 		&model.SlotRelation{},
+		// 语义层配置
+		&model.SemanticMetric{},
+		&model.SemanticDimension{},
+		&model.SemanticAnalysisCapability{},
+		&model.SemanticInteractionPolicy{},
+		&model.SemanticAction{},
+		&model.SemanticSnapshot{},
+		&model.SemanticSnapshotAudit{},
 	)
 }
 
