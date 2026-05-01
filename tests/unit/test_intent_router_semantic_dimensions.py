@@ -12,6 +12,16 @@ def test_validate_generic_dimensions_uses_semantic_snapshot_service():
         def find_dimension_column_by_type(self, candidate):
             return None
 
+        def resolve_dimension(self, candidate):
+            if candidate == "cloud-storage":
+                return {
+                    "column_name": "GROUP_2",
+                    "dimension_type": "category_l2",
+                    "dimension_value": "cloud-storage",
+                    "is_generic": False,
+                }
+            return None
+
         def search_dimension_values(self, candidate, limit=10):
             if candidate == "cloud-storage":
                 return [

@@ -118,6 +118,9 @@ class MQLMetric:
     molecule_metric: str = ""          # 分子指标
     denominator_metric: str = ""       # 分母指标
 
+    # 语义层业务口径（从 Go API /api/v1/metadata/metrics/:id 透出）
+    business_summary: str = ""         # 如"含税"、"不含退"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "code": self.code,
@@ -131,6 +134,7 @@ class MQLMetric:
             "formula_type": self.formula_type,
             "molecule_metric": self.molecule_metric,
             "denominator_metric": self.denominator_metric,
+            "business_summary": self.business_summary,
         }
 
 
@@ -697,6 +701,9 @@ class V2State:
     # ===== 元数据 =====
     created_at: str = ""               # 创建时间
     updated_at: str = ""               # 更新时间
+
+    # ===== 语义快照缓存（router 写入，节点直接读取） =====
+    _snapshot: Optional[Dict[str, Any]] = None  # SemanticSnapshotService 快照
 
     # ===== 状态控制 =====
     current_step: str = ""             # 当前步骤

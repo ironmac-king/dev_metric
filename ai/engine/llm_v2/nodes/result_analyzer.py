@@ -24,6 +24,14 @@ class ResultAnalyzer:
 
     def __init__(self):
         self._llm_engine = get_llm_engine()
+        self._semantic_service = None
+
+    def _get_semantic_service(self):
+        """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
+        if self._semantic_service is None:
+            from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
+            self._semantic_service = get_semantic_snapshot_service()
+        return self._semantic_service
 
     def _get_time_context(self, mql: MQLSchema) -> str:
         """从 MQL 获取时间上下文，用于建议问题拼接"""
@@ -166,6 +174,29 @@ class ResultAnalyzer:
             result["mode"] = "triggered"
         else:
             result["mode"] = "direct"
+
+        # 6. 优先从语义快照增强 suggestions（如果当前 suggestions 为空或过少）
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            scene_type_map = {
+                "query_value": "query_value",
+                "query_trend": "query_trend",
+                "query_comparison": "query_comparison",
+                "query_ranking": "query_ranking",
+                "query_ratio": "query_ratio",
+            }
+            scene_type = scene_type_map.get(intent, "query_value")
+            snapshot_suggestions = semantic_svc.recommend_next_questions(mql, scene_type)
+            if snapshot_suggestions:
+                current = result.get("suggestions") or []
+                # 快照建议补充到现有建议之后（去重）
+                seen = set(current)
+                for s in snapshot_suggestions:
+                    if s not in seen:
+                        seen.add(s)
+                        current.append(s)
+                result["suggestions"] = current[:6]  # 最多6条
+                logger.info(f"[ResultAnalyzer] 从语义快照增强 suggestions: {snapshot_suggestions}")
 
         return result
 

@@ -32,7 +32,7 @@ def test_get_synonym_context_prefers_semantic_service():
     generator = MQLGenerator()
 
     class FakeSemanticService:
-        def get_dimension_synonym_context(self):
+        def get_dimension_synonym_context(self, limit=20):
             return '【重要】以下用户词对应具体的数据库维度值，遇到这些词必须生成 filter：\n  us-store → filter={"field": "FSITE", "value": "amazon-us"}'
 
     generator._semantic_service = FakeSemanticService()
@@ -59,6 +59,9 @@ def test_parse_mql_uses_semantic_fallback_map_for_dimensions():
     class FakeSemanticService:
         def get_dimension_fallback_map(self):
             return {"site": "FSITE"}
+
+        def get_level_keywords(self):
+            return {}
 
     generator._semantic_service = FakeSemanticService()
     generator._get_dimension_keywords_list = lambda: []
@@ -97,6 +100,9 @@ def test_fill_defaults_injects_comparison_from_semantic_service():
     generator = MQLGenerator()
 
     class FakeSemanticService:
+        def get_dimension_values_context(self):
+            return ""
+
         def build_default_comparison_spec(self, question, metric_code="", metric_name="", scene_type="comparison"):
             assert question == "sales对比"
             assert metric_name == "sales"

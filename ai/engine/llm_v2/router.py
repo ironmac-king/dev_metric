@@ -276,6 +276,9 @@ async def ask_question_v2(req: AskRequestV2):
             question=req.question,
             created_at=datetime.now().isoformat(),
         )
+        # 写入语义快照（供后续节点直接读取，不重复发 HTTP）
+        snapshot = get_semantic_snapshot_service().get_active_snapshot()
+        state._snapshot = snapshot if snapshot else {}
 
         # 恢复上轮会话上下文（用于多轮对话上下文继承）
         restored_context = _session_store.get_context(session_id, user_id=req.user_id)
@@ -507,6 +510,9 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 question=req.question,
                 created_at=datetime.now().isoformat(),
             )
+            # 写入语义快照（供后续节点直接读取，不重复发 HTTP）
+            snapshot = get_semantic_snapshot_service().get_active_snapshot()
+            state._snapshot = snapshot if snapshot else {}
 
             # 恢复上轮会话上下文（用于多轮对话上下文继承）
             restored_context = _session_store.get_context(session_id, user_id=req.user_id)

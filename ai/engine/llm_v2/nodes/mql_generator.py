@@ -30,11 +30,28 @@ class MQLGenerator:
         self._prompt_manager = get_prompt_manager()
         self._llm_engine = get_llm_engine()
         self._dimension_name_to_column = None  # 动态维度映射
+        self._semantic_service = None  # 语义快照服务延迟加载
+
+    def _get_semantic_service(self):
+        """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
+        if self._semantic_service is None:
+            from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
+            self._semantic_service = get_semantic_snapshot_service()
+        return self._semantic_service
 
     def _load_dimension_configs(self):
         """从 API 加载维度配置，构建 dimension_name → column_name 映射"""
         if self._dimension_name_to_column is not None:
             return
+        # 优先从语义快照获取
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            dim_name_map = semantic_svc.get_dimension_name_to_code_map()
+            if dim_name_map:
+                self._dimension_name_to_column = dim_name_map
+                logger.info(f"[MQLGenerator] 从语义快照加载了 {len(self._dimension_name_to_column)} 个维度映射")
+                return
+        # 快照为空，回退到 API 加载
         try:
             from ai.client.metric_client import MetricClient
             client = MetricClient()
@@ -209,6 +226,16 @@ class MQLGenerator:
         synonym_map: Dict[str, str] = {用户词: 标准值}
         valid_values: set = 所有有效的维度值集合
         """
+        # 优先用语义快照获取
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            result = semantic_svc.get_business_term_maps()
+            if result:
+                synonym_map, valid_values = result
+                if synonym_map or valid_values:
+                    logger.info(f"[_load_business_terms] 从语义快照加载了 {len(synonym_map)} 个同义词映射")
+                    return synonym_map, valid_values
+        # 快照为空，回退到 HTTP 调用
         try:
             from ai.client.metric_client import MetricClient
             client = MetricClient()
@@ -238,6 +265,13 @@ class MQLGenerator:
         格式：用户词 → 标准值 (field=列名)
         说明：当用户问题中出现"用户词"时，应生成 filter {"field": "列名", "value": "标准值"}
         """
+        # 优先用语义快照获取
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            result = semantic_svc.get_dimension_synonym_context(limit=20)
+            if result:
+                return result
+        # 快照为空，回退到 HTTP 调用
         try:
             from ai.client.metric_client import MetricClient
             from ai.services.dimension_service import DimensionService
@@ -377,7 +411,13 @@ class MQLGenerator:
         return template
 
     def _get_dimension_values_context(self) -> str:
-        """从 dim_value_mapping 获取维度值上下文（使用 DimensionService 消除硬编码）"""
+        """从 dim_value_mapping 获取维度值上下文（优先语义快照，失败则走 DimensionService HTTP）"""
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            result = semantic_svc.get_dimension_values_context()
+            if result:
+                return result
+        # 快照为空，回退到 DimensionService HTTP
         try:
             from ai.services.dimension_service import DimensionService
             svc = DimensionService()
@@ -395,17 +435,22 @@ class MQLGenerator:
         if not question or not dim_type:
             return dim_type
 
-        # 检查用户是否提到了具体级别（使用 DimensionService 消除硬编码）
-        try:
-            from ai.services.dimension_service import DimensionService
-            level_keywords = DimensionService().get_level_keywords()
-        except Exception:
-            level_keywords = {
-                "一级品类": "GROUP_1",
-                "二级品类": "GROUP_2",
-                "三级品类": "GROUP_3",
-                "四级品类": "GROUP_4",
-            }
+        # 检查用户是否提到了具体级别（优先语义快照，失败则走 DimensionService HTTP）
+        level_keywords = None
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            level_keywords = semantic_svc.get_level_keywords()
+        if not level_keywords:
+            try:
+                from ai.services.dimension_service import DimensionService
+                level_keywords = DimensionService().get_level_keywords()
+            except Exception:
+                level_keywords = {
+                    "一级品类": "GROUP_1",
+                    "二级品类": "GROUP_2",
+                    "三级品类": "GROUP_3",
+                    "四级品类": "GROUP_4",
+                }
 
         for keyword, correct_type in level_keywords.items():
             if keyword in question:
@@ -553,37 +598,42 @@ class MQLGenerator:
         if self._dimension_name_to_column:
             dim_type_map.update(self._dimension_name_to_column)
 
-        # 硬编码映射作为回退（处理 dimension_configs 中没有的情况，使用 DimensionService 动态获取）
-        try:
-            from ai.services.dimension_service import DimensionService
-            fallback_map = DimensionService().get_fallback_map()
-        except Exception:
-            fallback_map = {
-                "店铺": "SHOP",
-                "站点": "SITE",
-                "平台": "PLATFORM",
-                "渠道": "CHANNEL",
-                "品类": "CATEGORY",
-                "商品": "PRODUCT",
-                "产品": "PRODUCT",
-                "SKU": "SKU",
-                "ASIN": "ASIN",
-                "国家": "COUNTRY",
-                "地区": "REGION",
-                "区域": "REGION",
-                "部门": "DEPARTMENT",
-                "产品线": "PRODUCT_LINE",
-                "广告类型": "AD_TYPE",
-                "广告": "AD_TYPE",
-                "日": "DAY",
-                "月": "MONTH",
-                "年": "YEAR",
-                "周": "WEEK",
-                "一级品类": "GROUP_1",
-                "二级品类": "GROUP_2",
-                "三级品类": "GROUP_3",
-                "四级品类": "GROUP_4",
-            }
+        # 硬编码映射作为回退（优先语义快照，失败则走 DimensionService HTTP）
+        fallback_map = None
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            fallback_map = semantic_svc.get_dimension_fallback_map()
+        if not fallback_map:
+            try:
+                from ai.services.dimension_service import DimensionService
+                fallback_map = DimensionService().get_fallback_map()
+            except Exception:
+                fallback_map = {
+                    "店铺": "SHOP",
+                    "站点": "SITE",
+                    "平台": "PLATFORM",
+                    "渠道": "CHANNEL",
+                    "品类": "CATEGORY",
+                    "商品": "PRODUCT",
+                    "产品": "PRODUCT",
+                    "SKU": "SKU",
+                    "ASIN": "ASIN",
+                    "国家": "COUNTRY",
+                    "地区": "REGION",
+                    "区域": "REGION",
+                    "部门": "DEPARTMENT",
+                    "产品线": "PRODUCT_LINE",
+                    "广告类型": "AD_TYPE",
+                    "广告": "AD_TYPE",
+                    "日": "DAY",
+                    "月": "MONTH",
+                    "年": "YEAR",
+                    "周": "WEEK",
+                    "一级品类": "GROUP_1",
+                    "二级品类": "GROUP_2",
+                    "三级品类": "GROUP_3",
+                    "四级品类": "GROUP_4",
+                }
         for k, v in fallback_map.items():
             if k not in dim_type_map:
                 dim_type_map[k] = v
@@ -752,6 +802,27 @@ class MQLGenerator:
         # 如果指标名包含"XXX销售额"且XXX是维度值（如"智能云存储"），
         # 从指标名中剔除XXX，生成对应 filter
         self._correct_dimension_value_in_metric_name(mql)
+
+        # ========== 对比默认值填充（优先语义快照） ==========
+        if not mql.comparison:
+            semantic_svc = self._get_semantic_service()
+            if semantic_svc:
+                try:
+                    comparison_data = semantic_svc.build_default_comparison_spec(
+                        question=mql.original_question or "",
+                        metric_code=mql.metric.code if mql.metric else "",
+                        metric_name=mql.metric.name if mql.metric else "",
+                        scene_type="comparison"
+                    )
+                    if comparison_data and comparison_data.get("enabled"):
+                        from ..schema import ComparisonSpec
+                        mql.comparison = ComparisonSpec(
+                            enabled=comparison_data.get("enabled", False),
+                            types=comparison_data.get("types", []),
+                        )
+                        logger.info(f"[_fill_defaults] 从语义快照注入 comparison: {comparison_data}")
+                except Exception as e:
+                    logger.warning(f"[_fill_defaults] build_default_comparison_spec 失败: {e}")
 
     def _correct_dimension_value_in_metric_name(self, mql: MQLSchema):
         """从问题文本中识别维度值并生成 filter

@@ -16,7 +16,9 @@ from typing import Optional, List, Dict, Any, Dict as TypeDict
 from enum import Enum
 
 from ai.config.logging_config import get_logger
+from ai.engine.llm import get_llm_engine_for_analysis
 from ai.engine.llm_v2.nodes.volatility_analyzer import VolatilityAnalyzer
+from ai.engine.prompt_manager import get_prompt_manager
 
 logger = get_logger("ai.llm_v2.trigger_analyzer")
 
@@ -72,6 +74,7 @@ class BaseTrigger(ABC):
 
     def __init__(self, db_pool=None):
         self.db_pool = db_pool
+        self._semantic_service = None  # 语义快照服务（可被外部设置或在 TriggerAnalyzer 中设置）
 
     @abstractmethod
     async def check(self, mql, result: Dict, state=None) -> TriggerResult:
@@ -293,10 +296,24 @@ class VolatilityTrigger(BaseTrigger):
                 {"metric": "ad_roas", "site": raw_val}
             ))
         if not options:
+            # ========== 优先用语义快照的 recommend_actions ==========
+            if self._semantic_service:
+                semantic_actions = self._semantic_service.recommend_actions("volatility", limit=4) or []
+                if semantic_actions:
+                    logger.info(f"[_build_drilldowns] 从语义快照获取 actions: {semantic_actions}")
+                    return semantic_actions
+            # ======================================================
             options = [
                 self._build_drilldown("🏪 站点健康度", {"check": "site_health"}),
                 self._build_drilldown("📢 广告效果", {"check": "ad_effect"}),
             ]
+        else:
+            # 有动态 drilldowns 时，追加语义快照的 actions
+            if self._semantic_service:
+                semantic_actions = self._semantic_service.recommend_actions("volatility", limit=4) or []
+                if semantic_actions:
+                    logger.info(f"[_build_drilldowns] 追加语义快照 actions: {semantic_actions}")
+                    options.extend(semantic_actions)
         return options[:4]
 
 
@@ -344,7 +361,35 @@ class GenericQueryTrigger(BaseTrigger):
             except Exception as e:
                 logger.warning(f"[GenericQueryTrigger] 解析下钻格式失败: {e}")
 
-        # 检测四类分析词（文字匹配）
+        # ========== 使用语义快照服务检测四类分析词 ==========
+        if not drilldown_type and self._semantic_service:
+            try:
+                # 从 semantic service 获取 drilldown categories
+                scene_categories = self._semantic_service.get_scene_drilldown_categories("generic_query") or {}
+                # 直接匹配 question 与 category sub-items（如 "sales-deep-dive" ∈ ["sales-deep-dive"]）
+                for cat, sub_cats in scene_categories.items():
+                    if any(str(sc) in question or question in str(sc) for sc in sub_cats):
+                        drilldown_type = cat
+                        logger.info(f"[GenericQueryTrigger] 快照 category '{cat}' sub-item 匹配 question '{question}'")
+                        break
+                # 如果没匹配上，尝试通过 keywords 匹配
+                if not drilldown_type:
+                    scene_keywords = self._semantic_service.get_scene_keywords("generic_query") or []
+                    for kw in scene_keywords:
+                        if kw and kw in question:
+                            # 匹配到关键词，查找对应的 drilldown_type
+                            for cat, sub_cats in scene_categories.items():
+                                if any(kw in str(sc) or str(sc) in kw for sc in sub_cats):
+                                    drilldown_type = cat
+                                    logger.info(f"[GenericQueryTrigger] 快照关键词 '{kw}' 匹配到 drilldown_type={drilldown_type}")
+                                    break
+                            if drilldown_type:
+                                break
+            except Exception as e:
+                logger.warning(f"[GenericQueryTrigger] 语义快照服务关键词匹配失败: {e}")
+        # =====================================================
+
+        # Fallback：检测四类分析词（文字匹配）
         if not drilldown_type:
             for check_type, patterns in self.DRILLDOWN_CATEGORY_PATTERNS.items():
                 if any(p in question for p in patterns):
@@ -352,22 +397,42 @@ class GenericQueryTrigger(BaseTrigger):
                     break
 
         if drilldown_type:
-            # 四类分析词触发对应的分析
-            category_labels = {
-                "sales": "📊 销售经营分析",
-                "ad": "📢 广告投放分析",
-                "inventory": "📦 库存供应链分析",
-                "cost": "💰 成本毛利分析",
-            }
-            # 如果是 __DRILLDOWN__ 格式，不返回 drilldown_options（避免循环）
-            is_drilldown_signal = "__DRILLDOWN__:" in question
-            drilldown_opts = [] if is_drilldown_signal else [
-                self._build_drilldown(category_labels.get(drilldown_type, drilldown_type), {"check": drilldown_type}),
-            ]
+            # ========== 优先用 semantic service 的 resolve_action ==========
+            drilldown_opts = []
+            if self._semantic_service:
+                try:
+                    resolved = self._semantic_service.resolve_action(
+                        check=drilldown_type,
+                        question=question,
+                        scene_type="generic_query",
+                        target_scene_type="drilldown"
+                    )
+                    if resolved:
+                        drilldown_opts = [self._build_drilldown(
+                            resolved.get("label", ""),
+                            resolved.get("params", {})
+                        )]
+                except Exception as e:
+                    logger.warning(f"[GenericQueryTrigger] 语义快照 resolve_action 失败: {e}")
+            # ============================================================
+
+            # Fallback：使用硬编码的 category_labels
+            if not drilldown_opts:
+                category_labels = {
+                    "sales": "📊 销售经营分析",
+                    "ad": "📢 广告投放分析",
+                    "inventory": "📦 库存供应链分析",
+                    "cost": "💰 成本毛利分析",
+                }
+                # 如果是 __DRILLDOWN__ 格式，不返回 drilldown_options（避免循环）
+                is_drilldown_signal = "__DRILLDOWN__:" in question
+                drilldown_opts = [] if is_drilldown_signal else [
+                    self._build_drilldown(category_labels.get(drilldown_type, drilldown_type), {"check": drilldown_type}),
+                ]
             return TriggerResult(
                 should_analyze=True,
                 trigger_type=TriggerType.GENERIC_QUERY,
-                trigger_reason=f"触发{category_labels.get(drilldown_type, drilldown_type)}",
+                trigger_reason=f"触发{category_labels.get(drilldown_type, drilldown_type) if not drilldown_opts else drilldown_opts[0]['label']}",
                 priority=Priority.P1,
                 affected_dimensions=[],
                 drilldown_options=drilldown_opts
@@ -400,18 +465,29 @@ class AdEffectTrigger(BaseTrigger):
         question = mql.original_question if hasattr(mql, 'original_question') and mql.original_question else (mql.resolved_question or '' if hasattr(mql, 'resolved_question') else '')
 
         if any(p in question for p in self.AD_PATTERNS):
+            # 优先用 semantic service 的 recommend_actions
+            drilldown_opts = []
+            if self._semantic_service:
+                try:
+                    semantic_actions = self._semantic_service.recommend_actions("ad_effect", limit=4) or []
+                    if semantic_actions:
+                        drilldown_opts = semantic_actions
+                except Exception as e:
+                    logger.warning(f"[AdEffectTrigger] 语义快照 recommend_actions 失败: {e}")
+            if not drilldown_opts:
+                drilldown_opts = [
+                    self._build_drilldown("📢 按渠道对比", {"dimension": "ad_channel"}),
+                    self._build_drilldown("📉 低效站点", {"dimension": "low_roas_site"}),
+                    self._build_drilldown("💰 花费明细", {"metric": "ad_spend"}),
+                    self._build_drilldown("📊 ROI趋势", {"metric": "roi_trend"}),
+                ]
             return TriggerResult(
                 should_analyze=True,
                 trigger_type=TriggerType.AD_EFFECT,
                 trigger_reason="广告效果分析",
                 priority=Priority.P1,
                 affected_dimensions=[],
-                drilldown_options=[
-                    self._build_drilldown("📢 按渠道对比", {"dimension": "ad_channel"}),
-                    self._build_drilldown("📉 低效站点", {"dimension": "low_roas_site"}),
-                    self._build_drilldown("💰 花费明细", {"metric": "ad_spend"}),
-                    self._build_drilldown("📊 ROI趋势", {"metric": "roi_trend"}),
-                ]
+                drilldown_options=drilldown_opts
             )
 
         return TriggerResult(should_analyze=False)
@@ -444,16 +520,27 @@ class InventoryRiskTrigger(BaseTrigger):
             else:
                 priority = Priority.P2
 
+            # 优先用 semantic service 的 recommend_actions
+            drilldown_opts = []
+            if self._semantic_service:
+                try:
+                    semantic_actions = self._semantic_service.recommend_actions("inventory_risk", limit=4) or []
+                    if semantic_actions:
+                        drilldown_opts = semantic_actions
+                except Exception as e:
+                    logger.warning(f"[InventoryRiskTrigger] 语义快照 recommend_actions 失败: {e}")
+            if not drilldown_opts:
+                drilldown_opts = [
+                    self._build_drilldown("📦 库存明细", {"check": "inventory_detail"}),
+                    self._build_drilldown("⚠️ 断货预警", {"check": "stockout_risk"}),
+                ]
             return TriggerResult(
                 should_analyze=True,
                 trigger_type=TriggerType.INVENTORY_RISK,
                 trigger_reason=f"库存可售天数{inventory_days}天",
                 priority=priority,
                 affected_dimensions=[],
-                drilldown_options=[
-                    self._build_drilldown("📦 库存明细", {"check": "inventory_detail"}),
-                    self._build_drilldown("⚠️ 断货预警", {"check": "stockout_risk"}),
-                ]
+                drilldown_options=drilldown_opts
             )
 
         return TriggerResult(should_analyze=False)
@@ -476,17 +563,28 @@ class ContextTrigger(BaseTrigger):
         was_metric = last_query_type == "metric"
 
         if is_followup and was_metric:
+            # 优先用 semantic service 的 recommend_actions
+            drilldown_opts = []
+            if self._semantic_service:
+                try:
+                    semantic_actions = self._semantic_service.recommend_actions("context_followup", limit=4) or []
+                    if semantic_actions:
+                        drilldown_opts = semantic_actions
+                except Exception as e:
+                    logger.warning(f"[ContextTrigger] 语义快照 recommend_actions 失败: {e}")
+            if not drilldown_opts:
+                drilldown_opts = [
+                    self._build_drilldown("🏪 按站点归因", {"drilldown": "site"}),
+                    self._build_drilldown("📊 按因素归因", {"drilldown": "factor"}),
+                    self._build_drilldown("⏰ 时间维度", {"drilldown": "time"}),
+                ]
             return TriggerResult(
                 should_analyze=True,
                 trigger_type=TriggerType.CONTEXT_FOLLOWUP,
                 trigger_reason="连续追问，进入深度归因",
                 priority=Priority.P1,
                 affected_dimensions=[],
-                drilldown_options=[
-                    self._build_drilldown("🏪 按站点归因", {"drilldown": "site"}),
-                    self._build_drilldown("📊 按因素归因", {"drilldown": "factor"}),
-                    self._build_drilldown("⏰ 时间维度", {"drilldown": "time"}),
-                ]
+                drilldown_options=drilldown_opts
             )
 
         return TriggerResult(should_analyze=False)
@@ -512,17 +610,42 @@ class ComparisonTrigger(BaseTrigger):
 
         is_comparison = any(p in question for p in self.COMPARISON_PATTERNS)
 
-        if is_comparison and has_multi_dims:
+        # ========== 优先用 semantic service 的 keywords 判断 ==========
+        should_trigger = is_comparison
+        if self._semantic_service and not should_trigger:
+            try:
+                scene_keywords = self._semantic_service.get_scene_keywords("comparison") or []
+                if any(kw and kw in question for kw in scene_keywords):
+                    should_trigger = True
+                    logger.info(f"[ComparisonTrigger] 语义快照 keywords 触发: {scene_keywords}")
+            except Exception as e:
+                logger.warning(f"[ComparisonTrigger] 语义快照 keywords 查询失败: {e}")
+        # ============================================================
+
+        if should_trigger:
+            # 优先用 semantic service 的 recommend_actions
+            drilldown_opts = []
+            if self._semantic_service:
+                try:
+                    semantic_actions = self._semantic_service.recommend_actions("comparison", limit=4) or []
+                    if semantic_actions:
+                        drilldown_opts = semantic_actions
+                        logger.info(f"[ComparisonTrigger] 使用语义快照 actions: {drilldown_opts}")
+                except Exception as e:
+                    logger.warning(f"[ComparisonTrigger] 语义快照 recommend_actions 失败: {e}")
+            # Fallback 到硬编码
+            if not drilldown_opts:
+                drilldown_opts = [
+                    self._build_drilldown("📊 各维度排序", {"check": "dimension_rank"}),
+                    self._build_drilldown("🔍 Top/Bottom", {"check": "top_bottom"}),
+                ]
             return TriggerResult(
                 should_analyze=True,
                 trigger_type=TriggerType.COMPARISON,
                 trigger_reason="多维度对比分析",
                 priority=Priority.P2,
                 affected_dimensions=[],
-                drilldown_options=[
-                    self._build_drilldown("📊 各维度排序", {"check": "dimension_rank"}),
-                    self._build_drilldown("🔍 Top/Bottom", {"check": "top_bottom"}),
-                ]
+                drilldown_options=drilldown_opts
             )
 
         return TriggerResult(should_analyze=False)
@@ -543,6 +666,30 @@ class TriggerAnalyzer:
         ]
         self.template_loader = TemplateLoader(db_pool)
         self.switch_checker = TriggerSwitchChecker(db_pool)
+        self._semantic_service = None
+
+    def _get_semantic_service(self):
+        """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
+        if self._semantic_service is None:
+            from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
+            self._semantic_service = get_semantic_snapshot_service()
+        return self._semantic_service
+
+    def _merge_drilldown_options(self, primary: List[Dict], semantic: List[Dict]) -> List[Dict]:
+        """合并主要 drilldown_options 和语义快照返回的 options，去重"""
+        seen = set()
+        result = []
+        for opt in primary:
+            key = (opt.get("label", ""), opt.get("action", ""), str(opt.get("params", "")))
+            if key not in seen:
+                seen.add(key)
+                result.append(opt)
+        for opt in semantic:
+            key = (opt.get("label", ""), opt.get("action", ""), str(opt.get("params", "")))
+            if key not in seen:
+                seen.add(key)
+                result.append(opt)
+        return result
 
     async def check_triggers(self, mql, result: Dict, state=None) -> TriggerResult:
         """并行检查所有触发器，返回第一个命中的结果"""
@@ -617,19 +764,149 @@ class TriggerAnalyzer:
         breakdown = await self._translate_dimensions(breakdown)
         logger.info(f"[generate_output] after translate breakdown type={type(breakdown)}")
 
-        # 4. 构建 summary
-        summary = self._build_summary(trigger_result, breakdown, template)
-        logger.info(f"[generate_output] summary={summary[:50] if summary else 'N/A'}")
-
-        # 5. 构建 action_items
-        action_items = self._build_action_items(trigger_result, breakdown, template)
-        logger.info(f"[generate_output] action_items type={type(action_items)}, len={len(action_items) if isinstance(action_items, (list, tuple)) else 'N/A'}")
-
-        # 6. 提取 KPI
+        # 4. 提取 KPI（提前，以判断是否走 LLM）
         kpi = self._extract_kpi(result)
         logger.info(f"[generate_output] kpi type={type(kpi)}, keys={list(kpi.keys()) if isinstance(kpi, dict) else 'N/A'}")
 
-        logger.info(f"[generate_output] drilldown_options type={type(trigger_result.drilldown_options)}")
+        # 5. VolatilityTrigger + 有意义 KPI → 尝试 LLM 生成自然语言
+        summary = None
+        action_items = None
+        if trigger_result.trigger_type == TriggerType.VOLATILITY and (kpi.get('mom') is not None or kpi.get('yoy') is not None):
+            try:
+                # 获取指标名称
+                metric_name = ""
+                if hasattr(mql, 'metric') and mql.metric:
+                    metric_name = getattr(mql.metric, 'name', '') or getattr(mql.metric, 'code', '') or ''
+                elif hasattr(mql, 'name'):
+                    metric_name = mql.name
+
+                # 获取 business_summary（如果有）
+                business_summary = ""
+                if hasattr(mql, 'metric') and mql.metric:
+                    business_summary = getattr(mql.metric, 'business_summary', '') or ''
+
+                # 尝试从 prompt_configs 加载 LLM prompt
+                pm = get_prompt_manager()
+                prompt_config = pm.get_prompt_config("volatility_summary_llm")
+
+                if prompt_config and prompt_config.get("prompt_text"):
+                    logger.info(f"[generate_output] 使用 LLM 生成自然语言 summary，prompt_config={prompt_config.get('name')}")
+                    # 构建 breakdown 描述
+                    breakdown_desc = ""
+                    if breakdown:
+                        dim_parts = []
+                        for dim in breakdown[:3]:
+                            dim_parts.append(
+                                f"{dim.get('dimension', '')}({dim.get('change', dim.get('value', ''))})"
+                            )
+                        breakdown_desc = "，".join(dim_parts)
+
+                    # 构造用户 prompt
+                    user_prompt = f"""指标：{metric_name}，环比：{kpi.get('mom')}% ，同比：{kpi.get('yoy')}%
+主要拖累：{breakdown_desc if breakdown_desc else '无明显维度波动'}
+业务口径：{business_summary if business_summary else '无'}"""
+
+                    system_prompt = prompt_config["prompt_text"]
+                    llm_engine = get_llm_engine_for_analysis()
+                    llm_result = await llm_engine.generate(
+                        prompt=user_prompt,
+                        temperature=0.7,
+                        max_tokens=800,
+                        system_prompt=system_prompt
+                    )
+                    logger.info(f"[generate_output] LLM result={llm_result[:200] if llm_result else 'N/A'}")
+
+                    # 解析 LLM 响应：优先 JSON，次选纯文本
+                    try:
+                        parsed = json.loads(llm_result)
+                        summary = parsed.get("summary", "")
+                        raw_items = parsed.get("action_items", [])
+                        if isinstance(raw_items, list):
+                            action_items = []
+                            for item in raw_items:
+                                if isinstance(item, dict):
+                                    action_items.append({
+                                        "text": item.get("text", item.get("suggestion", "")),
+                                        "type": item.get("type", "normal")
+                                    })
+                                else:
+                                    action_items.append({"text": str(item), "type": "normal"})
+                        else:
+                            action_items = [{"text": summary, "type": "normal"}]
+                    except (json.JSONDecodeError, ValueError):
+                        # 非 JSON 格式，整段作为 summary
+                        summary = llm_result.strip()
+                        action_items = [{"text": "建议关注该指标变化", "type": "normal"}]
+
+                    logger.info(f"[generate_output] LLM 生成成功，summary={summary[:80] if summary else 'N/A'}")
+                else:
+                    logger.info(f"[generate_output] 未配置 volatility_summary_llm prompt，使用模板")
+            except Exception as e:
+                logger.warning(f"[generate_output] LLM 生成失败: {e}，回退到模板")
+                summary = None
+                action_items = None
+
+        # 6. 模板 fallback
+        if summary is None:
+            summary = self._build_summary(trigger_result, breakdown, template)
+            logger.info(f"[generate_output] summary={summary[:50] if summary else 'N/A'}")
+
+        # 7. 优先从语义快照获取 action_items（scene_type 映射到 trigger_type）
+        if action_items is None:
+            scene_type_map = {
+                TriggerType.VOLATILITY: "volatility",
+                TriggerType.COMPARISON: "comparison",
+                TriggerType.AD_EFFECT: "ad_effect",
+                TriggerType.INVENTORY_RISK: "inventory_risk",
+                TriggerType.GENERIC_QUERY: "generic_query",
+                TriggerType.CONTEXT_FOLLOWUP: "context_followup",
+            }
+            scene_type = scene_type_map.get(trigger_result.trigger_type, "generic_query")
+            semantic_svc = self._get_semantic_service()
+            if semantic_svc:
+                snapshot_actions = semantic_svc.recommend_actions(scene_type, limit=4)
+                if snapshot_actions:
+                    logger.info(f"[generate_output] 从语义快照获取 action_items: {snapshot_actions}")
+                    action_items = [{"text": a.get("label", ""), "type": "normal"} for a in snapshot_actions if a.get("label")]
+            if action_items is None:
+                action_items = self._build_action_items(trigger_result, breakdown, template)
+                logger.info(f"[generate_output] action_items type={type(action_items)}, len={len(action_items) if isinstance(action_items, (list, tuple)) else 'N/A'}")
+
+        # 8. 优先从语义快照获取 drilldown_options（与 trigger 的 primary options 合并）
+        scene_type_map = {
+            TriggerType.VOLATILITY: "volatility",
+            TriggerType.COMPARISON: "comparison",
+            TriggerType.AD_EFFECT: "ad_effect",
+            TriggerType.INVENTORY_RISK: "inventory_risk",
+            TriggerType.GENERIC_QUERY: "generic_query",
+            TriggerType.CONTEXT_FOLLOWUP: "context_followup",
+        }
+        scene_type = scene_type_map.get(trigger_result.trigger_type, "generic_query")
+        primary_drilldowns = trigger_result.drilldown_options or []
+        semantic_drilldowns = []
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            # 优先用 recommend_actions 获取 drilldown_options
+            snapshot_actions = semantic_svc.recommend_actions(scene_type, limit=4) or []
+            if snapshot_actions:
+                semantic_drilldowns = snapshot_actions
+                logger.info(f"[generate_output] 从语义快照 recommend_actions 获取 drilldown_options: {semantic_drilldowns}")
+            else:
+                # 次选 get_scene_drilldown_categories
+                snapshot_drilldowns = semantic_svc.get_scene_drilldown_categories(scene_type)
+                if snapshot_drilldowns:
+                    for cat, sub_cats in snapshot_drilldowns.items():
+                        for sub_cat in sub_cats[:5]:
+                            semantic_drilldowns.append({
+                                "label": f"按{cat}/{sub_cat}",
+                                "action": "drilldown",
+                                "params": {"category": cat, "sub_category": sub_cat},
+                            })
+                    logger.info(f"[generate_output] 从语义快照 get_scene_drilldown_categories 获取 drilldown_options: {semantic_drilldowns}")
+        # 合并 primary 和 semantic（去重）
+        drilldown_options = self._merge_drilldown_options(primary_drilldowns, semantic_drilldowns)
+
+        logger.info(f"[generate_output] drilldown_options type={type(drilldown_options)}")
 
         try:
             output = AnalysisOutput(
@@ -638,7 +915,7 @@ class TriggerAnalyzer:
                 kpi=kpi,
                 breakdown=breakdown,
                 action_items=action_items,
-                drilldown_options=trigger_result.drilldown_options
+                drilldown_options=drilldown_options
             )
             logger.info(f"[generate_output] SUCCESS, created AnalysisOutput")
             return output

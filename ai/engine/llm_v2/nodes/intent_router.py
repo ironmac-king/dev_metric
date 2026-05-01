@@ -105,6 +105,14 @@ class IntentRouter:
         self._dimension_type_mappings = None
         self._local_model = None  # 本地模型延迟加载
         self._dimension_service = None  # 维度服务延迟加载
+        self._semantic_service = None  # 语义快照服务延迟加载
+
+    def _get_semantic_service(self):
+        """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
+        if self._semantic_service is None:
+            from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
+            self._semantic_service = get_semantic_snapshot_service()
+        return self._semantic_service
 
     def _get_dimension_service(self):
         """延迟加载维度服务"""
@@ -151,6 +159,15 @@ class IntentRouter:
 
     def _get_ranking_dimension_options(self) -> List[Dict[str, str]]:
         """获取排名追问的维度选项（从配置动态加载）"""
+        # ========== 优先用语义快照服务获取维度选项 ==========
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            options = semantic_svc.list_dimension_options()
+            if options:
+                logger.info(f"[IntentRouter] 从快照获取排名维度选项: {options}")
+                return options
+        # ====================================================
+
         self._load_dimension_mappings()
         if self._dimension_type_mappings:
             # 排除时间粒度类型，只保留业务维度
@@ -364,17 +381,26 @@ class IntentRouter:
         generic_types = {"CATEGORY", "品类", "类目", "商品类", "产品类"}
 
         dim_service = self._get_dimension_service()
-        if not dim_service:
-            return mql
+        semantic_svc = self._get_semantic_service()
 
         # 从问题中提取所有候选维度值（包含维度类型，已在 _extract_dimension_candidates 中从维表动态获取）
-        candidates = self._extract_dimension_candidates(question, "", dim_service)
+        candidates = self._extract_dimension_candidates(question, "", dim_service, semantic_svc)
 
         logger.info(f"[_validate_generic_dimensions] 提取到的候选维度值: {candidates}")
 
         for candidate in candidates:
-            # ========== 新增：优先检查候选词是否是已知维度类型 ==========
+            # ========== 优先用语义快照服务解析维度类型 ==========
             # 已知维度类型：一级品类/二级品类/三级品类/四级品类/品牌/平台/店铺等
+            if semantic_svc:
+                col_from_type = semantic_svc.find_dimension_column_by_type(candidate)
+                if col_from_type:
+                    logger.info(f"[_validate_generic_dimensions] 快照解析候选 '{candidate}' 是已知维度类型 -> column={col_from_type}，直接设置")
+                    for dim in mql.dimensions:
+                        if not dim.column or not dim.type:
+                            dim.type = candidate
+                            dim.column = col_from_type
+                    return mql
+            # 快照解析失败，继续用 dim_service
             if dim_service:
                 col_from_type = dim_service.find_column_by_type(candidate)
                 if col_from_type:
@@ -383,13 +409,29 @@ class IntentRouter:
                         if not dim.column or not dim.type:
                             dim.type = candidate
                             dim.column = col_from_type
-                            # value 保持为空，表示这是按该维度聚合
-                    # 不需要追问，直接返回
+                    return mql
+            # ============================================================
+
+            # ========== 优先用语义快照服务解析维度值 ==========
+            resolved = semantic_svc.resolve_dimension(candidate) if semantic_svc else None
+            if resolved:
+                correct_type = resolved.get("dimension_type")
+                correct_value = resolved.get("dimension_value")
+                correct_column = resolved.get("column_name")
+                is_generic = resolved.get("is_generic", False)
+                if not is_generic and correct_column:
+                    logger.info(f"[_validate_generic_dimensions] 快照纠正维度: '{candidate}' -> type={correct_type}, column={correct_column}, value={correct_value}")
+                    for dim in mql.dimensions:
+                        dim_type_upper = dim.type.upper() if dim.type else ""
+                        if dim_type_upper in generic_types or (dim.type and dim.type != correct_type and dim.type != correct_column):
+                            dim.type = correct_type
+                            dim.column = correct_column
+                            dim.value = correct_value
                     return mql
             # ============================================================
 
             # 查 dim_value_mapping（limit=10 返回多个结果用于判断模糊度）
-            search_results = dim_service.search_by_value(candidate, limit=10)
+            search_results = dim_service.search_by_value(candidate, limit=10) if dim_service else []
             if not search_results:
                 logger.info(f"[_validate_generic_dimensions] 候选 '{candidate}' 在 dim_value_mapping 中无结果")
                 continue
@@ -440,7 +482,7 @@ class IntentRouter:
 
         return mql
 
-    def _extract_dimension_candidates(self, question: str, dim_type: str, dim_service) -> List[str]:
+    def _extract_dimension_candidates(self, question: str, dim_type: str, dim_service, semantic_svc=None) -> List[str]:
         """
         从问题中提取候选维度值。
         例如："智能云存储今年业绩" + dim_type="品类"
@@ -451,13 +493,17 @@ class IntentRouter:
         import re
         candidates = []
 
-        # 0. 从维表获取所有维度类型，检查问题中是否包含（这是动态的，不是硬编码）
-        if dim_service:
+        # 0. 从维表/语义快照获取所有维度类型，检查问题中是否包含（这是动态的，不是硬编码）
+        # 优先用语义快照服务
+        all_types = []
+        if semantic_svc:
+            all_types = semantic_svc.get_all_types()
+        if not all_types and dim_service:
             all_types = dim_service.get_all_types()
-            for type_info in all_types:
-                dim_type_str = type_info.get("dimension_type", "")
-                if dim_type_str and dim_type_str in question and dim_type_str not in candidates:
-                    candidates.append(dim_type_str)
+        for type_info in all_types:
+            dim_type_str = type_info.get("dimension_type", "")
+            if dim_type_str and dim_type_str in question and dim_type_str not in candidates:
+                candidates.append(dim_type_str)
 
         # 1. 检查 "X的品类/Y" 模式：X 是维度值
         category_words = ['品类', '类目', '商品类', '产品类']
@@ -863,13 +909,26 @@ class IntentRouter:
                     dim_code = dim_label_to_code[upper_candidate]
                 elif candidate in dim_label_to_code:
                     dim_code = dim_label_to_code[candidate]
-                elif dim_service:
-                    dim_code = dim_service.find_column_by_type(candidate) or ""
-                    if not dim_code:
-                        dim_info = dim_service.find_dimension_info(candidate)
-                        if dim_info and dim_info.get("is_generic"):
-                            dim_code = dim_info.get("column_name", "") or ""
-                            dim_label = dim_info.get("dimension_type", candidate)
+                else:
+                    # ========== 优先用语义快照服务解析 ==========
+                    semantic_svc = self._get_semantic_service()
+                    if semantic_svc:
+                        resolved_dim = semantic_svc.resolve_dimension(candidate)
+                        if resolved_dim:
+                            dim_code = resolved_dim.get("column_name", "") or ""
+                            dim_label = resolved_dim.get("dimension_type", candidate)
+                            is_generic = resolved_dim.get("is_generic", False)
+                            if is_generic and dim_code:
+                                # 泛指类型（如"店铺"），label 用 dimension_type
+                                pass
+                    # ============================================
+                    if not dim_code and dim_service:
+                        dim_code = dim_service.find_column_by_type(candidate) or ""
+                        if not dim_code:
+                            dim_info = dim_service.find_dimension_info(candidate)
+                            if dim_info and dim_info.get("is_generic"):
+                                dim_code = dim_info.get("column_name", "") or ""
+                                dim_label = dim_info.get("dimension_type", candidate)
 
                 if not dim_code or dim_code in seen_codes:
                     continue
@@ -1062,34 +1121,40 @@ class IntentRouter:
             # 先检查所有 METRIC 实体是否可能是 business_terms 维度值同义词
             # 例如"美国站"被识别为 METRIC，但实际上是维度值
             dim_service = self._get_dimension_service()
+            semantic_svc = self._get_semantic_service()
             real_metric_entities = []
             seen_dims_local = set()  # 去重
-            if dim_service:
-                for me in metric_entities:
-                    metric_text = me['text']
+            for me in metric_entities:
+                metric_text = me['text']
+                dim_info = None
+                # ========== 优先用语义快照服务解析 ==========
+                if semantic_svc:
+                    resolved = semantic_svc.resolve_dimension(metric_text)
+                    if resolved and not resolved.get('is_generic'):
+                        dim_info = resolved
+                # 快照解析失败，用 dim_service 兜底
+                if not dim_info and dim_service:
                     dim_info = dim_service.find_dimension_info(metric_text)
-                    # 如果 find_dimension_info 返回了结果且不是泛指，说明它更可能是维度值而不是指标
-                    if dim_info and not dim_info.get('is_generic'):
-                        # 去重
-                        dim_type = dim_info.get('dimension_type', '')
-                        dim_val = dim_info.get('dimension_value', metric_text)
-                        dim_key = (dim_type, dim_val)
-                        if dim_key in seen_dims_local:
-                            logger.warning(f"[IntentRouter] 维度同义词重复，跳过: {dim_info}")
-                            continue
-                        seen_dims_local.add(dim_key)
-                        # 这是维度值同义词，添加到 dimensions 而不是 metrics
-                        mql.dimensions.append(MQLDimension(
-                            type=dim_type,
-                            column=dim_info.get('column_name', ''),
-                            field="",
-                            value=dim_val,
-                        ))
-                        logger.info(f"[IntentRouter] METRIC实体'{metric_text}'实为维度值同义词，转换: {dim_info}")
-                    else:
-                        real_metric_entities.append(me)
-            else:
-                real_metric_entities = metric_entities
+                # ============================================
+                if dim_info and not dim_info.get('is_generic'):
+                    # 去重
+                    dim_type = dim_info.get('dimension_type', '')
+                    dim_val = dim_info.get('dimension_value', metric_text)
+                    dim_key = (dim_type, dim_val)
+                    if dim_key in seen_dims_local:
+                        logger.warning(f"[IntentRouter] 维度同义词重复，跳过: {dim_info}")
+                        continue
+                    seen_dims_local.add(dim_key)
+                    # 这是维度值同义词，添加到 dimensions 而不是 metrics
+                    mql.dimensions.append(MQLDimension(
+                        type=dim_type,
+                        column=dim_info.get('column_name', ''),
+                        field="",
+                        value=dim_val,
+                    ))
+                    logger.info(f"[IntentRouter] METRIC实体'{metric_text}'实为维度值同义词，转换: {dim_info}")
+                else:
+                    real_metric_entities.append(me)
 
             # 用过滤后的实体来处理指标
             metric_entities = real_metric_entities
