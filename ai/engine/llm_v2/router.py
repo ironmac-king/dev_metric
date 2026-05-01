@@ -20,6 +20,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ai.config.logging_config import get_logger
+from ai.config.runtime import get_go_api_base
+from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
 from .schema import V2State, MQLSchema, create_v2_state
 from .graph import get_v2_graph
 from .streaming import (
@@ -39,6 +41,14 @@ v2_session_mql: Dict[str, MQLSchema] = {}
 
 # Go 后端日志 API 地址
 GO_ASK_ANALYSIS_LOG_URL = "http://localhost:8080/api/v1/internal/ask-analysis/logs/v2"
+
+
+def _refresh_semantic_snapshot_for_request() -> None:
+    service = get_semantic_snapshot_service()
+    try:
+        service.get_active_snapshot(force_refresh=True)
+    except Exception as exc:
+        logger.warning(f"[V2 Semantic] refresh failed: {exc}")
 
 
 async def _send_log_to_go(
@@ -255,6 +265,7 @@ async def ask_question_v2(req: AskRequestV2):
     tracker = get_performance_tracker()
 
     try:
+        _refresh_semantic_snapshot_for_request()
         # 1. 初始化 V2State
         state = create_v2_state(
             session_id=session_id,
@@ -485,6 +496,8 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 "session_id": session_id,
                 "question": req.question,
             }).to_sse()
+
+            _refresh_semantic_snapshot_for_request()
 
             # 初始化状态
             state = create_v2_state(
