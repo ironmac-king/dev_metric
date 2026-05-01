@@ -793,7 +793,6 @@ func SaveMessage(c *gin.Context) {
 		Breadcrumbs     string `json:"breadcrumbs"`
 		MetricCode      string `json:"metric_code"`
 		ThinkingSteps   string `json:"thinking_steps"` // 思考过程
-		ExtraData       string `json:"extra_data"`      // V2完整消息额外数据
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -816,7 +815,6 @@ func SaveMessage(c *gin.Context) {
 		Breadcrumbs:     req.Breadcrumbs,
 		MetricCode:      req.MetricCode,
 		ThinkingSteps:   req.ThinkingSteps,
-		ExtraData:       req.ExtraData,
 	}
 
 	// 同步写 Redis（7天过期）
@@ -848,7 +846,6 @@ func SaveV2SessionInternal(c *gin.Context) {
 		ResultData        string `json:"result_data"`
 		ComparisonResults string `json:"comparison_results"`
 		ThinkingSteps     string `json:"thinking_steps"`
-		ExtraData         string `json:"extra_data"`
 		MetricCode        string `json:"metric_code"`
 	}
 
@@ -889,7 +886,6 @@ func SaveV2SessionInternal(c *gin.Context) {
 		ResultData:         req.ResultData,
 		ComparisonResults:  req.ComparisonResults,
 		ThinkingSteps:      req.ThinkingSteps,
-		ExtraData:          req.ExtraData,
 		MetricCode:         req.MetricCode,
 	}
 
@@ -953,7 +949,6 @@ func GetMessages(c *gin.Context) {
 				"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 				"metric_code":         msg.MetricCode,
 				"thinking_steps":      decodeJSON(msg.ThinkingSteps),
-				"extra_data":          decodeJSON(msg.ExtraData),
 			}
 		}
 		response.Success(c, gin.H{"messages": result, "source": "redis"})
@@ -986,7 +981,6 @@ func GetMessages(c *gin.Context) {
 			"breadcrumbs":         decodeJSON(msg.Breadcrumbs),
 			"metric_code":         msg.MetricCode,
 			"thinking_steps":      decodeJSON(msg.ThinkingSteps),
-			"extra_data":          decodeJSON(msg.ExtraData),
 		}
 	}
 	response.Success(c, gin.H{"messages": result, "source": "db"})
