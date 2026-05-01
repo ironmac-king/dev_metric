@@ -1,0 +1,1 @@
+UPDATE sql_templates SET metric_names = '["销售额", "总订单数", "订单量", "B2B订单量", "总销量", "退款量", "国内收入", "跨境收入", "销售额_mom_rate", "订单量_mom_rate", "销售额_yoy_rate", "订单量_yoy_rate"]'::jsonb WHERE id = 13;
