@@ -208,3 +208,201 @@ class TestSQLGeneratorDimensionFiltering:
         assert "WHERE" in sql
         assert "GROUP_1" in sql
         assert "电子产品" in sql  # 值被正确引用
+
+
+# ============================================================
+# 新增测试：覆盖重构后的各模块
+# ============================================================
+
+class TestSQLSecurityModule:
+    """ai.sql_gen.security 统一安全校验模块"""
+
+    def test_validate_sql_blocks_drop(self):
+        from ai.sql_gen.security import validate_sql
+        assert not validate_sql("DROP TABLE users")
+
+    def test_validate_sql_blocks_delete(self):
+        from ai.sql_gen.security import validate_sql
+        assert not validate_sql("DELETE FROM metrics WHERE id=1")
+
+    def test_validate_sql_blocks_advanced_injection(self):
+        from ai.sql_gen.security import validate_sql
+        assert not validate_sql("SELECT 1; EXEC sp_executesql 'SELECT 1'")
+        assert not validate_sql("SELECT * FROM t; xp_cmdshell 'whoami'")
+        assert not validate_sql("SELECT OPENROWSET(...)")
+
+    def test_validate_sql_allows_select(self):
+        from ai.sql_gen.security import validate_sql
+        assert validate_sql("SELECT SUM(SALES) FROM ids.TABLE WHERE FDATE >= '2026-01-01'")
+
+    def test_validate_sql_strips_comments_before_check(self):
+        from ai.sql_gen.security import validate_sql
+        # 注释包裹不能绕过检测
+        assert not validate_sql("SELECT 1 /* DROP TABLE x */")
+        assert not validate_sql("SELECT 1 -- DELETE FROM x\n")
+
+    def test_validate_sql_handles_quoted_strings(self):
+        from ai.sql_gen.security import validate_sql
+        # 字符串字面量中的关键字不应触发告警
+        assert validate_sql("SELECT * FROM t WHERE name = 'drop shipment'")
+
+    def test_validate_data_filter_delegates(self):
+        from ai.sql_gen.security import validate_data_filter
+        assert validate_data_filter("site = 'US'")
+        assert not validate_data_filter("site = 'US'; DROP TABLE t;")
+
+
+class TestSQLCacheTTL:
+    """cache.py 基于 TTLCache 的有界缓存"""
+
+    def test_set_and_get(self):
+        from ai.sql_gen.cache import SQLCache
+        c = SQLCache(max_size=100, ttl_seconds=60)
+        c.set("SELECT 1", {"rows": []})
+        assert c.get("SELECT 1") == {"rows": []}
+
+    def test_miss_returns_none(self):
+        from ai.sql_gen.cache import SQLCache
+        c = SQLCache(max_size=100, ttl_seconds=60)
+        assert c.get("SELECT 999") is None
+
+    def test_size_bounded(self):
+        from ai.sql_gen.cache import SQLCache
+        c = SQLCache(max_size=3, ttl_seconds=60)
+        for i in range(10):
+            c.set(f"SELECT {i}", i)
+        assert c.size() <= 3
+
+    def test_clear(self):
+        from ai.sql_gen.cache import SQLCache
+        c = SQLCache(max_size=100, ttl_seconds=60)
+        c.set("SELECT 1", 1)
+        c.clear()
+        assert c.size() == 0
+
+
+class TestParseRelativeTime:
+    """_parse_relative_time() 使用 TimeParser 后的行为验证"""
+
+    @pytest.fixture
+    def generator(self):
+        return SQLGeneratorNode()
+
+    def test_returns_sql_condition(self, generator):
+        result = generator._parse_relative_time("本月")
+        assert "FDATE >=" in result
+        assert "FDATE <=" in result
+
+    def test_today(self, generator):
+        result = generator._parse_relative_time("今天")
+        assert "FDATE >=" in result
+        assert "FDATE <=" in result
+        # 今天的 start == end
+        import re
+        dates = re.findall(r"'\d{4}-\d{2}-\d{2}'", result)
+        assert len(dates) == 2
+        assert dates[0] == dates[1]
+
+    def test_last_month(self, generator):
+        result = generator._parse_relative_time("上月")
+        assert "FDATE >=" in result
+        assert "FDATE <=" in result
+
+    def test_relative_n_days(self, generator):
+        result = generator._parse_relative_time("近30天")
+        assert "FDATE >=" in result
+
+    def test_updates_mql_time(self, generator):
+        mql = MQLSchema()
+        mql.time = TimeRange(type=TimeType.RELATIVE, original="近7天")
+        generator._parse_relative_time("近7天", mql=mql)
+        assert mql.time.start is not None
+        assert mql.time.end is not None
+
+    def test_fallback_on_unknown_expr(self, generator):
+        # 无法识别的表达式降级为本月，不抛异常
+        result = generator._parse_relative_time("某个奇怪的时间表达式xyz")
+        assert "FDATE >=" in result
+
+
+class TestDeduplicateDimensions:
+    """_deduplicate_dimensions() 静态方法"""
+
+    def test_removes_exact_duplicates(self):
+        dims = [
+            MQLDimension(type="GROUP_1", value="A"),
+            MQLDimension(type="GROUP_1", value="A"),
+            MQLDimension(type="GROUP_2", value=None),
+        ]
+        result = SQLGeneratorNode._deduplicate_dimensions(dims)
+        assert len(result) == 2
+
+    def test_preserves_order(self):
+        dims = [
+            MQLDimension(type="GROUP_1", value=None),
+            MQLDimension(type="GROUP_2", value=None),
+        ]
+        result = SQLGeneratorNode._deduplicate_dimensions(dims)
+        assert result[0].type == "GROUP_1"
+        assert result[1].type == "GROUP_2"
+
+    def test_empty_list(self):
+        assert SQLGeneratorNode._deduplicate_dimensions([]) == []
+
+
+class TestBuildComparisonPeriodWhere:
+    """_build_comparison_period_where() 独立测试"""
+
+    @pytest.fixture
+    def generator(self):
+        return SQLGeneratorNode()
+
+    def test_returns_time_cond_without_filters(self, generator):
+        mql = MQLSchema()
+        result = generator._build_comparison_period_where("2025-04-01", "2025-04-30", mql)
+        assert "FDATE >= '2025-04-01'" in result
+        assert "FDATE <= '2025-04-30'" in result
+
+    def test_returns_empty_string_for_empty_dates(self, generator):
+        mql = MQLSchema()
+        assert generator._build_comparison_period_where("", "", mql) == ""
+        assert generator._build_comparison_period_where(None, None, mql) == ""
+
+    def test_includes_dimension_filter(self, generator):
+        mql = MQLSchema()
+        mql.dimensions = [MQLDimension(type="GROUP_1", value="电子产品")]
+        result = generator._build_comparison_period_where("2025-04-01", "2025-04-30", mql)
+        assert "GROUP_1" in result
+        assert "电子产品" in result
+
+
+class TestApplyDataFilter:
+    """generator.py apply_data_filter() 修复后的行为"""
+
+    @pytest.fixture
+    def generator(self):
+        from ai.sql_gen.generator import SQLGenerator
+        return SQLGenerator.__new__(SQLGenerator)
+
+    def test_adds_dept_id_to_existing_where(self, generator):
+        sql = "SELECT * FROM t WHERE FDATE >= '2026-01-01'"
+        result = generator.apply_data_filter(sql, dept_id=5)
+        assert "dept_id = 5" in result
+        assert result.count("WHERE") == 1  # 不产生双 WHERE
+
+    def test_adds_dept_id_without_where(self, generator):
+        sql = "SELECT * FROM t"
+        result = generator.apply_data_filter(sql, dept_id=5)
+        assert "WHERE dept_id = 5" in result
+        assert result.count("WHERE") == 1
+
+    def test_blocks_dangerous_data_filter(self, generator):
+        sql = "SELECT * FROM t WHERE FDATE >= '2026-01-01'"
+        result = generator.apply_data_filter(sql, data_filter="site = 'US'; DROP TABLE t")
+        # 危险 filter 被忽略，SQL 原样返回
+        assert result == sql
+
+    def test_safe_data_filter_appended(self, generator):
+        sql = "SELECT * FROM t WHERE FDATE >= '2026-01-01'"
+        result = generator.apply_data_filter(sql, data_filter="site = 'US'")
+        assert "(site = 'US')" in result

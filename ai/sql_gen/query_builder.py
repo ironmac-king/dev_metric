@@ -1,6 +1,7 @@
 """
 QueryBuilder - JSON → SQL 的确定性转换器
-用于智能问数的 SQL 生成层重构
+职责：钻取下钻 API（/api/v1/drill-down）专用，被 ai/main.py drill_down_question 调用。
+LangGraph 主问数流程使用 ai/engine/llm_v2/nodes/sql_generator.py（SQLGeneratorNode）。
 """
 import re
 from typing import Dict, Any, List, Optional

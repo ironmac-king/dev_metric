@@ -365,6 +365,53 @@ LIMIT 20
         logger.info(f"[_build_cross_metric_sql] SQL: {sql[:300]}")
         return sql
 
+    @staticmethod
+    def _deduplicate_dimensions(dimensions: list) -> list:
+        """去除 dimensions 中 (type, value) 相同的重复项"""
+        seen: set = set()
+        result = []
+        for dim in dimensions:
+            key = (dim.type, dim.value)
+            if key not in seen:
+                seen.add(key)
+                result.append(dim)
+        return result
+
+    def _build_comparison_period_where(self, start: str, end: str, mql: MQLSchema) -> str:
+        """构建对比周期 WHERE 条件（时间 + mql.filters + mql.dimensions 过滤）"""
+        if not start or not end:
+            return ""
+        filter_parts = []
+        for f in mql.filters:
+            if f.field and f.value is not None:
+                op = f.operator.value if hasattr(f.operator, 'value') else f.operator
+                safe_field = self._validate_field_name(f.field)
+                if op == "eq":
+                    filter_parts.append(f"{safe_field} = '{self._sanitize_value(f.value)}'")
+                elif op == "gt":
+                    filter_parts.append(f"{safe_field} > '{self._sanitize_value(f.value)}'")
+                elif op == "lt":
+                    filter_parts.append(f"{safe_field} < '{self._sanitize_value(f.value)}'")
+                elif op == "in":
+                    values = f.value if isinstance(f.value, list) else [f.value]
+                    safe_values = "', '".join([self._sanitize_value(v) for v in values])
+                    filter_parts.append(f"{safe_field} IN ('{safe_values}')")
+                elif op == "between":
+                    if isinstance(f.value, list) and len(f.value) == 2:
+                        filter_parts.append(f"{safe_field} BETWEEN '{self._sanitize_value(f.value[0])}' AND '{self._sanitize_value(f.value[1])}'")
+        dim_filter_parts = []
+        for dim in mql.dimensions:
+            if dim.value:
+                col = dim.column or self._get_dimension_column(dim.type)
+                if col:
+                    safe_col = self._validate_field_name(col)
+                    dim_filter_parts.append(f"{safe_col} = '{self._sanitize_value(dim.value)}'")
+        time_cond = f"(FDATE >= '{start}' AND FDATE <= '{end}')"
+        all_parts = filter_parts + dim_filter_parts
+        if all_parts:
+            return f"({time_cond} AND {' AND '.join(all_parts)})"
+        return time_cond
+
     def _build_mom_sql(self, mql: MQLSchema) -> str:
         """构建 MoM/YOY 对比 SQL
 
@@ -373,14 +420,7 @@ LIMIT 20
         logger.info(f"[_build_mom_sql] Building MoM/YOY SQL")
 
         # 0. 去除 mql.dimensions 中的重复项（相同 type + value 只保留一个）
-        seen_dims = set()
-        unique_dimensions = []
-        for dim in mql.dimensions:
-            dim_key = (dim.type, dim.value)
-            if dim_key not in seen_dims:
-                seen_dims.add(dim_key)
-                unique_dimensions.append(dim)
-        mql.dimensions = unique_dimensions
+        mql.dimensions = self._deduplicate_dimensions(mql.dimensions)
         logger.info(f"[_build_mom_sql] 去重后维度: {[(d.type, d.value) for d in mql.dimensions]}")
 
         # 1. 获取业务维度列（不包括 YEARS, MONTHS）
@@ -523,49 +563,9 @@ LIMIT 20
         # 6. 构建 MoM 和 YoY 对比周期条件
         # 注意：where_mom 和 where_yoy 必须包含与 current_where 相同的 filters 和 dimensions，否则对比基数不一致
 
-        def _build_compare_where(start: str, end: str) -> str:
-            """构建对比周期条件（包含时间+filters+dimensions）"""
-            if not start or not end:
-                return ""
-            # 从 mql.filters 构建过滤条件
-            filter_parts = []
-            for f in mql.filters:
-                if f.field and f.value is not None:
-                    op = f.operator.value if hasattr(f.operator, 'value') else f.operator
-                    safe_field = self._validate_field_name(f.field)
-                    if op == "eq":
-                        filter_parts.append(f"{safe_field} = '{self._sanitize_value(f.value)}'")
-                    elif op == "gt":
-                        filter_parts.append(f"{safe_field} > '{self._sanitize_value(f.value)}'")
-                    elif op == "lt":
-                        filter_parts.append(f"{safe_field} < '{self._sanitize_value(f.value)}'")
-                    elif op == "in":
-                        values = f.value if isinstance(f.value, list) else [f.value]
-                        safe_values = "', '".join([self._sanitize_value(v) for v in values])
-                        filter_parts.append(f"{safe_field} IN ('{safe_values}')")
-                    elif op == "between":
-                        if isinstance(f.value, list) and len(f.value) == 2:
-                            filter_parts.append(f"{safe_field} BETWEEN '{self._sanitize_value(f.value[0])}' AND '{self._sanitize_value(f.value[1])}'")
-            # 维度过滤
-            dim_filter_parts = []
-            for dim in mql.dimensions:
-                if dim.value:
-                    col = dim.column
-                    if not col:
-                        col = self._get_dimension_column(dim.type)
-                    if col:
-                        safe_col = self._validate_field_name(col)
-                        dim_filter_parts.append(f"{safe_col} = '{self._sanitize_value(dim.value)}'")
-            time_cond = f"(FDATE >= '{start}' AND FDATE <= '{end}')"
-            all_filter_parts = filter_parts + dim_filter_parts
-            if all_filter_parts:
-                filter_cond = " AND ".join(all_filter_parts)
-                return f"({time_cond} AND {filter_cond})"
-            return time_cond
-
         # 构建 MoM 和 YoY 的对比条件
-        where_mom = _build_compare_where(mom_start, mom_end) if mom_start and mom_end else ""
-        where_yoy = _build_compare_where(yoy_start, yoy_end) if yoy_start and yoy_end else ""
+        where_mom = self._build_comparison_period_where(mom_start, mom_end, mql) if mom_start and mom_end else ""
+        where_yoy = self._build_comparison_period_where(yoy_start, yoy_end, mql) if yoy_start and yoy_end else ""
 
         has_mom_compare = bool(where_mom)
         has_yoy_compare = bool(where_yoy)
@@ -1075,352 +1075,28 @@ LIMIT 20
         return ""
 
     def _parse_relative_time(self, original: str, mql=None) -> str:
-        """解析相对时间表达式，同时设置 mql.time.start/end 供前端显示"""
-        import re
-        from datetime import datetime, timedelta
-        from calendar import monthrange
+        """解析相对时间表达式，返回 SQL 时间条件，并同步更新 mql.time.start/end"""
+        from ai.engine.time_parser import TimeParser
+        from datetime import datetime
 
         logger.info(f"[_parse_relative_time] 收到时间表达式: '{original}'")
 
-        today = datetime.now()
+        result = TimeParser().parse(original)
+        if result and result.get('start') and result.get('end'):
+            start, end = result['start'], result['end']
+        else:
+            # 无法解析，默认本月
+            today = datetime.now()
+            start = f"{today.year}-{today.month:02d}-01"
+            end = today.strftime("%Y-%m-%d")
+            logger.warning(f"[_parse_relative_time] 无法解析 '{original}'，降级为本月: {start}~{end}")
 
-        # 用于设置 mql.time.start/end
-        computed_start = None
-        computed_end = None
+        if mql and hasattr(mql, 'time') and mql.time:
+            mql.time.start = start
+            mql.time.end = end
+            logger.info(f"[_parse_relative_time] 已设置 mql.time: {start}~{end}")
 
-        def set_date_range(start_date, end_date):
-            """设置 mql.time.start/end（如果提供了 mql）"""
-            nonlocal computed_start, computed_end
-            computed_start = start_date.strftime("%Y-%m-%d") if isinstance(start_date, datetime) else str(start_date)
-            computed_end = end_date.strftime("%Y-%m-%d") if isinstance(end_date, datetime) else str(end_date)
-            logger.info(f"[set_date_range] Setting time: start={computed_start}, end={computed_end}, mql has time: {mql and hasattr(mql, 'time')}")
-            if mql and hasattr(mql, 'time'):
-                mql.time.start = computed_start
-                mql.time.end = computed_end
-                logger.info(f"[set_date_range] After setting, mql.time.start={mql.time.start}, mql.time.end={mql.time.end}")
-
-        def get_date_range_sql(start_date, end_date):
-            """返回 SQL 字符串并设置 computed_start/end"""
-            set_date_range(start_date, end_date)
-            return f"{self.COL_DATE} >= '{computed_start}' AND {self.COL_DATE} <= '{computed_end}'"
-
-        # ===== 辅助函数 =====
-        def get_month_start(year, month):
-            return datetime(year, month, 1)
-
-        def get_month_end(year, month):
-            _, last_day = monthrange(year, month)
-            return datetime(year, month, last_day)
-
-        def get_quarter_start(year, quarter):
-            month = (quarter - 1) * 3 + 1
-            return datetime(year, month, 1)
-
-        def get_quarter_end(year, quarter):
-            month = quarter * 3
-            _, last_day = monthrange(year, month)
-            return datetime(year, month, last_day)
-
-        # ===== 本周/上周/下周的基准计算 =====
-        days_since_monday = today.weekday()
-        this_monday = today - timedelta(days=days_since_monday)
-        this_sunday = this_monday + timedelta(days=6)
-
-        # ===== 今日/昨天/明天系列 =====
-        # 今日/今天
-        if "今日" in original or "今天" in original:
-            return get_date_range_sql(today, today)
-
-        # 昨日/昨天
-        if "昨日" in original or "昨天" in original:
-            yesterday = today - timedelta(days=1)
-            return get_date_range_sql(yesterday, yesterday)
-
-        # 前日/前天
-        if "前日" in original or "前天" in original:
-            day_before_yesterday = today - timedelta(days=2)
-            return get_date_range_sql(day_before_yesterday, day_before_yesterday)
-
-        # 大前日/大前天
-        if "大前日" in original or "大前天" in original:
-            day = today - timedelta(days=3)
-            return get_date_range_sql(day, day)
-
-        # 明日/明天
-        if "明日" in original or "明天" in original:
-            tomorrow = today + timedelta(days=1)
-            return get_date_range_sql(tomorrow, tomorrow)
-
-        # 后日/后天
-        if "后日" in original or "后天" in original:
-            day = today + timedelta(days=2)
-            return get_date_range_sql(day, day)
-
-        # 大后日/大后天
-        if "大后日" in original or "大后天" in original:
-            day = today + timedelta(days=3)
-            return get_date_range_sql(day, day)
-
-        # ===== 近N天 =====
-        # 近一年 -> 近12个月（提前转换）
-        if "近一年" in original:
-            original = original.replace("近一年", "近12个月")
-        # 近半年 -> 近6个月
-        if "近半年" in original:
-            original = original.replace("近半年", "近6个月")
-        # 半年（不是"近半年"）-> 近6个月
-        elif "半年" in original:
-            original = original.replace("半年", "近6个月")
-
-        match = re.search(r'近(\d+)天', original)
-        if match:
-            days = int(match.group(1))
-            start = today - timedelta(days=days-1)
-            return get_date_range_sql(start, today)
-
-        # ===== 近N个月 =====
-        match = re.search(r'近(\d+)个月', original)
-        if match:
-            months = int(match.group(1))
-            # 计算开始月份：往回推 N-1 个月（因为包含本月）
-            target_month = today.month - months + 1
-            target_year = today.year
-            while target_month <= 0:
-                target_month += 12
-                target_year -= 1
-            start = get_month_start(target_year, target_month)
-            return get_date_range_sql(start, today)
-
-        # ===== 本周/上周/下周 =====
-        # 本周
-        if "本周" in original or "本周初" in original:
-            return get_date_range_sql(this_monday, today)
-
-        # 上周
-        if "上周" in original:
-            last_monday = this_monday - timedelta(days=7)
-            last_sunday = last_monday + timedelta(days=6)
-            return get_date_range_sql(last_monday, last_sunday)
-
-        # 上上周（上上周 = 上周的上周）
-        if "上上周" in original:
-            last_monday = this_monday - timedelta(days=14)
-            last_sunday = last_monday + timedelta(days=6)
-            return get_date_range_sql(last_monday, last_sunday)
-
-        # 下周
-        if "下周" in original:
-            next_monday = this_monday + timedelta(days=7)
-            next_sunday = next_monday + timedelta(days=6)
-            return get_date_range_sql(next_monday, next_sunday)
-
-        # 下下周（下下周 = 下周的下周）
-        if "下下周" in original:
-            next_monday = this_monday + timedelta(days=14)
-            next_sunday = next_monday + timedelta(days=6)
-            return get_date_range_sql(next_monday, next_sunday)
-
-        # 周末
-        if "周末" in original:
-            # 本周末（如果今天已经是周末则返回今天，否则返回本周日）
-            return get_date_range_sql(this_sunday, this_sunday)
-
-        # ===== 本月/上月/下月 =====
-        # 本月
-        if "本月" in original:
-            return get_date_range_sql(get_month_start(today.year, today.month), today)
-
-        # 上上个月（必须优先于"上月"检查，避免"上上个月"被误判为"上月"）
-        if "上上个月" in original or "上上月" in original:
-            # 上上月 = 上上个月 = 上月的上个月 = 上月再往前一个月
-            if today.month <= 2:
-                month = 12 + today.month - 2
-                year = today.year - 1
-            else:
-                month = today.month - 2
-                year = today.year
-            start = get_month_start(year, month)
-            end = get_month_end(year, month)
-            return get_date_range_sql(start, end)
-
-        # 上月
-        if "上月" in original:
-            if today.month == 1:
-                start = get_month_start(today.year - 1, 12)
-                end = get_month_end(today.year - 1, 12)
-            else:
-                start = get_month_start(today.year, today.month - 1)
-                end = get_month_end(today.year, today.month - 1)
-            return get_date_range_sql(start, end)
-
-        # 下月
-        if "下月" in original:
-            if today.month == 12:
-                start = get_month_start(today.year + 1, 1)
-                end = get_month_end(today.year + 1, 1)
-            else:
-                start = get_month_start(today.year, today.month + 1)
-                end = get_month_end(today.year, today.month + 1)
-            return get_date_range_sql(start, end)
-
-        # 下下月
-        if "下下月" in original:
-            if today.month == 11:
-                start = get_month_start(today.year + 1, 1)
-                end = get_month_end(today.year + 1, 2)
-            elif today.month == 12:
-                start = get_month_start(today.year + 1, 2)
-                end = get_month_end(today.year + 1, 3)
-            else:
-                start = get_month_start(today.year, today.month + 2)
-                end = get_month_end(today.year, today.month + 2)
-            return get_date_range_sql(start, end)
-
-        # 月初/月中/月末（相对于本月）
-        if "月初" in original:
-            start = get_month_start(today.year, today.month)
-            return get_date_range_sql(start, today)
-        if "月中" in original:
-            # 每月15日
-            day = min(15, today.day)
-            start = datetime(today.year, today.month, day)
-            return get_date_range_sql(start, today)
-        if "月末" in original or "月末" in original:
-            end = get_month_end(today.year, today.month)
-            return get_date_range_sql(today.replace(day=1), end)
-
-        # ===== 本季度/上季度/下季度 =====
-        current_quarter = (today.month - 1) // 3 + 1
-
-        # 本季度
-        if "本季度" in original or "本季" in original:
-            start = get_quarter_start(today.year, current_quarter)
-            return get_date_range_sql(start, today)
-
-        # 上季度
-        if "上季度" in original:
-            if current_quarter == 1:
-                start = get_quarter_start(today.year - 1, 4)
-                end = get_quarter_end(today.year - 1, 4)
-            else:
-                start = get_quarter_start(today.year, current_quarter - 1)
-                end = get_quarter_end(today.year, current_quarter - 1)
-            return get_date_range_sql(start, end)
-
-        # 下季度
-        if "下季度" in original:
-            if current_quarter == 4:
-                start = get_quarter_start(today.year + 1, 1)
-                end = get_quarter_end(today.year + 1, 1)
-            else:
-                start = get_quarter_start(today.year, current_quarter + 1)
-                end = get_quarter_end(today.year, current_quarter + 1)
-            return get_date_range_sql(start, end)
-
-        # 季初/季末
-        if "季初" in original:
-            start = get_quarter_start(today.year, current_quarter)
-            return get_date_range_sql(start, today)
-        if "季末" in original:
-            end = get_quarter_end(today.year, current_quarter)
-            start = get_quarter_start(today.year, current_quarter)
-            return get_date_range_sql(start, end)
-
-        # ===== Q1/Q2/Q3/Q4、1季度~4季度 =====
-        # Q1-Q4 格式
-        quarter_map = {'Q1': 1, 'Q2': 2, 'Q3': 3, 'Q4': 4}
-        for q_name, q_num in quarter_map.items():
-            if q_name in original:
-                start = get_quarter_start(today.year, q_num)
-                end = get_quarter_end(today.year, q_num)
-                return get_date_range_sql(start, end)
-
-        # 1季度-4季度 格式
-        match = re.search(r'(\d)季度', original)
-        if match:
-            q_num = int(match.group(1))
-            if 1 <= q_num <= 4:
-                start = get_quarter_start(today.year, q_num)
-                end = get_quarter_end(today.year, q_num)
-                return get_date_range_sql(start, end)
-
-        # ===== 本年/去年/明年 =====
-        # 本年/今年
-        if "本年" in original or "今年" in original:
-            start = get_month_start(today.year, 1)
-            return get_date_range_sql(start, today)
-
-        # 去年/上年
-        if "去年" in original or "上年" in original:
-            start = get_month_start(today.year - 1, 1)
-            end = get_month_end(today.year - 1, 12)
-            return get_date_range_sql(start, end)
-
-        # 明年
-        if "明年" in original:
-            start = get_month_start(today.year + 1, 1)
-            end = get_month_end(today.year + 1, 12)
-            return get_date_range_sql(start, end)
-
-        # 前年
-        if "前年" in original:
-            start = get_month_start(today.year - 2, 1)
-            end = get_month_end(today.year - 2, 12)
-            return get_date_range_sql(start, end)
-
-        # 后年
-        if "后年" in original:
-            start = get_month_start(today.year + 2, 1)
-            end = get_month_end(today.year + 2, 12)
-            return get_date_range_sql(start, end)
-
-        # 年初
-        if "年初" in original:
-            start = get_month_start(today.year, 1)
-            return get_date_range_sql(start, today)
-
-        # 年末/年终
-        if "年末" in original or "年终" in original:
-            end = get_month_end(today.year, 12)
-            return get_date_range_sql(today.replace(month=1, day=1), end)
-
-        # ===== 上半年/下半年 =====
-        if "上半年" in original:
-            start = get_month_start(today.year, 1)
-            end = get_month_end(today.year, 6)
-            return get_date_range_sql(start, end)
-
-        if "下半年" in original:
-            start = get_month_start(today.year, 7)
-            end = get_month_end(today.year, 12)
-            return get_date_range_sql(start, end)
-
-        # 去年同期上半年/下半年（去年）
-        if "去年同期上半年" in original:
-            start = get_month_start(today.year - 1, 1)
-            end = get_month_end(today.year - 1, 6)
-            return get_date_range_sql(start, end)
-
-        if "去年同期下半年" in original:
-            start = get_month_start(today.year - 1, 7)
-            end = get_month_end(today.year - 1, 12)
-            return get_date_range_sql(start, end)
-
-        # ===== 具体年份 2023年/2024年等 =====
-        match = re.search(r'(\d{4})年', original)
-        if match:
-            year = int(match.group(1))
-            start = get_month_start(year, 1)
-            end = get_month_end(year, 12)
-            return get_date_range_sql(start, end)
-
-        # ===== 同比/环比/同期/去年同期 =====
-        # 这些是计算模式，不是简单的时间范围
-        # 在 MQL 层处理，这里不转换
-
-        # ===== 默认：本月 =====
-        start = get_month_start(today.year, today.month)
-        return get_date_range_sql(start, today)
+        return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
 
     def _build_group_by(self, mql: MQLSchema) -> str:
         """构建 GROUP BY 子句"""
