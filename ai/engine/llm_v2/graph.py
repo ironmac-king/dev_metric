@@ -1091,6 +1091,36 @@ async def trigger_analyzer(state: V2State) -> V2State:
                     state.one_sentence_summary = ""
                 # 详细摘要包含 KPI 信息
                 state.analysis_summary = state.one_sentence_summary
+            elif state.mql and state.mql.intent and state.mql.intent.value == "query_trend":
+                # 趋势查询但无 YoY/MoM：从渲染 SQL 数据构造趋势摘要
+                metric_name = state.mql.metric.name if (state.mql and state.mql.metric) else "指标"
+                rows = result.get("data", [])
+                # 收集数值列（跳过月份字符串列）
+                metric_col = None
+                for k in (rows[0].keys() if rows else []):
+                    if k not in ("月份", "MONTHS", "FDATE", "date", "时间", "time", "dummy"):
+                        metric_col = k
+                        break
+                values = []
+                for row in rows:
+                    if metric_col and row.get(metric_col) is None:
+                        continue
+                    for k, v in row.items():
+                        if k in ("月份", "MONTHS", "FDATE", "date", "时间", "time"):
+                            continue
+                        try:
+                            values.append(float(str(v).replace(",", "")))
+                        except (ValueError, TypeError):
+                            continue
+                if len(values) >= 2:
+                    first, last = values[0], values[-1]
+                    change = (last - first) / first * 100 if first != 0 else 0
+                    direction = "下降" if change < 0 else "上升"
+                    state.one_sentence_summary = f"{metric_name}整体趋势{direction}，较期初{abs(change):.1f}%"
+                    state.analysis_summary = state.one_sentence_summary
+                else:
+                    state.one_sentence_summary = ""
+                    state.analysis_summary = ""
             else:
                 state.one_sentence_summary = ""
                 state.analysis_summary = ""
