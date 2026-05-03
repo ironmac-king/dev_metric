@@ -575,8 +575,17 @@ class ResultAnalyzer:
             }
 
         # 简单趋势分析：只收集数值类型的列，跳过字符串列（如"月份"）
+        # 关键：跳过 primary metric 列为 null 的行（如当月数据未完成）
+        metric_col = None
+        for k in row.keys():
+            if k not in ("月份", "MONTHS", "FDATE", "date", "时间", "time", "dummy"):
+                metric_col = k
+                break
         values = []
         for row in data:
+            # 跳过 metric 值为 null 的行（如当月数据未完成）
+            if metric_col and row.get(metric_col) is None:
+                continue
             for k, v in row.items():
                 if k in ("月份", "MONTHS", "FDATE", "date", "时间", "time"):
                     continue
