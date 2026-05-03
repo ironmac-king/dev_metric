@@ -655,6 +655,9 @@ FROM (
         order_by: List[str] = []
         if mql.order_by and mql.order_by.field:
             order_by.append(f"{mql.order_by.field} {mql.order_by.direction}")
+        elif dimensions and dt_column:
+            # 时间序列查询（如趋势）默认按时间维度排序，确保 result_analyzer 的 first/last 对比正确
+            order_by.append(f"{dt_column} ASC")
 
         # 7. Limit
         limit = 1000
