@@ -22,6 +22,7 @@ from ai.config.runtime import get_go_api_base
 from .schema import V2State, MQLSchema, MQLDimension, push_history
 from .observability import get_tracer, create_trace_context
 from ai.client.metric_client import MetricClient
+from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
 
 logger = get_logger("ai.llm_v2.graph")
 
@@ -817,28 +818,20 @@ async def trigger_analyzer(state: V2State) -> V2State:
         logger.info(f"[trigger_analyzer] result_dict: mom_change={result_dict['mom_change']}, yoy_change={result_dict['yoy_change']}, current_value={result_dict['current_value']}")
 
         # 如果有 YoY 数据但没有 MoM 数据，自动查环比（上一期）
-        # 条件：用户明确要环比（mql.has_mom）但 SQL 没有返回
+        # 条件：用户明确要环比（mql.has_mom）且当前期有有效数据（current_value > 0）
         if (result_dict["mom_change"] is None
                 and result_dict["current_value"] > 0 and (state.mql.has_mom if state.mql else False)):
-            logger.info(f"[trigger_analyzer] 自动计算MoM: current={result_dict['current_value']}")
-        else:
-            logger.info(f"[trigger_analyzer] 不计算MoM: yoy_change={result_dict['yoy_change']}, mom_change={result_dict['mom_change']}, current={result_dict['current_value']}, has_mom={state.mql.has_mom if state.mql else 'mql is None'}")
+            # MoM 计算：查询上一期并计算变化率（仅在当前期有有效数据时）
             try:
                 prev_start, prev_end = _calc_previous_period(state.mql)
-                logger.info(f"[trigger_analyzer] _calc_previous_period: prev_start={prev_start}, prev_end={prev_end}")
                 if prev_start and prev_end:
-                    # 从 MQL metric 提取 starrocks_sql，解析出表名和字段
-                    metric_name = state.mql.metric.name if state.mql and state.mql.metric else ""
                     starrocks_sql = (state.mql.metric.starrocks_sql or "") if state.mql and state.mql.metric else ""
-                    logger.info(f"[trigger_analyzer] starrocks_sql: {starrocks_sql[:100]}")
-                    # 提取 SUM(字段名)
                     import re
                     sum_match = re.search(r"SUM\s*\(\s*([A-Z_]+)\s*\)", starrocks_sql or "", re.IGNORECASE)
                     if sum_match:
                         metric_field = sum_match.group(1)
                         table_match = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", starrocks_sql, re.IGNORECASE)
                         table_name = table_match.group(1) if table_match else "ids.IDS_AMZ_COMPREHENSIVE_DI"
-                        # 构建维度过滤条件
                         dim_filters = []
                         if state.mql and state.mql.dimensions:
                             for dim in state.mql.dimensions:
@@ -848,8 +841,6 @@ async def trigger_analyzer(state: V2State) -> V2State:
                         where_parts.extend(dim_filters)
                         where_clause = " AND ".join(where_parts)
                         prev_sql = f"SELECT SUM({metric_field}) AS prev_val FROM {table_name} WHERE {where_clause}"
-                        logger.info(f"[trigger_analyzer] 查环比上一期: {prev_start}~{prev_end}, dim_filters={dim_filters}, SQL={prev_sql}")
-                        # 通过 Go API 执行
                         import httpx
                         async with httpx.AsyncClient(timeout=30) as client:
                             resp = await client.post(
@@ -857,29 +848,19 @@ async def trigger_analyzer(state: V2State) -> V2State:
                                 json={"sql": prev_sql, "timeout": 30},
                             )
                             data = resp.json()
-                            logger.info(f"[trigger_analyzer] 环比查询返回: code={data.get('code')}, message={data.get('message')}, data={str(data.get('data',''))[:200]}")
-                            logger.info(f"[trigger_analyzer] 原始 data 类型: {type(data.get('data'))}, keys: {data.get('data').keys() if isinstance(data.get('data'), dict) else 'N/A'}")
-                            # Go API 返回结构: {"code": 0, "data": {"cached": true, "count": 1, "data": [...]}}
                             if data.get("code") == 0 and data.get("data"):
-                                # 兼容两层嵌套结构
                                 inner_data = data["data"]
                                 rows = inner_data.get("data") if isinstance(inner_data, dict) else inner_data
                                 if rows and len(rows) > 0:
-                                    # Go API 返回的字段名可能是 alias 或实际 SQL 表达式
-                                    # 尝试 alias "prev_val"，也尝试实际 SUM 表达式
                                     prev_val = float(rows[0].get("prev_val") or rows[0].get("SUM(ORDERED_PRODUCTSALES)") or 0)
                                     if prev_val > 0:
                                         mom = (result_dict["current_value"] - prev_val) / prev_val * 100
                                         result_dict["mom_change"] = round(mom, 2)
                                         logger.info(f"[trigger_analyzer] MoM 计算成功: current={result_dict['current_value']}, prev={prev_val}, mom={result_dict['mom_change']}%")
-                                    else:
-                                        logger.info(f"[trigger_analyzer] 上一期数据为0，无法计算MoM")
-                            else:
-                                logger.warning(f"[trigger_analyzer] 查询上一期失败: {data.get('message')}")
-                    else:
-                        logger.warning(f"[trigger_analyzer] 无法从starrocks_sql提取metric_field: {starrocks_sql[:50]}")
             except Exception as e:
                 logger.warning(f"[trigger_analyzer] 计算MoM失败: {e}")
+        else:
+            logger.info(f"[trigger_analyzer] 跳过 MoM 计算: mom_change={result_dict['mom_change']}, current={result_dict['current_value']}, has_mom={state.mql.has_mom if state.mql else False}")
 
         # P0-3 fix: 设置 session_state 用于 ContextTrigger
         if state.mql and state.mql.metric:
@@ -892,7 +873,43 @@ async def trigger_analyzer(state: V2State) -> V2State:
             }
 
         # 获取会话状态（用于 ContextTrigger）
-        session_state = state.session_state or {}
+        session_state = state.session_state if state.session_state else {}
+        # 确保 state.session_state 被初始化（否则修改 local session_state 不会影响原始对象）
+        if not state.session_state:
+            state.session_state = session_state
+
+        # 注入 metric_capability + mql_slots 到 session_state（语义快照驱动分析）
+        snapshot = state._snapshot or {}
+        metric_code = state.mql.metric.code if (state.mql and state.mql.metric) else ""
+        # 如果 metric_code 为空，尝试通过 MetricClient 按 name 查找
+        if not metric_code and state.mql and state.mql.metric and state.mql.metric.name:
+            from ai.client.metric_client import MetricClient
+            mc = MetricClient()
+            info = mc.get_metric_by_name(state.mql.metric.name)
+            if info:
+                metric_code = info.get("metric_code", "")
+        if metric_code:
+            snap_svc = get_semantic_snapshot_service()
+            cap = snap_svc.get_metric_capability(snapshot, metric_code)
+            session_state["metric_capability"] = cap
+
+        # MQL 槽位（供 trigger_analyzer 生成分析 SQL）
+        if state.mql:
+            mql_slots = {
+                "time": {
+                    "start": state.mql.time.start if state.mql.time else None,
+                    "end": state.mql.time.end if state.mql.time else None,
+                },
+                "dimensions": [
+                    {"type": d.type, "value": d.value, "column": d.column}
+                    for d in state.mql.dimensions
+                ] if state.mql.dimensions else [],
+                "filters": [
+                    {"field": f.field, "op": f.operator.value if hasattr(f.operator, 'value') else str(f.operator), "value": f.value}
+                    for f in state.mql.filters
+                ] if state.mql.filters else [],
+            }
+            session_state["mql_slots"] = mql_slots
 
         # 传递 drilldown_type 到 trigger_analyzer
         drilldown_type = state.context_cache.drilldown_type
@@ -1017,6 +1034,17 @@ async def trigger_analyzer(state: V2State) -> V2State:
                 state.analysis = analysis_output.to_dict()
                 logger.info(f"[trigger_analyzer] analysis_output.to_dict() success")
 
+                # 一句话结论 = AnalysisOutput.summary
+                state.one_sentence_summary = analysis_output.summary or ""
+                # 详细摘要 = summary + breakdown 维度贡献
+                parts = [analysis_output.summary] if analysis_output.summary else []
+                for b in (analysis_output.breakdown or [])[:3]:
+                    dim_name = b.get("dimension", "")
+                    impact = b.get("impact", "")
+                    if dim_name:
+                        parts.append(f"{dim_name}：{impact}" if impact else dim_name)
+                state.analysis_summary = "；".join(parts)
+
                 # ✶ 修复：设置 state.category 让前端能显示下钻按钮
                 # 从 drilldown_options 中提取 category（格式：{"label": "📊 看销售", "action": "drilldown", "params": {"check": "sales"}}）
                 if trigger_result.drilldown_options:
@@ -1042,6 +1070,30 @@ async def trigger_analyzer(state: V2State) -> V2State:
             logger.info(f"[trigger_analyzer] 触发分析命中: {trigger_result.trigger_type}")
         else:
             state.analysis = None
+            # 即使 should_analyze=False，如果 analysis_data 有有效 KPI，也构造 summary
+            analysis_data = getattr(trigger_result, 'analysis_data', None) or {}
+            logger.info(f"[trigger_analyzer] should_analyze=False, analysis_data keys={analysis_data.keys() if analysis_data else 'None'}")
+            kpi = analysis_data.get("kpi") or {}
+            logger.info(f"[trigger_analyzer] kpi={kpi}")
+            if kpi.get("mom") is not None or kpi.get("yoy") is not None:
+                metric_name = state.mql.metric.name if (state.mql and state.mql.metric) else ""
+                mom = kpi.get("mom")
+                yoy = kpi.get("yoy")
+                if mom is not None and yoy is not None:
+                    state.one_sentence_summary = f"{metric_name}环比{mom*100:.1f}%，同比{yoy*100:.1f}%"
+                elif mom is not None:
+                    direction = "下降" if mom < 0 else "上涨"
+                    state.one_sentence_summary = f"{metric_name}环比{direction}{abs(mom)*100:.1f}%"
+                elif yoy is not None:
+                    direction = "下降" if yoy < 0 else "上涨"
+                    state.one_sentence_summary = f"{metric_name}同比{direction}{abs(yoy)*100:.1f}%"
+                else:
+                    state.one_sentence_summary = ""
+                # 详细摘要包含 KPI 信息
+                state.analysis_summary = state.one_sentence_summary
+            else:
+                state.one_sentence_summary = ""
+                state.analysis_summary = ""
             state.add_thinking_step(
                 "trigger_analyzer",
                 status="completed",
@@ -1102,7 +1154,9 @@ async def result_analyzer(state: V2State) -> V2State:
         )
 
         state.answer = result.get("answer", "")
+        state.supplementary_info = result.get("supplementary_info", [])
         state.context_cache.suggestions = result.get("suggestions", [])
+        logger.info(f"[result_analyzer] saved supplementary_info={state.supplementary_info}, suggestions_count={len(state.context_cache.suggestions)}")
         # 保存结构化的追问选项（供前端渲染按钮）
         if result.get("clarification_options"):
             state.context_cache.clarification_options = result.get("clarification_options")

@@ -33,6 +33,11 @@ class ResultAnalyzer:
             self._semantic_service = get_semantic_snapshot_service()
         return self._semantic_service
 
+    def _col(self, mql: MQLSchema, suffix: str, fallback: str) -> str:
+        """构建 CTE 新别名：{metric_name}_{suffix}，回退到旧 generic 列名"""
+        name = mql.metric.name if mql.metric and mql.metric.name else ""
+        return f"{name}{suffix}" if name else fallback
+
     def _generate_supplementary_info(
         self,
         mql: MQLSchema,
@@ -59,15 +64,17 @@ class ResultAnalyzer:
         semantic_svc = self._get_semantic_service()
         snapshot = semantic_svc.get_active_snapshot() if semantic_svc else None
         if not snapshot:
+            logger.warning(f"[ResultAnalyzer] _generate_supplementary_info: no active snapshot, metric_code={metric_code}")
             return []
-
-        capabilities = snapshot.get("capabilities", {}) or {}
-        metric_cap = capabilities.get(f"metric:{metric_code}", {}) or {}
-
-        info: List[Dict[str, Any]] = []
 
         # 获取当前指标值（从 sql_result）
         row = sql_result.data[0] if sql_result.data else {}
+
+        capabilities = snapshot.get("capabilities", {}) or {}
+        metric_cap = capabilities.get(f"metric:{metric_code}", {}) or {}
+        logger.info(f"[ResultAnalyzer] _generate_supplementary_info: metric_code={metric_code}, supports_yoy={metric_cap.get('supports_yoy')}, supports_mom={metric_cap.get('supports_mom')}, row_keys={list(row.keys()) if row else []}")
+
+        info: List[Dict[str, Any]] = []
         current_val = None
         for v in row.values():
             if isinstance(v, (int, float)):
@@ -83,9 +90,15 @@ class ResultAnalyzer:
                     if yoy_change is not None:
                         change_val = float(str(yoy_change).replace("%", "").replace(",", ""))
                         trend = "+" if change_val > 0 else "-" if change_val < 0 else None
+                        # yoy_change 可能已包含 +/- 前缀（如 "+12.3%"），或只有数值（如 "12.3%"）
+                        # 如果已带符号直接用，否则根据趋势补前缀
+                        if str(yoy_change).startswith(("+", "-")):
+                            value_str = yoy_change
+                        else:
+                            value_str = f"{'+' if change_val > 0 else ''}{yoy_change}"
                         info.append({
                             "label": "同比",
-                            "value": f"{'+' if change_val > 0 else ''}{yoy_change}",
+                            "value": value_str,
                             "trend": trend,
                         })
                 except (ValueError, TypeError):
@@ -238,6 +251,7 @@ class ResultAnalyzer:
 
         if intent == "query_value":
             result = await self._handle_value_query(mql, sql_result, question)
+            logger.info(f"[ResultAnalyzer] _handle_value_query returned: answer={result.get('answer', '')[:50]}, supplementary_info={result.get('supplementary_info')}, suggestions_count={len(result.get('suggestions', []))}")
         elif intent == "query_trend":
             result = await self._handle_trend_query(mql, sql_result, question)
         elif intent == "query_comparison":
@@ -560,10 +574,12 @@ class ResultAnalyzer:
                 "suggestions": [],
             }
 
-        # 简单趋势分析
+        # 简单趋势分析：只收集数值类型的列，跳过字符串列（如"月份"）
         values = []
         for row in data:
-            for v in row.values():
+            for k, v in row.items():
+                if k in ("月份", "MONTHS", "FDATE", "date", "时间", "time"):
+                    continue
                 try:
                     values.append(float(str(v).replace(",", "")))
                 except (ValueError, TypeError):
