@@ -8,7 +8,7 @@
 """
 import re
 from enum import Enum
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from ai.config.logging_config import get_logger
 from ai.client.metric_client import MetricClient
 from ..schema import MQLSchema, MQLMetric, MQLDimension, TimeRange, TimeType, SQLResult, CalculationPattern, CrossMetricSpec, MQLIntent
@@ -225,993 +225,736 @@ class SQLGeneratorNode:
             }
 
     def _build_sql(self, mql: MQLSchema) -> str:
-        """构建 SQL"""
-        # 跨指标对比：生成自连接 SQL
-        if mql.cross_metric and mql.cross_metric.metric_name:
-            return self._build_cross_metric_sql(mql)
+        """构建 SQL
 
-        # MoM/YOY 对比：生成双时间段 SQL
-        # 使用 MQLSchema 的 has_mom/has_yoy 属性统一判断
-        if mql.has_mom or mql.has_yoy:
-            logger.info(f"[_build_sql] 进入 YoY/MoM 模式: has_mom={mql.has_mom}, has_yoy={mql.has_yoy}")
-            return self._build_mom_sql(mql)
-
-        # 1. 确定表名
-        table = mql.metric.table if mql.metric and mql.metric.table else self.DEFAULT_TABLE
-
-        # 2. 构建 SELECT 子句
-        select_clause = self._build_select(mql)
-
-        # 3. 构建 FROM 子句
-        from_clause = f"FROM {table}"
-
-        # 4. 构建 WHERE 子句
-        where_clause = self._build_where(mql)
-
-        # 5. 构建 GROUP BY 子句
-        group_by_clause = self._build_group_by(mql)
-
-        # 6. 构建 ORDER BY 子句
-        order_by_clause = self._build_order_by(mql)
-
-        # 7. 构建 LIMIT 子句
-        # 重要：如果没有 GROUP BY（只有聚合列），必须加 LIMIT 防止返回大量数据
-        limit_clause = self._build_limit(mql)
-        if not limit_clause and not group_by_clause:
-            # 没有 GROUP BY 时，默认加 LIMIT 10 防止返回过多数据
-            limit_clause = "LIMIT 10"
-            logger.info(f"[_build_sql] 无 GROUP BY，自动添加 LIMIT 10")
-
-        # 8. 拼接 SQL
-        sql_parts = [select_clause, from_clause]
-        if where_clause:
-            sql_parts.append(where_clause)
-        if group_by_clause:
-            sql_parts.append(group_by_clause)
-        if order_by_clause:
-            sql_parts.append(order_by_clause)
-        if limit_clause:
-            sql_parts.append(limit_clause)
-
-        return "\n".join(sql_parts)
-
-    def _build_cross_metric_sql(self, mql: MQLSchema) -> str:
-        """构建跨指标对比 SQL（CTE 自连接）
-
-        思路：将每个指标的 starrocks_sql 转换为带维度的聚合子查询，
-        再通过 CTE/子查询 JOIN 在一起，最后应用比较条件过滤。
+        当检测到 yoy/mom 模式时，使用简单的 CASE WHEN 方式（不依赖窗口函数）
+        其他情况使用 CTE Jinja2 模板渲染
         """
-        logger.info(f"[_build_cross_metric_sql] cross_metric={mql.cross_metric.metric_name}, operator={mql.cross_metric.operator}")
+        # 检测是否只有 yoy/mom 模式（不需要窗口函数）
+        patterns = mql.calculation_patterns or []
+        pattern_values = [p.value if isinstance(p, Enum) else str(p) for p in patterns]
+        has_period_comparison = any(p in ["yoy", "mom"] for p in pattern_values)
+        has_window_only = all(p in ["yoy", "mom"] for p in pattern_values)
 
-        # 1. 获取维度列
-        dim_columns = []
-        for dim in mql.dimensions:
-            col = dim.column
-            if not col:
-                col = self._get_dimension_column(dim.type)
-            if col:
-                dim_columns.append(col)
-        if not dim_columns:
-            dim_columns = ["YEARS", "MONTHS"]
+        # 如果只有 yoy/mom，使用简单 CASE WHEN 方式（不需要窗口函数）
+        if has_period_comparison and has_window_only:
+            return self._generate_period_comparison_sql(mql, pattern_values)
 
-        dim_select = ", ".join(dim_columns)
-        dim_group = ", ".join(dim_columns)
-        dim_join = " AND ".join([f"a.{c} = b.{c}" for c in dim_columns])
+        # 其他情况使用 CTE Jinja2 模板
+        semantic_json = self._mql_to_semantic(mql)
+        from ..semantic_renderer import SemanticRenderer
+        renderer = SemanticRenderer()
+        return renderer.render(semantic_json)
 
-        # 2. 获取 WHERE 条件（时间等）
-        where_clause = self._build_where(mql)
-        if where_clause.upper().startswith("WHERE"):
-            where_clause = where_clause[5:].strip()
-        where_sql = f"WHERE {where_clause}" if where_clause else ""
+    def _compute_mom_period(self, start_dt, end_dt_adjusted):
+        """
+        计算 MoM（环比）对比期。
 
-        # 3. 获取指标 A（主指标）的聚合表达式
-        metric_a_name = mql.metric.name if mql.metric else ""
-        metric_a_sql, metric_a_alias = self._extract_metric_expression(mql.metric, "metric_a")
-        if not metric_a_sql:
-            return f"SELECT 'ERROR: 主指标 {metric_a_name} 无 starrocks_sql' AS error"
+        规则（按优先级）：
+        1. quarter_complete：完整季度 → 上个季度（天数对齐）
+        2. month_complete：完整月份 → 上个月（天数对齐）
+        3. is_short_ytd：YTD 早期（1/1 开始但 period_days < 90）→ Q4 同期（天数对齐）
+        4. is_ytd：跨季度 YTD → Q4 完整范围
+        5. else：未完成周期 → 上月同期（天数对齐）
+        """
+        import calendar
+        from datetime import timedelta
 
-        # 3.5 检测是否为复合指标（ratio），如果是则不加 GROUP BY（避免嵌套聚合）
-        is_compound_a = 'CASE' in metric_a_sql.upper() and ('/' in metric_a_sql.upper())
+        # 月份是否完成
+        _, month_last_day = calendar.monthrange(end_dt_adjusted.year, end_dt_adjusted.month)
+        month_complete = end_dt_adjusted.day >= month_last_day
 
-        # 4. 获取指标 B（对比指标）的聚合表达式
-        metric_b_name = mql.cross_metric.metric_name
-        metric_b_info = self._metric_client.get_metric_by_name(metric_b_name)
-        if not metric_b_info or not metric_b_info.get("starrocks_sql"):
-            return f"SELECT 'ERROR: 对比指标 {metric_b_name} 未找到' AS error"
-        # 构建一个临时 MQLMetric 用于提取
-        metric_b = MQLMetric(
-            name=metric_b_name,
-            starrocks_sql=metric_b_info.get("starrocks_sql", ""),
-            field=metric_b_info.get("starrocks_field", ""),
-        )
-        metric_b_sql, metric_b_alias = self._extract_metric_expression(metric_b, "metric_b")
-        is_compound_b = 'CASE' in metric_b_sql.upper() and ('/' in metric_b_sql.upper())
+        # 季度是否完成
+        month = end_dt_adjusted.month
+        quarter_end_month = 3 if month <= 3 else (6 if month <= 6 else (9 if month <= 9 else 12))
+        _, quarter_last_day = calendar.monthrange(end_dt_adjusted.year, quarter_end_month)
+        quarter_complete = (end_dt_adjusted.month == quarter_end_month and end_dt_adjusted.day >= quarter_last_day)
 
-        # 5. 比较运算符
-        op = mql.cross_metric.operator
-        op_map = {"lt": "<", "gt": ">", "eq": "=", "lte": "<=", "gte": ">="}
-        sql_op = op_map.get(op, "<")
+        # 周期天数
+        period_days = (end_dt_adjusted - start_dt).days + 1
 
-        # 6. 拼接完整 SQL（CTE 方式）
-        # 注意：WHERE 条件必须在每个 CTE 内部都应用，否则子查询结果不对
-        # 当 where_clause 为空时，使用 1=1 作为占位条件，避免语法错误
-        where_cond = where_clause[5:].strip() if where_clause.upper().startswith("WHERE") else where_clause
-        where_in_cte = where_cond if where_cond else "1=1"
-        # SELECT 子句中维度列需要加表前缀 a.
-        dim_select_a = ", ".join([f"a.{c}" for c in dim_columns])
-        # 如果是复合指标（已含聚合），CTE 不需要 GROUP BY；否则需要
-        group_a = "" if is_compound_a else f"GROUP BY {dim_group}"
-        group_b = "" if is_compound_b else f"GROUP BY {dim_group}"
-        sql = f"""
-WITH metric_a AS (
-    SELECT {dim_select}, {metric_a_sql} AS {metric_a_alias}
-    FROM {self.DEFAULT_TABLE}
-    WHERE {where_in_cte}
-    {group_a}
-),
-metric_b AS (
-    SELECT {dim_select}, {metric_b_sql} AS {metric_b_alias}
-    FROM {self.DEFAULT_TABLE}
-    WHERE {where_in_cte}
-    {group_b}
-)
-SELECT {dim_select_a}, a.{metric_a_alias} AS {metric_a_alias}, b.{metric_b_alias} AS {metric_b_alias}
-FROM metric_a a
-INNER JOIN metric_b b ON {dim_join}
-WHERE a.{metric_a_alias} {sql_op} b.{metric_b_alias}
-ORDER BY {dim_group}
-LIMIT 20
-""".strip()
-        logger.info(f"[_build_cross_metric_sql] SQL: {sql[:300]}")
-        return sql
+        # YTD 判断
+        is_ytd = (start_dt.month == 1 and start_dt.day == 1 and end_dt_adjusted.month < 12)
+        is_short_ytd = is_ytd and period_days < 90
 
-    @staticmethod
-    def _deduplicate_dimensions(dimensions: list) -> list:
-        """去除 dimensions 中 (type, value) 相同的重复项"""
-        seen: set = set()
-        result = []
-        for dim in dimensions:
-            key = (dim.type, dim.value)
-            if key not in seen:
-                seen.add(key)
-                result.append(dim)
-        return result
+        if quarter_complete:
+            mom_start = start_dt - relativedelta(months=3)
+            mom_end = end_dt_adjusted - relativedelta(months=3)
+        elif month_complete:
+            mom_start = start_dt - relativedelta(months=1)
+            mom_end = end_dt_adjusted - relativedelta(months=1)
+        elif is_short_ytd:
+            last_year_end = end_dt_adjusted.replace(year=end_dt_adjusted.year - 1, month=12, day=31)
+            mom_start = last_year_end - timedelta(days=period_days - 1)
+            mom_end = last_year_end
+        elif is_ytd and not is_short_ytd:
+            mom_start = end_dt_adjusted.replace(year=end_dt_adjusted.year - 1, month=10, day=1)
+            mom_end = end_dt_adjusted.replace(year=end_dt_adjusted.year - 1, month=12, day=31)
+        else:
+            mom_start = start_dt - relativedelta(months=1)
+            mom_end = end_dt_adjusted - relativedelta(months=1)
 
-    def _build_comparison_period_where(self, start: str, end: str, mql: MQLSchema) -> str:
-        """构建对比周期 WHERE 条件（时间 + mql.filters + mql.dimensions 过滤）"""
-        if not start or not end:
-            return ""
+        return mom_start, mom_end
+
+    def _generate_period_comparison_sql(self, mql: MQLSchema, pattern_values: List[str]) -> str:
+        """
+        生成周期对比 SQL（同比/环比）
+
+        原理：每个周期汇总成一个值，不需要窗口函数
+        当前期和对比期通过 CASE WHEN 分离
+        """
+        from datetime import datetime
+        from dateutil.relativedelta import relativedelta
+
+        # 1. 获取时间范围
+        time_start = mql.time.start if mql.time else None
+        time_end = mql.time.end if mql.time else None
+        if not time_start or not time_end:
+            semantic_json = self._mql_to_semantic(mql)
+            from ..semantic_renderer import SemanticRenderer
+            renderer = SemanticRenderer()
+            return renderer.render(semantic_json)
+
+        try:
+            start_dt = datetime.strptime(time_start, "%Y-%m-%d")
+            end_dt = datetime.strptime(time_end, "%Y-%m-%d")
+        except:
+            semantic_json = self._mql_to_semantic(mql)
+            from ..semantic_renderer import SemanticRenderer
+            renderer = SemanticRenderer()
+            return renderer.render(semantic_json)
+
+        # 2. 结束日期不能超过昨天
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt_adjusted = end_dt
+        if end_dt >= today:
+            end_dt_adjusted = today - relativedelta(days=1)
+
+        # 3. 计算对比期
+        supports_yoy = "yoy" in pattern_values
+        supports_mom = "mom" in pattern_values
+
+        # 当前期（不变）
+        current_start = time_start
+        current_end = end_dt_adjusted.strftime("%Y-%m-%d")
+
+        # 同比：去年同期（去年同周期，始终计算）
+        if supports_yoy:
+            yoy_start = start_dt - relativedelta(years=1)
+            yoy_end = end_dt_adjusted - relativedelta(years=1)
+        else:
+            yoy_start = yoy_end = None
+
+        # 环比：复用统一计算逻辑
+        if supports_mom:
+            mom_start, mom_end = self._compute_mom_period(start_dt, end_dt_adjusted)
+        else:
+            mom_start = mom_end = None
+
+        # 4. 获取表名和指标字段
+        tables = [mql.metric.table if mql.metric and mql.metric.table else self.DEFAULT_TABLE]
+        metric_field = "ORDERED_PRODUCTSALES"
+        metric_alias = mql.metric.name if mql.metric and mql.metric.name else "value"
+        if mql.metric and mql.metric.starrocks_sql:
+            extractor = FieldExtractor(mql.metric)
+            parsed = extractor.parse()
+            metric_field = parsed.expression
+            metric_alias = mql.metric.name or parsed.alias
+        elif mql.metric and mql.metric.field:
+            metric_field = mql.metric.field
+
+        # 5. 构建 filter
+        OP_MAP = {
+            "eq": "=", "ne": "!=", "gt": ">", "gte": ">=",
+            "lt": "<", "lte": "<=", "like": "LIKE",
+            "in": "IN", "not_in": "NOT IN", "between": "BETWEEN",
+        }
         filter_parts = []
+
+        # 时间范围：包含所有对比期
+        min_start = current_start
+        if mom_start and str(mom_start.strftime("%Y-%m-%d")) < min_start:
+            min_start = mom_start.strftime("%Y-%m-%d")
+        if yoy_start and str(yoy_start.strftime("%Y-%m-%d")) < min_start:
+            min_start = yoy_start.strftime("%Y-%m-%d")
+        filter_parts.append(f"FDATE >= '{min_start}'")
+        filter_parts.append(f"FDATE <= '{current_end}'")
+
+        # 从 mql.filters 获取显式过滤器
         for f in mql.filters:
-            if f.field and f.value is not None:
-                op = f.operator.value if hasattr(f.operator, 'value') else f.operator
-                safe_field = self._validate_field_name(f.field)
-                if op == "eq":
-                    filter_parts.append(f"{safe_field} = '{self._sanitize_value(f.value)}'")
-                elif op == "gt":
-                    filter_parts.append(f"{safe_field} > '{self._sanitize_value(f.value)}'")
-                elif op == "lt":
-                    filter_parts.append(f"{safe_field} < '{self._sanitize_value(f.value)}'")
-                elif op == "in":
-                    values = f.value if isinstance(f.value, list) else [f.value]
-                    safe_values = "', '".join([self._sanitize_value(v) for v in values])
-                    filter_parts.append(f"{safe_field} IN ('{safe_values}')")
-                elif op == "between":
-                    if isinstance(f.value, list) and len(f.value) == 2:
-                        filter_parts.append(f"{safe_field} BETWEEN '{self._sanitize_value(f.value[0])}' AND '{self._sanitize_value(f.value[1])}'")
-        dim_filter_parts = []
+            op_raw = f.operator.value if hasattr(f.operator, 'value') else str(f.operator)
+            op_val = OP_MAP.get(op_raw, op_raw)
+            filter_parts.append(f"{f.field} {op_val} '{f.value}'")
+
+        # 从有具体值的维度生成过滤器
         for dim in mql.dimensions:
             if dim.value:
-                col = dim.column or self._get_dimension_column(dim.type)
+                col = dim.column if dim.column else self._get_dimension_column(dim.type)
                 if col:
-                    safe_col = self._validate_field_name(col)
-                    dim_filter_parts.append(f"{safe_col} = '{self._sanitize_value(dim.value)}'")
-        time_cond = f"(FDATE >= '{start}' AND FDATE <= '{end}')"
-        all_parts = filter_parts + dim_filter_parts
-        if all_parts:
-            return f"({time_cond} AND {' AND '.join(all_parts)})"
-        return time_cond
+                    filter_parts.append(f"{col} = '{dim.value}'")
 
-    def _build_mom_sql(self, mql: MQLSchema) -> str:
-        """构建 MoM/YOY 对比 SQL
+        filter_sql = " AND ".join(filter_parts)
 
-        使用条件聚合在一个查询中计算当前周期和对比周期的值。
-        """
-        logger.info(f"[_build_mom_sql] Building MoM/YOY SQL")
+        # 6. 构建 CASE WHEN 列
+        cases = []
+        # 当前期
+        cases.append(f"SUM(CASE WHEN FDATE >= '{current_start}' AND FDATE <= '{current_end}' THEN {metric_field} ELSE 0 END) AS {metric_alias}_raw")
+        # 环比
+        if supports_mom:
+            cases.append(f"SUM(CASE WHEN FDATE >= '{mom_start.strftime('%Y-%m-%d')}' AND FDATE <= '{mom_end.strftime('%Y-%m-%d')}' THEN {metric_field} ELSE 0 END) AS mom_val")
+        # 同比
+        if supports_yoy:
+            cases.append(f"SUM(CASE WHEN FDATE >= '{yoy_start.strftime('%Y-%m-%d')}' AND FDATE <= '{yoy_end.strftime('%Y-%m-%d')}' THEN {metric_field} ELSE 0 END) AS yoy_val")
 
-        # 0. 去除 mql.dimensions 中的重复项（相同 type + value 只保留一个）
-        mql.dimensions = self._deduplicate_dimensions(mql.dimensions)
-        logger.info(f"[_build_mom_sql] 去重后维度: {[(d.type, d.value) for d in mql.dimensions]}")
-
-        # 1. 获取业务维度列（不包括 YEARS, MONTHS）
-        # 注意：只有当维度没有具体值时才加入 GROUP BY
-        # 如果维度有具体值（如 GROUP_2 = '智能云存储'），已经通过 WHERE 过滤，不需要 GROUP BY
-        dim_columns = []
-        dim_columns_for_groupby = []  # 用于 GROUP BY 的维度列（即使有值也要加进去）
+        # 7. 收集维度列（无具体值的维度进 SELECT 和 GROUP BY）
+        dim_cols = []
         for dim in mql.dimensions:
-            col = dim.column
-            if not col:
-                col = self._get_dimension_column(dim.type)
-            if col:
-                # 无论是否有值，都收集到 dim_columns_for_groupby（用于 GROUP BY）
-                dim_columns_for_groupby.append(col)
-                # 只有当维度没有具体值时才加入 dim_columns（用于 SELECT 和 GROUP BY）
-                if not dim.value:
-                    dim_columns.append(col)
-                    logger.info(f"[_build_mom_sql] 维度 {col} 无具体值，加入 GROUP BY")
-                else:
-                    logger.info(f"[_build_mom_sql] 维度 {col} = '{dim.value}' 有具体值，不加入 SELECT/GROUP BY dim_columns")
+            if dim.value:
+                continue  # 有具体值的维度已经作为 filter
+            col = dim.column if dim.column else self._get_dimension_column(dim.type)
+            if col and col not in dim_cols:
+                dim_cols.append(col)
 
-        # 2. 获取当前周期时间条件
-        current_where = self._build_where(mql)
-        if current_where.upper().startswith("WHERE"):
-            current_where = current_where[5:].strip()
-        current_where_sql = f"WHERE {current_where}" if current_where else "WHERE 1=1"
+        # 7. 构建 SELECT
+        select_parts = []
+        if dim_cols:
+            select_parts.append(", ".join(dim_cols))
+        select_parts.extend(cases)
 
-        # 3. 分别获取 MoM 和 YoY 对比周期时间条件
-        # 无论时间跨度如何，都同时计算 MoM 和 YoY（用户要求同时返回两者）
-        mom_start = ""
-        mom_end = ""
-        yoy_start = ""
-        yoy_end = ""
+        # 8. 构建 GROUP BY
+        group_by = f"GROUP BY {', '.join(dim_cols)}" if dim_cols else ""
 
-        # 从 current_where 提取当前周期的 start 和 end
-        import re
-        start_match = re.search(r"FDATE >= '(\d{4}-\d{2}-\d{2})'", current_where)
-        end_match = re.search(r"FDATE <= '(\d{4}-\d{2}-\d{2})'", current_where)
-        current_start_dt = None
-        current_end_dt = None
-        day_count = 0
-        if start_match and end_match:
+        # 9. 构建基础 SQL
+        base_sql = f"""
+SELECT
+    {','.join(select_parts)}
+FROM {tables[0]}
+WHERE {filter_sql}
+{group_by}
+"""
+
+        # 10. 如果需要百分比变化，用子查询包装（因为不能在同层 SELECT 引用列别名）
+        if supports_mom or supports_yoy:
+            change_cols = []
+            if supports_mom:
+                change_cols.append(
+                    f"CASE WHEN t.{metric_alias}_raw > 0 AND t.mom_val > 0 "
+                    f"THEN CONCAT(IF(t.{metric_alias}_raw - t.mom_val >= 0, '+', ''), "
+                    f"CAST((t.{metric_alias}_raw - t.mom_val) / t.mom_val * 100 AS VARCHAR), '%') "
+                    f"ELSE NULL END AS mom_change"
+                )
+            if supports_yoy:
+                change_cols.append(
+                    f"CASE WHEN t.{metric_alias}_raw > 0 AND t.yoy_val > 0 "
+                    f"THEN CONCAT(IF(t.{metric_alias}_raw - t.yoy_val >= 0, '+', ''), "
+                    f"CAST((t.{metric_alias}_raw - t.yoy_val) / t.yoy_val * 100 AS VARCHAR), '%') "
+                    f"ELSE NULL END AS yoy_change"
+                )
+
+            # 基础列（维度列 + 值列，只包含实际存在的列）
+            value_cols = [f'{metric_alias}_raw']
+            if supports_mom:
+                value_cols.append('mom_val')
+            if supports_yoy:
+                value_cols.append('yoy_val')
+
+            if dim_cols:
+                all_cols = [f"t.{c}" for c in dim_cols] + [f"t.{c}" for c in value_cols]
+                sql = f"""
+SELECT {', '.join(all_cols)}, {', '.join(change_cols)}
+FROM (
+{base_sql}
+) t
+"""
+            else:
+                all_cols = [f"t.{c}" for c in value_cols]
+                sql = f"""
+SELECT {', '.join(all_cols)}, {', '.join(change_cols)}
+FROM (
+{base_sql}
+) t
+"""
+        else:
+            sql = base_sql
+
+        logger.info(f"[_generate_period_comparison_sql] SQL: {sql[:500]}")
+        return sql
+
+    # =========================================================================
+    # CTE Jinja2 渲染（Phase 3-4）
+    # =========================================================================
+
+    def _mql_to_semantic(self, mql: MQLSchema) -> dict:
+        """
+        将 MQLSchema 转换为语义 JSON，供 SemanticRenderer 渲染 CTE SQL
+
+        数据流：
+        1. 从 starrocks_sql 提取 agg_expression（原子指标）
+        2. 从 calculation_patterns 生成 calculated_metrics
+        3. 收集 dimensions / filters / joins 等
+        """
+        # 1. 表名
+        tables = [mql.metric.table if mql.metric and mql.metric.table else self.DEFAULT_TABLE]
+
+        # 2. Calculated metrics（从 calculation_patterns 映射，需先构建以判断是否需要时间列）
+        calculated_metrics: List[dict] = []
+        for p in (mql.calculation_patterns or []):
+            pval = p.value if isinstance(p, Enum) else str(p)
+            if pval == "yoy":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": "yoy_val", "op": "yoy", "args": [metric_name]})
+            elif pval == "mom":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": "mom_val", "op": "mom", "args": [metric_name]})
+            elif pval == "running_sum":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": f"{metric_name}_running_sum", "op": "running_sum", "args": [metric_name]})
+            elif pval == "ranking":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": f"{metric_name}_rank", "op": "rank", "args": [metric_name]})
+            elif pval == "partition_ratio":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": f"{metric_name}_ratio", "op": "partition_ratio", "args": [metric_name]})
+            elif pval == "ma7":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": f"{metric_name}_ma7", "op": "ma7", "args": [metric_name]})
+            elif pval == "wow":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": "wow_val", "op": "wow", "args": [metric_name]})
+            elif pval == "percentage":
+                metric_name = mql.metric.name if mql.metric else ""
+                if metric_name:
+                    calculated_metrics.append({"name": f"{metric_name}_pct", "op": "percentage", "args": [metric_name]})
+
+        # 3. 维度列
+        # - 有具体值的维度 → 只当 filter，不进 GROUP BY
+        # - 无具体值的维度 → 进 GROUP BY
+        # - 时间维度 → 根据范围跨度决定粒度后加入
+        dimensions: List[str] = []
+        date_col_candidates = {self.COL_DATE, "DT", "DATE", "STAT_DATE"}
+        dt_column = self.COL_DATE
+        for dim in mql.dimensions:
+            col = dim.column if dim.column else self._get_dimension_column(dim.type)
+            if col in date_col_candidates:
+                dt_column = col
+            # 有具体值的维度不进 GROUP BY（已作为 filter）
+            if dim.value:
+                continue
+            if col and col not in dimensions:
+                dimensions.append(col)
+
+        # 时间粒度判断：跨月范围用 MONTHS，否则用 FDATE
+        time_dim_col = self.COL_DATE
+        if mql.time and mql.time.start and mql.time.end:
             try:
-                from datetime import datetime, timedelta
-                current_start_dt = datetime.strptime(start_match.group(1), "%Y-%m-%d")
-                current_end_dt = datetime.strptime(end_match.group(1), "%Y-%m-%d")
-                day_count = (current_end_dt - current_start_dt).days + 1
+                from datetime import datetime
+                start_dt = datetime.strptime(mql.time.start, "%Y-%m-%d")
+                end_dt = datetime.strptime(mql.time.end, "%Y-%m-%d")
+                days = (end_dt - start_dt).days
+                if days > 31:
+                    # 跨月用 MONTHS 列（但如果有 yoy/mom 窗口函数，仍需 FDATE 做 ORDER BY）
+                    has_window_func = any(
+                        p.value in ("yoy", "mom", "wow", "ma7", "running_sum")
+                        for p in (mql.calculation_patterns or [])
+                        if hasattr(p, 'value')
+                    )
+                    if not has_window_func:
+                        time_dim_col = self.COL_MONTHS
+                        logger.info(f"[SQLGenerator] 时间范围 {days} 天，使用 MONTHS 聚合")
+                    else:
+                        logger.info(f"[SQLGenerator] 时间范围 {days} 天，但有窗口函数，使用 FDATE")
             except Exception:
                 pass
 
-        # 使用 MQLSchema 的 has_mom/has_yoy 属性判断是否需要环比/同比计算
-        # has_mom_compare/has_yoy_compare 是基于是否成功推断出对比周期
-        has_mom = mql.has_mom
-        has_yoy = mql.has_yoy
-
-        # 如果有 mql.comparison 的指定时间，优先使用
-        if mql.comparison:
-            if mql.comparison.compare_period_start and mql.comparison.compare_period_end:
-                # 用户指定了对比时间，根据 patterns 决定是 MoM 还是 YoY
-                if has_mom:
-                    mom_start = mql.comparison.compare_period_start
-                    mom_end = mql.comparison.compare_period_end
-                if has_yoy:
-                    yoy_start = mql.comparison.compare_period_start
-                    yoy_end = mql.comparison.compare_period_end
-
-        # 如果没有指定对比时间，自动推断
-        if current_start_dt and current_end_dt:
-            # 推断 MoM（环比上月）：无论时间跨度如何，都计算 MoM
-            if has_mom:
-                try:
-                    from datetime import timedelta
-                    import calendar
-                    # 环比上月：上月 1 日到对应天数
-                    # 例如 4-01~4-21（21天）→ 3-01~3-20
-                    prev_month_start = current_start_dt - timedelta(days=1)
-                    prev_month_start = prev_month_start.replace(day=1)
-                    prev_month_max_day = calendar.monthrange(prev_month_start.year, prev_month_start.month)[1]
-                    prev_end_day = min(day_count, prev_month_max_day)
-                    mom_start = prev_month_start.strftime("%Y-%m-%d")
-                    mom_end = prev_month_start.replace(day=prev_end_day).strftime("%Y-%m-%d")
-                    logger.info(f"[_build_mom_sql] Inferred MoM: current {current_start_dt.date()}~{current_end_dt.date()} ({day_count}天), compare {mom_start} to {mom_end}")
-                except Exception as e:
-                    logger.warning(f"[_build_mom_sql] 推断 MoM 失败: {e}")
-
-            # 推断 YoY（同比去年同期）：始终计算
-            if has_yoy:
-                try:
-                    prev_year_start = current_start_dt.replace(year=current_start_dt.year - 1)
-                    prev_year_end = current_end_dt.replace(year=current_end_dt.year - 1)
-                    yoy_start = prev_year_start.strftime("%Y-%m-%d")
-                    yoy_end = prev_year_end.strftime("%Y-%m-%d")
-                    logger.info(f"[_build_mom_sql] Inferred YoY: current {current_start_dt.date()}~{current_end_dt.date()} ({day_count}天), compare {yoy_start} to {yoy_end}")
-                except Exception as e:
-                    logger.warning(f"[_build_mom_sql] 推断 YoY 失败: {e}")
-
-        # 4. 获取指标的原始字段表达式（用于条件聚合，不需要外层聚合函数）
-        metric_field_sql = self._extract_raw_metric_expression(mql.metric)
-        if not metric_field_sql:
-            return f"SELECT 'ERROR: 指标无 starrocks_sql' AS error"
-
-        # 4.5 检测是否复合指标（包含除法，需要拆分子分母分别聚合）
-        is_compound_metric = '/' in metric_field_sql.upper() and metric_field_sql.strip().upper().startswith('CASE')
-        molecule_field = None  # 裸字段（不含 SUM），用于条件聚合内层
-        denominator_field = None
-        if is_compound_metric:
-            starrocks_sql = (mql.metric.starrocks_sql or "") if mql.metric else ""
-            if starrocks_sql:
-                molecule_expr, denominator_expr = self._extract_compound_parts(starrocks_sql)
-                if molecule_expr and denominator_expr:
-                    molecule_field = molecule_expr
-                    denominator_field = denominator_expr
-                    logger.info(f"[_build_mom_sql] 复合指标(CASE WHEN): 分子={molecule_field}, 分母={denominator_field}")
-                else:
-                    # 解析失败，降级为简单指标（用原始 CASE WHEN 做条件聚合）
-                    is_compound_metric = False
-                    logger.warning(f"[_build_mom_sql] 复合指标解析失败，降级为简单指标模式")
-            if not molecule_field:
-                is_compound_metric = False
-        else:
-            logger.info(f"[_build_mom_sql] 简单指标: metric_field_sql={metric_field_sql}")
-
-        # 5. 构建 MoM SQL - 使用条件聚合避免 JOIN 问题
-        # 关键：如果没有业务维度（dim_columns 为空），不按 MONTHS 分组，
-        #      让两个月的数据直接聚合在一起计算 change_rate
-        current_cond = current_where[6:].strip() if current_where.upper().startswith('WHERE') else current_where
-
-        # ========== 提取纯时间条件（用于 WHERE 的 OR 部分） ==========
-        # current_cond 包含 time + filters + dimensions，需要分离
-        # 时间条件格式: FDATE >= '...' AND FDATE <= '...'
-        import re
-        time_pattern = r"(FDATE >= '(\d{4}-\d{2}-\d{2})' AND FDATE <= '(\d{4}-\d{2}-\d{2})')"
-        time_match = re.search(time_pattern, current_cond)
-        if time_match:
-            current_time_cond = time_match.group(1)  # e.g., "FDATE >= '2026-04-01' AND FDATE <= '2026-04-23'"
-        else:
-            current_time_cond = current_cond  # fallback
-        # =====================================================================
-
-        # 6. 构建 MoM 和 YoY 对比周期条件
-        # 注意：where_mom 和 where_yoy 必须包含与 current_where 相同的 filters 和 dimensions，否则对比基数不一致
-
-        # 构建 MoM 和 YoY 的对比条件
-        where_mom = self._build_comparison_period_where(mom_start, mom_end, mql) if mom_start and mom_end else ""
-        where_yoy = self._build_comparison_period_where(yoy_start, yoy_end, mql) if yoy_start and yoy_end else ""
-
-        has_mom_compare = bool(where_mom)
-        has_yoy_compare = bool(where_yoy)
-
-        # 提取纯时间条件（用于 WHERE）
-        import re
-        time_pattern = r"(FDATE >= '(\d{4}-\d{2}-\d{2})' AND FDATE <= '(\d{4}-\d{2}-\d{2})')"
-        time_match = re.search(time_pattern, current_cond)
-        if time_match:
-            current_time_only = time_match.group(1)
-        else:
-            current_time_only = current_cond
-
-        # ========================================================
-        # 构建最终 SQL：同时支持 MoM 和 YoY
-        # ========================================================
-
-        # 用于 GROUP BY 的列：包括无值的维度列
-        dim_select = ", ".join(dim_columns)
-        dim_group = dim_select
-        has_dim_groupby = bool(dim_columns)
-
-        logger.info(f"[_build_mom_sql] dim_columns={dim_columns}, has_dim_groupby={has_dim_groupby}")
-
-        # ========================================================
-        # 构建最终 SQL：统一使用 mql.has_mom/has_yoy 控制输出列
-        # has_mom_compare/has_yoy_compare 控制是否有对比周期数据
-        # ========================================================
-
-        # 构建当前值表达式（总是需要）
-        curr_val = self._build_value_expr(
-            current_cond if has_dim_groupby else current_time_only,
-            metric_field_sql, is_compound_metric, molecule_field, denominator_field
+        # 时间维度加入（当没有显式维度，或所有显式维度都有具体值时，作为 GROUP BY 维度）
+        # 注意：如果有 yoy/mom 等窗口函数，需要 YEAR + MONTHS 进行正确的同比/环比计算
+        has_window_func = any(
+            p.value in ("yoy", "mom", "wow", "ma7", "running_sum")
+            for p in (mql.calculation_patterns or [])
+            if hasattr(p, 'value')
         )
-
-        # 构建对比周期表达式（仅当有对比周期时）
-        mom_val = mom_chg = yoy_val = yoy_chg = None
-        if has_mom_compare:
-            mom_val = self._build_value_expr(where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-            mom_chg = self._build_change_expr(
-                current_cond if has_dim_groupby else current_time_only,
-                where_mom, metric_field_sql, is_compound_metric, molecule_field, denominator_field
-            )
-        if has_yoy_compare:
-            yoy_val = self._build_value_expr(where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field)
-            yoy_chg = self._build_change_expr(
-                current_cond if has_dim_groupby else current_time_only,
-                where_yoy, metric_field_sql, is_compound_metric, molecule_field, denominator_field
-            )
-
-        # 构建 SELECT 列（根据是否请求了环比/同比决定输出哪些列）
-        select_parts = []
-        if has_dim_groupby:
-            select_parts.append(dim_select)
-        select_parts.append(f"{curr_val} AS \"当前值\"")
-        if has_mom:
-            if mom_val:
-                select_parts.append(f"{mom_val} AS \"环比值\"")
-                select_parts.append(f"{mom_chg} AS \"环比变化\"")
-            else:
-                select_parts.append("NULL AS \"环比值\"")
-                select_parts.append("NULL AS \"环比变化\"")
-        if has_yoy:
-            if yoy_val:
-                select_parts.append(f"{yoy_val} AS \"同比值\"")
-                select_parts.append(f"{yoy_chg} AS \"同比变化\"")
-            else:
-                select_parts.append("NULL AS \"同比值\"")
-                select_parts.append("NULL AS \"同比变化\"")
-        select_clause = ",\n       ".join(select_parts)
-
-        # 构建 WHERE 子句
-        where_parts = [f"( {current_cond} )"]
-        if has_mom_compare:
-            where_parts.append(f"( {where_mom} )")
-        if has_yoy_compare:
-            where_parts.append(f"( {where_yoy} )")
-        where_clause = "\n   OR ".join(where_parts)
-
-        # 构建最终 SQL
-        sql_parts = [f"SELECT {select_clause}", f"FROM {self.DEFAULT_TABLE}", f"WHERE {where_clause}"]
-        if has_dim_groupby:
-            sql_parts.append(f"GROUP BY {dim_group}")
-            sql_parts.append(f"ORDER BY {dim_group}")
-            sql_parts.append("LIMIT 20")
-
-        sql = "\n".join(sql_parts)
-
-        logger.info(f"[_build_mom_sql] SQL: {sql[:300]}")
-        return sql
-
-    @staticmethod
-    def _extract_compound_parts(starrocks_sql: str) -> tuple:
-        """
-        从 CASE WHEN 复合指标 SQL 提取分子和分母表达式（不含聚合函数包装）
-
-        CASE WHEN 格式：
-            SELECT CASE WHEN SUM(...) = 0 THEN 0
-            ELSE (分子算术表达式) / SUM(分母字段) END AS alias FROM ...
-
-        例如：
-            分子：SUM(IFNULL(ORDERED_PRODUCTSALES, 0)) - SUM(IFNULL(COSTFEESS, 0))
-            分母：SUM(IFNULL(ORDERED_PRODUCTSALES, 0))
-
-        Returns:
-            tuple: (molecule_field, denominator_field) 不含外层 SUM()
-            例如: ("SUM(IFNULL(ORDERED_PRODUCTSALES, 0)) - SUM(IFNULL(COSTFEESS, 0))",
-                   "SUM(IFNULL(ORDERED_PRODUCTSALES, 0))")
-            如果解析失败返回 (None, None)
-        """
-        if not starrocks_sql:
-            return None, None
-
-        import re
-
-        # 直接用正则匹配 "ELSE (分子算术) / SUM(分母)" 模式
-        # 分子可能包含嵌套括号，用 lazy quantifier 匹配
-        # 结构: ELSE (arith) / SUM(col) END
-        import re
-
-        # 匹配 ELSE (分子) / SUM(分母内容) 的模式
-        # 非贪婪匹配 (.+?) 会在第一个 ) / SUM( 处停止，正好是外层 ELSE 的闭合
-        m = re.search(
-            r'ELSE\s*\((.+?)\)\s*/\s*(SUM|AVG|COUNT|MAX|MIN)\s*\(([^)]+)\)\s*END',
-            starrocks_sql, re.IGNORECASE | re.DOTALL
-        )
-        if not m:
-            return None, None
-
-        raw_molecule = m.group(1)  # "(SUM(IFNULL(ORD...)) - SUM(IFNULL(COSTFEESS, 0)))"
-        func_name = m.group(2).upper()
-        denom_inner = m.group(3)  # "IFNULL(ORDERED_PRODUCTSALES, 0)"
-
-        # 去掉分子最外层括号（分子算术表达式被包在括号里）
-        # 例如: "(SUM(a) - SUM(b))" -> "SUM(a) - SUM(b)"
-        molecule_clean = raw_molecule
-        if raw_molecule.startswith('(') and raw_molecule.endswith(')'):
-            # 验证括号是否配对
-            depth = 0
-            for ch in raw_molecule[1:-1]:
-                if ch == '(':
-                    depth += 1
-                elif ch == ')':
-                    depth -= 1
-                    if depth < 0:
-                        break
-            if depth == 0:
-                molecule_clean = raw_molecule[1:-1]
-
-        # 去掉分子和分母中的 SUM/AVG/COUNT/MAX/MIN 包装（用于条件聚合，外层 SUM 会做聚合）
-        def strip_aggregates(text: str) -> str:
-            """去掉所有 SUM/AVG/COUNT/MAX/MIN 包装"""
-            pattern = r'(SUM|AVG|COUNT|MAX|MIN)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)'
-            while True:
-                new_text = re.sub(pattern, r'\2', text, flags=re.IGNORECASE)
-                if new_text == text:
-                    break
-                text = new_text
-            return text
-
-        molecule_clean = strip_aggregates(molecule_clean)
-        denominator_full = strip_aggregates(f"{func_name}({denom_inner})")
-
-        logger.info(f"[_extract_compound_parts] molecule={molecule_clean}, denominator={denominator_full}")
-        return molecule_clean, denominator_full
-
-    def _build_value_expr(self, cond: str, metric_field_sql: str,
-                          is_compound: bool, molecule_field: str = None, denominator_field: str = None) -> str:
-        """构建值表达式（兼容简单指标和复合指标）
-
-        简单指标：SUM(CASE WHEN cond THEN metric_field_sql ELSE 0 END)
-        复合指标：CASE WHEN SUM(...分子...) = 0 THEN 0 ELSE SUM(...分子...) / NULLIF(SUM(...分母...), 0) END
-        """
-        if is_compound and molecule_field and denominator_field:
-            return (
-                f"CASE WHEN SUM(CASE WHEN {cond} THEN {molecule_field} ELSE 0 END) = 0 THEN 0 "
-                f"ELSE ROUND(SUM(CASE WHEN {cond} THEN {molecule_field} ELSE 0 END) / "
-                f"NULLIF(SUM(CASE WHEN {cond} THEN {denominator_field} ELSE 0 END), 0), 4) END"
-            )
-        else:
-            return f"SUM(CASE WHEN {cond} THEN {metric_field_sql} ELSE 0 END)"
-
-    def _build_change_expr(self, current_cond: str, compare_cond: str,
-                           metric_field_sql: str, is_compound: bool,
-                           molecule_field: str = None, denominator_field: str = None) -> str:
-        """构建变化率表达式
-
-        简单指标：(当前值 - 对比值) / 对比值 * 100
-        复合指标：(当前率 - 对比率) / 对比率 * 100
-        """
-        if is_compound and molecule_field and denominator_field:
-            # 分子分母分别聚合后外层做除法
-            curr_num = f"SUM(CASE WHEN {current_cond} THEN {molecule_field} ELSE 0 END)"
-            curr_den = f"NULLIF(SUM(CASE WHEN {current_cond} THEN {denominator_field} ELSE 0 END), 0)"
-            comp_num = f"SUM(CASE WHEN {compare_cond} THEN {molecule_field} ELSE 0 END)"
-            comp_den = f"NULLIF(SUM(CASE WHEN {compare_cond} THEN {denominator_field} ELSE 0 END), 0)"
-            return (
-                f"CASE WHEN {comp_den} IS NULL OR {comp_den} = 0 THEN NULL "
-                f"ELSE ROUND((({curr_num} / {curr_den}) - ({comp_num} / {comp_den})) / ({comp_num} / {comp_den}) * 100, 2) END"
-            )
-        else:
-            curr = f"SUM(CASE WHEN {current_cond} THEN {metric_field_sql} ELSE 0 END)"
-            comp = f"SUM(CASE WHEN {compare_cond} THEN {metric_field_sql} ELSE 0 END)"
-            return (
-                f"CASE WHEN {comp} > 0 "
-                f"THEN ROUND(({curr} - {comp}) / {comp} * 100, 2) "
-                f"ELSE NULL END"
-            )
-
-    def _extract_raw_metric_expression(self, metric: MQLMetric) -> str:
-        """从 metric 的 starrocks_sql 提取原始字段表达式（不含聚合函数）
-
-        用于条件聚合（CASE WHEN 内部），因为外层 SUM 会做聚合。
-
-        Returns:
-            str: 原始字段表达式，如 "IFNULL(a,0)-IFNULL(b,0)"
-        """
-        if not metric:
-            return "ORDERED_PRODUCTSALES"
-
-        expr = metric.starrocks_sql or ""
-        import re
-        # 提取 SELECT 和 FROM 之间的表达式
-        match = re.search(r'SELECT\s+(.+?)\s+FROM', expr, re.IGNORECASE | re.DOTALL)
-        if not match:
-            return FieldExtractor(metric).extract_raw()
-
-        full_expr = match.group(1).strip()
-
-        # 去掉 AS alias 别名部分（保留括号内的表达式）
-        # 例如 "(SUM(a) - SUM(b)) AS xxx" -> "(SUM(a) - SUM(b))"
-        full_expr = re.sub(r'\s+AS\s+[\w"]+\s*$', '', full_expr, flags=re.IGNORECASE)
-
-        def strip_aggregates(text: str) -> str:
-            """去掉所有 SUM/AVG/COUNT/MAX/MIN 包装，保留括号内的内容"""
-            pattern = r'(SUM|AVG|COUNT|MAX|MIN)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)'
-            while True:
-                new_text = re.sub(pattern, r'\2', text, flags=re.IGNORECASE)
-                if new_text == text:
-                    break
-                text = new_text
-            return text
-
-        # 去掉外层括号（如果整个表达式被包在括号里）
-        result = full_expr
-        while result.startswith('(') and result.endswith(')'):
-            # 验证括号是否配对
-            depth = 0
-            for ch in result[1:-1]:
-                if ch == '(':
-                    depth += 1
-                elif ch == ')':
-                    depth -= 1
-                    if depth < 0:
-                        break
-            if depth == 0:
-                result = result[1:-1]
-            else:
-                break
-
-        stripped = strip_aggregates(result)
-        logger.info(f"[_extract_raw_metric_expression] {full_expr} -> {stripped}")
-        return stripped
-
-    def _extract_metric_expression(self, metric: MQLMetric, prefix: str) -> tuple:
-        """从 metric 的 starrocks_sql 提取聚合表达式和别名
-
-        Returns:
-            (expression: str, alias: str)
-            expression: 直接可用于 SELECT 的聚合表达式，如 "SUM(TOTALORDERS)"
-            alias: SQL 别名，如 "metric_a"
-        """
-        if not metric:
-            field = "ORDERED_PRODUCTSALES"
-            return f"SUM({field})", prefix
-
-        extractor = FieldExtractor(metric)
-        expr, alias = extractor.extract_full()
-
-        # 如果提取的别名等于默认字段，用 prefix 覆盖
-        if alias == extractor._default_field:
-            alias = prefix
-
-        return expr, alias
-
-    def _build_select(self, mql: MQLSchema) -> str:
-        """构建 SELECT 子句"""
-        logger.info(f"[_build_select] starrocks_sql={mql.metric.starrocks_sql[:80] if mql.metric and mql.metric.starrocks_sql else 'EMPTY'}")
-        select_parts = []
-
-        # 添加维度列（去重）
-        # 只有维度没有具体值时才加入 SELECT（否则已在 WHERE 过滤）
-        seen_dim_cols = set()
-        for dim in mql.dimensions:
-            col = dim.column if dim.column else self._get_dimension_column(dim.type)
-            if col and col not in seen_dim_cols and not dim.value:
-                seen_dim_cols.add(col)
-                select_parts.append(col)
-
-        # 如果有时间过滤，确保时间列加入 SELECT
-        # QUERY_TREND 根据时间范围决定粒度，QUERY_RANKING 不按时间拆分
-        if mql.intent == MQLIntent.QUERY_TREND and mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            if mql.time.days <= 31:
-                if "FDATE" not in select_parts:
-                    select_parts.append("FDATE")
-            else:
-                if self.COL_MONTHS not in select_parts:
-                    select_parts.append(f"MONTH(FDATE) AS MONTHS")
-        elif mql.intent != MQLIntent.QUERY_RANKING:
-            if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-                if self.COL_MONTHS not in select_parts:
-                    select_parts.append(f"MONTH(FDATE) AS MONTHS")
-
-        # 检查是否有维度分组（GROUP_X 等）- 有维度分组时不需要日期范围字段
-        has_dimension_group = any(
-            (dim.type and dim.type.startswith('GROUP_')) or dim.type in ('REGION', 'PLATFORM', 'FSITE', 'FCOUNTRY', 'FBRAND', 'FPRODUCTLINE')
-            for dim in mql.dimensions
-        )
-
-        # 只有在没有维度分组时才添加日期范围（方便前端显示）
-        if not has_dimension_group and "FDATE_START" not in " ".join(select_parts):
-            # 时间序列查询添加日期范围
-            if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-                if self.COL_MONTHS in " ".join(select_parts):
-                    select_parts.append(f"MIN(FDATE) AS FDATE_START")
-                    select_parts.append(f"MAX(FDATE) AS FDATE_END")
-
-        # 检查占比模式（percentage）：生成 分子 * 100.0 / 分母 SQL
-        has_percentage = any(
-            (p.value if isinstance(p, Enum) else p) == CalculationPattern.PERCENTAGE.value
-            for p in mql.calculation_patterns
-        )
-        # 优先使用主指标已有的 starrocks_sql（如果已经包含占比计算）
-        if has_percentage and mql.metric and mql.metric.starrocks_sql:
-            starrocks_sql = mql.metric.starrocks_sql.strip()
-            # 如果 starrocks_sql 已经包含除法（占比计算），需要加 *100 转为百分比
-            if '/' in starrocks_sql.upper():
-                extractor = FieldExtractor(mql.metric)
-                expr, alias = extractor.extract_full()
-                # 如果 starrocks_sql 已经有了 *100 或 /100（已经是百分比），不再乘
-                sql_upper = starrocks_sql.upper()
-                if '* 100' not in sql_upper and '/ 100' not in sql_upper and '*100' not in sql_upper:
-                    ratio_expr = f"ABS({expr} * 100.0)"
-                    select_parts.append(f"{ratio_expr} AS {alias}")
-                    logger.info(f"[_build_select] 占比模式（使用主指标starrocks_sql）: {ratio_expr}")
-                else:
-                    select_parts.append(f"{expr} AS {alias}")
-                    logger.info(f"[_build_select] 占比模式（使用主指标starrocks_sql，已含百分比）: {expr}")
-            elif mql.molecule_metric and mql.denominator_metric:
-                # starrocks_sql 不包含除法，但有 molecule/denominator 时构造
-                mol = mql.molecule_metric
-                den = mql.denominator_metric
-                mol_sql = mol.starrocks_sql or ""
-                den_sql = den.starrocks_sql or ""
-                mol_expr = FieldExtractor.extract_molecule(mol_sql) if mol_sql else (mol.field or "REFUND_QTY")
-                den_expr = FieldExtractor.extract_denominator(den_sql) if den_sql else (den.field or "ORDERED_PRODUCTSALES")
-
-                def _ensure_sum(expr):
-                    stripped = expr.strip().upper()
-                    if any(stripped.startswith(agg) for agg in ['SUM(', 'AVG(', 'COUNT(', 'MAX(', 'MIN(']):
-                        return expr
-                    return f"SUM({expr})"
-
-                ratio_expr = f"ABS({_ensure_sum(mol_expr)} * 100.0 / {_ensure_sum(den_expr)})"
-                if mol.name and den.name:
-                    ratio_name = f"{mol.name}占{den.name}比重"
-                elif mol.name:
-                    ratio_name = f"{mol.name}占比"
-                else:
-                    ratio_name = "占比"
-                select_parts.append(f"{ratio_expr} AS {ratio_name}")
-                logger.info(f"[_build_select] 占比模式: {mol_expr} * 100.0 / {den_expr}")
-        elif has_percentage and mql.molecule_metric and mql.denominator_metric:
-            # 回退：没有主指标 starrocks_sql，用 molecule/denominator 构造
-            mol = mql.molecule_metric
-            den = mql.denominator_metric
-            mol_sql = mol.starrocks_sql or ""
-            den_sql = den.starrocks_sql or ""
-
-            mol_expr = FieldExtractor.extract_molecule(mol_sql) if mol_sql else (mol.field or "REFUND_QTY")
-            den_expr = FieldExtractor.extract_denominator(den_sql) if den_sql else (den.field or "ORDERED_PRODUCTSALES")
-
-            def _ensure_sum(expr):
-                stripped = expr.strip().upper()
-                if any(stripped.startswith(agg) for agg in ['SUM(', 'AVG(', 'COUNT(', 'MAX(', 'MIN(']):
-                    return expr
-                return f"SUM({expr})"
-
-            ratio_expr = f"ABS({_ensure_sum(mol_expr)} * 100.0 / {_ensure_sum(den_expr)})"
-
-            if mol.name and den.name:
-                ratio_name = f"{mol.name}占{den.name}比重"
-            elif mol.name:
-                ratio_name = f"{mol.name}占比"
-            else:
-                ratio_name = "占比"
-
-            # ========== 根本修复：占比别名也加双引号支持中文 ==========
-            select_parts.append(f"{ratio_expr} AS \"{ratio_name}\"")
-            logger.info(f"[_build_select] 占比模式: {mol_expr} * 100.0 / {den_expr} AS \"{ratio_name}\"")
-        # 添加指标列
-        elif mql.metric:
-            # 使用 FieldExtractor 统一解析
-            extractor = FieldExtractor(mql.metric)
-            expr, alias = extractor.extract_full()
-            # ========== 根本修复：直接使用 metric.name 作为中文别名 ==========
-            # 避免 starrocks_sql 中没有中文别名导致的列名映射错误
-            chinese_name = mql.metric.name if mql.metric.name else alias
-            select_parts.append(f"{expr} AS \"{chinese_name}\"")
-            logger.info(f"[_build_select] 指标表达式: {expr} AS \"{chinese_name}\"")
-
-        # 多指标支持：处理 mql.metrics 中的额外指标
-        # 按 code 去重，避免同一指标的不同名称变体（如"毛利"和"销售毛利"）重复添加
-        seen_metric_codes = set()
-        if mql.metric and mql.metric.code:
-            seen_metric_codes.add(mql.metric.code)
-        for i, metric in enumerate(mql.metrics):
-            if not metric or not metric.name:
-                continue
-            # 跳过与主指标同名的项
-            if mql.metric and metric.name == mql.metric.name:
-                continue
-            # 按 code 去重：跳过与已添加指标 code 相同的项
-            if metric.code and metric.code in seen_metric_codes:
-                logger.info(f"[_build_select] 多指标[{i}] '{metric.name}' code={metric.code} 已存在，跳过")
-                continue
-            if metric.code:
-                seen_metric_codes.add(metric.code)
-            logger.info(f"[_build_select] 多指标[{i}]: {metric.name}")
-
-            # 使用 FieldExtractor 统一解析
-            extractor = FieldExtractor(metric)
-            expr, alias = extractor.extract_full()
-            # ========== 根本修复：直接使用 metric.name 作为中文别名 ==========
-            chinese_name = metric.name if metric.name else alias
-            select_parts.append(f"{expr} AS \"{chinese_name}\"")
-
-        # 如果没有选择任何列，添加占位符
-        if not select_parts:
-            select_parts.append("1 AS placeholder")
-
-        return f"SELECT {', '.join(select_parts)}"
-
-    def _build_where(self, mql: MQLSchema) -> str:
-        """构建 WHERE 子句"""
-        where_parts = []
-
-        # 时间条件
-        if mql.time:
-            if mql.time.type in (TimeType.DATE_RANGE, TimeType.ABSOLUTE_MONTH, TimeType.ABSOLUTE_QUARTER, TimeType.ABSOLUTE_YEAR):
-                # date_range、absolute_month、absolute_quarter、absolute_year 都使用 start/end
-                if mql.time.start:
-                    where_parts.append(f"FDATE >= '{mql.time.start}'")
-                if mql.time.end:
-                    where_parts.append(f"FDATE <= '{mql.time.end}'")
-            elif mql.time.type == TimeType.RELATIVE:
-                # 优先使用已计算的 start/end（来自 MQL generator 的 TimeParser.parse）
-                # 避免重新解析导致日期被 datetime.now() 覆盖
-                if mql.time.start and mql.time.end:
-                    where_parts.append(f"FDATE >= '{mql.time.start}'")
-                    where_parts.append(f"FDATE <= '{mql.time.end}'")
-                elif mql.time.original:
-                    # 只有在没有 start/end 时才重新解析
-                    date_range = self._parse_relative_time(mql.time.original, mql)
-                    where_parts.append(date_range)
-
-        # 筛选条件
-        for filter_obj in mql.filters:
-            if filter_obj.field and filter_obj.value is not None:
-                op = filter_obj.operator.value if hasattr(filter_obj.operator, 'value') else filter_obj.operator
-                # 验证字段名，防止注入
-                safe_field = self._validate_field_name(filter_obj.field)
-                if op == "eq":
-                    where_parts.append(f"{safe_field} = '{self._sanitize_value(filter_obj.value)}'")
-                elif op == "gt":
-                    where_parts.append(f"{safe_field} > '{self._sanitize_value(filter_obj.value)}'")
-                elif op == "lt":
-                    where_parts.append(f"{safe_field} < '{self._sanitize_value(filter_obj.value)}'")
-                elif op == "in":
-                    values = filter_obj.value if isinstance(filter_obj.value, list) else [filter_obj.value]
-                    safe_values = "', '".join([self._sanitize_value(v) for v in values])
-                    where_parts.append(f"{safe_field} IN ('{safe_values}')")
-                elif op == "between":
-                    if isinstance(filter_obj.value, list) and len(filter_obj.value) == 2:
-                        where_parts.append(f"{safe_field} BETWEEN '{self._sanitize_value(filter_obj.value[0])}' AND '{self._sanitize_value(filter_obj.value[1])}'")
-
-        # 维度过滤（去重）
-        seen_dim_filter = set()
-        for dim in mql.dimensions:
-            if dim.value:
-                # 优先使用 column，如果为空则从类型映射获取
-                col = dim.column
-                if not col:
-                    col = self._get_dimension_column(dim.type)
-                if col:
-                    # 去重：(col, value) 组合重复则跳过
-                    filter_key = (col, dim.value)
-                    if filter_key in seen_dim_filter:
-                        continue
-                    seen_dim_filter.add(filter_key)
-                    # 验证列名（col 来自 DIMENSION_COLUMN_MAP，应该是安全的）
-                    safe_col = self._validate_field_name(col)
-                    where_parts.append(f"{safe_col} = '{self._sanitize_value(dim.value)}'")
-
-        if where_parts:
-            return "WHERE " + " AND ".join(where_parts)
-        return ""
-
-    def _parse_relative_time(self, original: str, mql=None) -> str:
-        """解析相对时间表达式，返回 SQL 时间条件，并同步更新 mql.time.start/end"""
-        from ai.engine.time_parser import TimeParser
-        from datetime import datetime
-
-        logger.info(f"[_parse_relative_time] 收到时间表达式: '{original}'")
-
-        result = TimeParser().parse(original)
-        if result and result.get('start') and result.get('end'):
-            start, end = result['start'], result['end']
-        else:
-            # 无法解析，默认本月
-            today = datetime.now()
-            start = f"{today.year}-{today.month:02d}-01"
-            end = today.strftime("%Y-%m-%d")
-            logger.warning(f"[_parse_relative_time] 无法解析 '{original}'，降级为本月: {start}~{end}")
-
-        if mql and hasattr(mql, 'time') and mql.time:
-            mql.time.start = start
-            mql.time.end = end
-            logger.info(f"[_parse_relative_time] 已设置 mql.time: {start}~{end}")
-
-        return f"{self.COL_DATE} >= '{start}' AND {self.COL_DATE} <= '{end}'"
-
-    def _build_group_by(self, mql: MQLSchema) -> str:
-        """构建 GROUP BY 子句"""
-        group_by_parts = []
-        seen_cols = set()  # 去重
-
-        # 添加维度列
-        # 只有维度没有具体值时才加入 GROUP BY（否则已在 WHERE 过滤）
-        for dim in mql.dimensions:
-            # 优先使用 column，如果为空则从类型映射获取
-            col = dim.column if dim.column else self._get_dimension_column(dim.type)
-            if col and col not in seen_cols and not dim.value:
-                seen_cols.add(col)
-                group_by_parts.append(col)
-
-        # 如果有时间过滤，确保时间列加入 GROUP BY
-        # QUERY_RANKING 不按时间拆分，其他意图根据时间范围决定粒度
-        if mql.intent == MQLIntent.QUERY_RANKING:
-            # 排名查询：只按维度分组，不按时间拆分
-            pass
-        elif mql.intent == MQLIntent.QUERY_TREND and mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            # 趋势查询：根据时间范围决定粒度
-            # 一个月内按日分组，超过一个月按月分组（避免数据太稀疏或太密集）
-            if mql.time.days <= 31:
-                if "FDATE" not in group_by_parts:
-                    group_by_parts.append("FDATE")
-            else:
-                if self.COL_MONTHS not in group_by_parts:
-                    group_by_parts.append("MONTH(FDATE)")
-        elif mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            # 其他意图：按月分组
-            if self.COL_MONTHS not in group_by_parts:
-                group_by_parts.append("MONTH(FDATE)")
-
-        if group_by_parts:
-            return "GROUP BY " + ", ".join(group_by_parts)
-        return ""
-
-    def _build_order_by(self, mql: MQLSchema) -> str:
-        """构建 ORDER BY 子句"""
-        # 如果显式指定了排序字段和方向，使用它
-        if mql.order_by and mql.order_by.field:
-            return f"ORDER BY {mql.order_by.field} {mql.order_by.direction}"
-
-        # 排名查询必须有 ORDER BY（即使没有维度）
-        is_ranking = mql.intent and "ranking" in mql.intent.value.lower()
-
-        # ========== 占比模式：按占比别名排序 ==========
-        has_percentage = any(
-            (p.value if isinstance(p, Enum) else p) == CalculationPattern.PERCENTAGE.value
-            for p in mql.calculation_patterns
-        )
-        if has_percentage and mql.molecule_metric and mql.denominator_metric:
-            # 回退：用 molecule/denominator 名称构造
-            mol = mql.molecule_metric
-            den = mql.denominator_metric
-            if mol.name and den.name:
-                ratio_name = f"{mol.name}占{den.name}比重"
-            elif mol.name:
-                ratio_name = f"{mol.name}占比"
-            else:
-                ratio_name = "占比"
-            logger.info(f"[_build_order_by] 占比模式，按占比别名排序: {ratio_name}")
-            return f"ORDER BY \"{ratio_name}\" DESC"
-        # ===========================================
-
-        # ========== QUERY_TREND 模式：按时间排序 ==========
-        if mql.intent == MQLIntent.QUERY_TREND and mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            # 趋势查询按时间升序（从早到晚）
-            if mql.time.days <= 31:
-                return "ORDER BY FDATE ASC"
-            return "ORDER BY MONTHS ASC"
-        # ============================================
-
-        # 默认按指标降序（有 GROUP BY 时必须用聚合函数）
-        if mql.metric and (mql.dimensions or is_ranking):
-            direction = "DESC"
-            if mql.order_by and mql.order_by.direction:
-                direction = mql.order_by.direction
-
-            # 使用 FieldExtractor 统一解析
+        if has_window_func:
+            # 有窗口函数时用 MONTHS 作为时间维度（用于 GROUP BY 和窗口函数 ORDER BY）
+            # 同时确保 YEARS 在 dimensions 中，这样 LAG(12) 可以正确获取去年同月
+            time_dim_col = self.COL_MONTHS
+            if self.COL_YEARS not in dimensions:
+                dimensions.append(self.COL_YEARS)
+            if self.COL_MONTHS not in dimensions:
+                dimensions.append(self.COL_MONTHS)
+        elif time_dim_col not in dimensions:
+            if not mql.dimensions or all(dim.value for dim in mql.dimensions):
+                dimensions.append(time_dim_col)
+
+        # 4. 原子指标
+        metrics: List[dict] = []
+        if mql.metric and mql.metric.starrocks_sql:
             extractor = FieldExtractor(mql.metric)
             parsed = extractor.parse()
+            metrics.append({
+                "name": mql.metric.name or parsed.alias,
+                "agg_expression": parsed.expression,
+            })
+        elif mql.metric:
+            agg = mql.metric.aggregation.value if hasattr(mql.metric.aggregation, 'value') else str(mql.metric.aggregation)
+            field = mql.metric.field or "ORDERED_PRODUCTSALES"
+            metrics.append({
+                "name": mql.metric.name or field,
+                "agg_expression": f"{agg}({field})",
+            })
 
-            # 复合指标使用中文别名排序（加双引号）
-            if parsed.is_compound:
-                chinese_name = mql.metric.name if mql.metric.name else parsed.alias
-                logger.info(f"[_build_order_by] 复合指标使用中文别名排序: {chinese_name}")
-                return f"ORDER BY \"{chinese_name}\" {direction}"
-            else:
-                # 简单指标：ORDER BY 必须用聚合函数，使用裸字段
-                bare_field = parsed.bare_field or "ORDERED_PRODUCTSALES"
-                logger.info(f"[_build_order_by] 简单指标使用聚合排序: SUM({bare_field})")
-                return f"ORDER BY SUM({bare_field}) {direction}"
+        # 5. Filter（OperatorType → SQL 操作符映射）
+        OP_MAP = {
+            "eq": "=", "ne": "!=", "gt": ">", "gte": ">=",
+            "lt": "<", "lte": "<=", "like": "LIKE",
+            "in": "IN", "not_in": "NOT IN", "between": "BETWEEN",
+        }
+        filters: List[dict] = []
+        # 5a. 从 mql.filters 获取显式过滤器
+        for f in mql.filters:
+            op_raw = f.operator.value if hasattr(f.operator, 'value') else str(f.operator)
+            op_val = OP_MAP.get(op_raw, op_raw)
+            filters.append({
+                "field": f.field,
+                "op": op_val,
+                "value": f.value,
+            })
 
-        # 时间维度查询按时间排序（近7天、近12个月等）
-        if mql.time and mql.time.type in (TimeType.ABSOLUTE_MONTH, TimeType.RELATIVE, TimeType.DATE_RANGE):
-            # 趋势查询始终按时间升序排序（从早到晚）
-            if mql.intent == MQLIntent.QUERY_TREND:
-                # 按FDATE分组时用FDATE排序，按MONTH分组时用MONTH排序
-                if mql.time.days <= 31:
-                    return "ORDER BY FDATE ASC"
-                return "ORDER BY MONTHS ASC"
-            # 其他意图：按指标降序
-            return "ORDER BY SUM(ORDERED_PRODUCTSALES) DESC"
+        # 5b. 从有具体值的维度生成过滤器
+        for dim in mql.dimensions:
+            if dim.value:
+                col = dim.column if dim.column else self._get_dimension_column(dim.type)
+                if col:
+                    filters.append({
+                        "field": col,
+                        "op": "=",
+                        "value": dim.value,
+                    })
 
-        return ""
+        # 5c. 从时间范围生成过滤器
+        # 注意：始终用 FDATE 做日期过滤（即使 dt_column 是 MONTHS，用于窗口函数）
+        if mql.time and mql.time.start and mql.time.end:
+            filters.append({
+                "field": self.COL_DATE,
+                "op": ">=",
+                "value": mql.time.start,
+            })
+            filters.append({
+                "field": self.COL_DATE,
+                "op": "<=",
+                "value": mql.time.end,
+            })
 
-    def _build_limit(self, mql: MQLSchema) -> str:
-        """构建 LIMIT 子句"""
+        # 6. Order by
+        order_by: List[str] = []
+        if mql.order_by and mql.order_by.field:
+            order_by.append(f"{mql.order_by.field} {mql.order_by.direction}")
+
+        # 7. Limit
+        limit = 1000
         if mql.top_n > 0:
-            return f"LIMIT {mql.top_n}"
+            limit = mql.top_n
         elif mql.pagination and mql.pagination.page_size:
-            return f"LIMIT {mql.pagination.page_size}"
-        elif mql.intent and "ranking" in mql.intent.value:
-            # 排名查询默认 10 条
-            return "LIMIT 10"
-        return ""
+            limit = mql.pagination.page_size
+
+        return {
+            "tables": tables,
+            "dimensions": dimensions,
+            "metrics": metrics,
+            "filters": filters,
+            "calculated_metrics": calculated_metrics,
+            "joins": [],
+            "order_by": order_by,
+            "limit": limit,
+            "time_params": {},
+            "dt_column": dt_column,
+        }
+
+    def generate_analysis_sql(self, mql: MQLSchema, metric_capability: Dict[str, Any]) -> str:
+        """
+        根据 metric_capability 生成分析用 SQL
+
+        同比环比计算逻辑：
+        - 当前期数据：按原时间范围查询
+        - 对比期数据：在同一个 SQL 中通过 CASE WHEN 分离当前期和对比期
+        - 避免了窗口函数 LAG() 的复杂性（不需要按日期 group by 后再跨行计算）
+        """
+        import copy
+        from datetime import datetime
+        from dateutil.relativedelta import relativedelta
+        cap = metric_capability or {}
+
+        # 1. 深拷贝 mql
+        mql_copy = copy.deepcopy(mql)
+
+        # 2. 获取时间范围
+        time_start = mql.time.start if mql.time else None
+        time_end = mql.time.end if mql.time else None
+
+        if not time_start or not time_end:
+            semantic_json = self._mql_to_semantic(mql_copy)
+            from ..semantic_renderer import SemanticRenderer
+            renderer = SemanticRenderer()
+            return renderer.render(semantic_json)
+
+        # 3. 解析时间范围
+        try:
+            start_dt = datetime.strptime(time_start, "%Y-%m-%d")
+            end_dt = datetime.strptime(time_end, "%Y-%m-%d")
+        except:
+            semantic_json = self._mql_to_semantic(mql_copy)
+            from ..semantic_renderer import SemanticRenderer
+            renderer = SemanticRenderer()
+            return renderer.render(semantic_json)
+
+        # 4. 结束日期不能超过昨天（当天数据可能不完整）
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt_adjusted = end_dt
+        if end_dt >= today:
+            end_dt_adjusted = today - relativedelta(days=1)
+            logger.info(f"[generate_analysis_sql] 结束日期调整为昨天: {end_dt_adjusted.strftime('%Y-%m-%d')}")
+
+        # 5. 计算对比期时间范围（基于调整后的结束日期）
+        # 同比：去年同期（去年同周期）
+        yoy_start = start_dt - relativedelta(years=1)
+        yoy_end = end_dt_adjusted - relativedelta(years=1)
+
+        # 环比：复用统一计算逻辑
+        mom_start, mom_end = self._compute_mom_period(start_dt, end_dt_adjusted)
+
+        # 6. 构建表名
+        tables = [mql.metric.table if mql.metric and mql.metric.table else self.DEFAULT_TABLE]
+
+        # 7. 获取指标字段
+        metric_field = "ORDERED_PRODUCTSALES"
+        metric_alias = mql.metric.name if mql.metric and mql.metric.name else "value"
+        if mql.metric and mql.metric.starrocks_sql:
+            extractor = FieldExtractor(mql.metric)
+            parsed = extractor.parse()
+            metric_field = parsed.expression
+            metric_alias = mql.metric.name or parsed.alias
+        elif mql.metric and mql.metric.field:
+            metric_field = mql.metric.field
+
+        # 8. 构建 filters（始终用 FDATE 过滤）
+        OP_MAP = {
+            "eq": "=", "ne": "!=", "gt": ">", "gte": ">=",
+            "lt": "<", "lte": "<=", "like": "LIKE",
+            "in": "IN", "not_in": "NOT IN", "between": "BETWEEN",
+        }
+        filters = []
+
+        # 扩展时间范围到对比期（包含去年）
+        min_start = min(time_start, yoy_start.strftime("%Y-%m-%d"), mom_start.strftime("%Y-%m-%d"))
+        filters.append({"field": self.COL_DATE, "op": ">=", "value": min_start})
+        filters.append({"field": self.COL_DATE, "op": "<=", "value": end_dt_adjusted.strftime("%Y-%m-%d")})
+
+        # 从 mql.filters 获取显式过滤器
+        for f in mql.filters:
+            op_raw = f.operator.value if hasattr(f.operator, 'value') else str(f.operator)
+            op_val = OP_MAP.get(op_raw, op_raw)
+            filters.append({"field": f.field, "op": op_val, "value": f.value})
+
+        # 从有具体值的维度生成过滤器
+        for dim in mql.dimensions:
+            if dim.value:
+                col = dim.column if dim.column else self._get_dimension_column(dim.type)
+                if col:
+                    filters.append({"field": col, "op": "=", "value": dim.value})
+
+        # 9. 构建 SQL（不使用窗口函数，简洁的 CASE WHEN 方式）
+        filter_sql = " AND ".join([f"{f['field']} {f['op']} '{f['value']}'" for f in filters])
+
+        # CASE WHEN 分离当前期和对比期
+        current_case = f"SUM(CASE WHEN {self.COL_DATE} >= '{time_start}' AND {self.COL_DATE} <= '{end_dt_adjusted.strftime('%Y-%m-%d')}' THEN {metric_field} ELSE 0 END) AS {metric_alias}_raw"
+        mom_case = f"SUM(CASE WHEN {self.COL_DATE} >= '{mom_start.strftime('%Y-%m-%d')}' AND {self.COL_DATE} <= '{mom_end.strftime('%Y-%m-%d')}' THEN {metric_field} ELSE 0 END) AS mom_val"
+        yoy_case = f"SUM(CASE WHEN {self.COL_DATE} >= '{yoy_start.strftime('%Y-%m-%d')}' AND {self.COL_DATE} <= '{yoy_end.strftime('%Y-%m-%d')}' THEN {metric_field} ELSE 0 END) AS yoy_val"
+
+        sql = f"""
+SELECT
+    {current_case},
+    {mom_case},
+    {yoy_case}
+FROM {tables[0]}
+WHERE {filter_sql}
+"""
+        logger.info(f"[generate_analysis_sql] 同比环比 SQL: {sql[:300]}")
+        return sql
+
+    def _mql_to_semantic_for_analysis(self, mql: MQLSchema, metric_capability: Dict[str, Any], calculation_patterns: List[str]) -> dict:
+        """
+        构建分析用的 semantic JSON
+
+        与 _mql_to_semantic 的区别：
+        1. 时间范围自动扩展到包含同比/环比所需的历史数据
+        2. calculation_patterns 根据 metric_capability 决定
+        """
+        cap = metric_capability or {}
+
+        # 1. 表名
+        tables = [mql.metric.table if mql.metric and mql.metric.table else self.DEFAULT_TABLE]
+
+        # 2. Calculated metrics（从 calculation_patterns 生成）
+        calculated_metrics: List[dict] = []
+        for p in calculation_patterns:
+            metric_name = mql.metric.name if mql.metric else ""
+            if p == "yoy" and metric_name:
+                calculated_metrics.append({"name": "yoy_val", "op": "yoy", "args": [metric_name]})
+            elif p == "mom" and metric_name:
+                calculated_metrics.append({"name": "mom_val", "op": "mom", "args": [metric_name]})
+            elif p == "running_sum" and metric_name:
+                calculated_metrics.append({"name": f"{metric_name}_running_sum", "op": "running_sum", "args": [metric_name]})
+
+        # 3. 维度列（分析用，通常不需要时间维度做 GROUP BY）
+        dimensions: List[str] = []
+        dt_column = self.COL_DATE
+        has_time_dim = False
+        for dim in mql.dimensions:
+            col = dim.column if dim.column else self._get_dimension_column(dim.type)
+            if col in {self.COL_DATE, "DT", "DATE", "STAT_DATE", self.COL_MONTHS}:
+                dt_column = col
+                has_time_dim = True
+            # 有具体值的维度不进 GROUP BY
+            if dim.value:
+                continue
+            if col and col not in dimensions:
+                dimensions.append(col)
+
+        # 如果没有任何时间维度，根据时间范围跨度决定 dt_column
+        # 关键：如果有 yoy/mom/窗口函数，必须用 MONTHS 聚合（不是 FDATE）
+        # 这样 LAG(12) 才能正确获取去年同月（12 个月前）
+        has_window_pattern = any(p in ["yoy", "mom", "running_sum"] for p in calculation_patterns)
+        if not has_time_dim:
+            if mql.time and mql.time.start and mql.time.end:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.strptime(mql.time.start, "%Y-%m-%d")
+                    end_dt = datetime.strptime(mql.time.end, "%Y-%m-%d")
+                    days = (end_dt - start_dt).days
+                    if days > 31 or has_window_pattern:
+                        dt_column = self.COL_MONTHS
+                        # 必须将 MONTHS 和 YEARS 加入 dimensions，确保 GROUP BY YEAR, MONTHS
+                        # 这样 LAG(12) 可以正确获取去年同月（同一月份，12行前）
+                        if self.COL_YEARS not in dimensions:
+                            dimensions.append(self.COL_YEARS)
+                        if self.COL_MONTHS not in dimensions:
+                            dimensions.append(self.COL_MONTHS)
+                        logger.info(f"[SQLGenerator] 时间范围 {days} 天 + 窗口函数={has_window_pattern}，使用 MONTHS+YEARS 聚合")
+                    else:
+                        dt_column = self.COL_DATE
+                except Exception:
+                    pass
+        elif has_window_pattern and self.COL_MONTHS not in dimensions:
+            # 已有时间维度但有窗口函数，确保 YEARS 和 MONTHS 都在 dimensions 中
+            if self.COL_YEARS not in dimensions:
+                dimensions.append(self.COL_YEARS)
+            if self.COL_MONTHS not in dimensions:
+                dimensions.append(self.COL_MONTHS)
+
+        # 4. 时间范围（用 FDATE 过滤，覆盖今年和去年，确保 LAG 窗口函数能正确工作）
+        time_start = None
+        time_end = None
+        if mql.time:
+            time_end = mql.time.end
+            time_start = mql.time.start
+
+            # 如果需要 yoy，扩展时间范围到去年（但用 FDATE 过滤，不要替换时间范围）
+            if cap.get("supports_yoy") and time_start and time_end:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.strptime(time_start, "%Y-%m-%d")
+                    # 扩展到去年1月1日
+                    start_dt = start_dt.replace(year=start_dt.year - 1)
+                    time_start = start_dt.strftime("%Y-%m-%d")
+                    logger.info(f"[SQLGenerator] 扩展时间范围用于同比（FDATE过滤）: {time_start} ~ {time_end}")
+                except Exception as e:
+                    logger.warning(f"[SQLGenerator] 时间范围扩展失败: {e}")
+
+        # 5. 原子指标
+        metrics: List[dict] = []
+        if mql.metric and mql.metric.starrocks_sql:
+            extractor = FieldExtractor(mql.metric)
+            parsed = extractor.parse()
+            metrics.append({
+                "name": mql.metric.name or parsed.alias,
+                "agg_expression": parsed.expression,
+            })
+        elif mql.metric:
+            agg = mql.metric.aggregation.value if hasattr(mql.metric.aggregation, 'value') else str(mql.metric.aggregation)
+            field = mql.metric.field or "ORDERED_PRODUCTSALES"
+            metrics.append({
+                "name": mql.metric.name or field,
+                "agg_expression": f"{agg}({field})",
+            })
+
+        # 6. Filter
+        OP_MAP = {
+            "eq": "=", "ne": "!=", "gt": ">", "gte": ">=",
+            "lt": "<", "lte": "<=", "like": "LIKE",
+            "in": "IN", "not_in": "NOT IN", "between": "BETWEEN",
+        }
+        filters: List[dict] = []
+
+        # 6a. 从 mql.filters 获取显式过滤器
+        for f in mql.filters:
+            op_raw = f.operator.value if hasattr(f.operator, 'value') else str(f.operator)
+            op_val = OP_MAP.get(op_raw, op_raw)
+            filters.append({
+                "field": f.field,
+                "op": op_val,
+                "value": f.value,
+            })
+
+        # 6b. 从有具体值的维度生成过滤器
+        for dim in mql.dimensions:
+            if dim.value:
+                col = dim.column if dim.column else self._get_dimension_column(dim.type)
+                if col:
+                    filters.append({
+                        "field": col,
+                        "op": "=",
+                        "value": dim.value,
+                    })
+
+        # 6c. 从时间范围生成过滤器
+        # 注意：始终用 FDATE 做日期过滤，即使 dt_column 是 MONTHS（用于聚合）
+        # 因为 FDATE 是 YYYY-MM-DD 格式，可以正确做日期范围过滤
+        if time_start and time_end:
+            filters.append({
+                "field": self.COL_DATE,
+                "op": ">=",
+                "value": time_start,
+            })
+            filters.append({
+                "field": self.COL_DATE,
+                "op": "<=",
+                "value": time_end,
+            })
+
+        # 7. Order by
+        order_by: List[str] = []
+        if mql.order_by and mql.order_by.field:
+            order_by.append(f"{mql.order_by.field} {mql.order_by.direction}")
+
+        # 8. Limit
+        limit = 1000
+
+        return {
+            "tables": tables,
+            "dimensions": dimensions,
+            "metrics": metrics,
+            "filters": filters,
+            "calculated_metrics": calculated_metrics,
+            "joins": [],
+            "order_by": order_by,
+            "limit": limit,
+            "time_params": {},
+            "dt_column": dt_column,
+        }
+
