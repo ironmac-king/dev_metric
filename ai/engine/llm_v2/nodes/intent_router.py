@@ -8,14 +8,47 @@
 - 本地模型优先匹配，LLM 兜底
 """
 import json
+import re
+from enum import Enum
 from typing import Dict, Any, Optional, List
 from ai.config.logging_config import get_logger
 from ai.engine.prompt_manager import get_prompt_manager
 from ai.engine.llm import get_llm_engine
-from ..schema import V2State, MQLSchema, MQLIntent, MQLDimension, TimeRange, TimeType
+from ..schema import V2State, MQLSchema, MQLIntent, MQLDimension, TimeRange, TimeType, AggregationType
 from ai.engine.time_parser import TimeParser
 
 logger = get_logger("ai.llm_v2.intent_router")
+
+
+class FollowupAction(Enum):
+    REPLACE_METRIC = "replace_metric"
+    ADD_METRIC = "add_metric"
+    REMOVE_METRIC = "remove_metric"
+    REPLACE_DIM = "replace_dim"
+    ADD_DIM = "add_dim"
+    REMOVE_DIM = "remove_dim"
+    REPLACE_TIME = "replace_time"
+    REPLACE_COMP = "replace_comp"
+    RESET = "reset"
+    INHERIT = "inherit"
+
+
+FOLLOWUP_ACTION_KEYWORDS: Dict[str, List[str]] = {
+    "REPLACE_METRIC": ["换成", "改成", "换为", "改为"],
+    "ADD_METRIC": ["加上", "再加", "还有", "加个", "一并", "加一个", "顺便"],
+    "REMOVE_METRIC": ["去掉", "去除", "移除", "删除", "删掉", "不要"],
+    "REPLACE_DIM": ["换成按", "改成按"],
+    "REMOVE_DIM": ["不看"],
+    "REPLACE_COMP": ["环比", "同比"],
+    "REPLACE_TIME": ["看看上月", "看看上周", "看看去年", "看看本月", "看看今年", "换到本月"],
+    "RESET": ["重新来", "重来", "换一个", "重新"],
+}
+
+# "按XX看" 模式需要正则匹配，不在关键词列表中
+_REPLACE_DIM_PATTERN = re.compile(r"按.{1,6}看")
+_REMOVE_DIM_PATTERN = re.compile(r"不看.{1,6}了")
+# "XX呢" 模式中，XX是指标名/时间词
+_SHORT_TEXT_METRIC_PATTERN = re.compile(r"^(.+?)呢[？?]?$")
 
 # 本地模型实体类型 → MQLSchema 维度类型 映射
 ENTITY_TYPE_TO_DIM_COLUMN = {
@@ -159,58 +192,33 @@ class IntentRouter:
 
     def _get_ranking_dimension_options(self) -> List[Dict[str, str]]:
         """获取排名追问的维度选项（从配置动态加载）"""
-        # ========== 优先用语义快照服务获取维度选项 ==========
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            options = semantic_svc.list_dimension_options()
-            if options:
-                logger.info(f"[IntentRouter] 从快照获取排名维度选项: {options}")
-                return options
-        # ====================================================
+        # ========== 使用统一语义层获取维度选项 ==========
+        try:
+            from ai.services.semantic_layer import get_semantic_layer_service
+            from ai.services.semantic_layer.api import EnrichStage, ParseResult
 
-        self._load_dimension_mappings()
-        if self._dimension_type_mappings:
-            # 排除时间粒度类型，只保留业务维度
-            time_column_names = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DAYS"}
-            options = []
-            seen_values = set()  # 用于去重
+            semantic_layer = get_semantic_layer_service()
+            empty_parse_result = ParseResult(intent="unknown", confidence=0.0)
+            enrich_result = semantic_layer.enrich(empty_parse_result, stage=EnrichStage.INTENT_ROUTER)
 
-            for m in self._dimension_type_mappings:
-                # dimension_configs 返回: dimension_name (中文名称), column_name (维度类型代码)
-                # dimension_type_mappings 返回: dimension_type (中文), column_name (列名)
-                dim_name = m.get("dimension_name", "") or m.get("dimension_type", "") or ""
-                column_name = m.get("column_name", "") or ""
+            if enrich_result.ranking_dimension_options:
+                logger.info(f"[IntentRouter] 从语义层获取排名维度选项: {enrich_result.ranking_dimension_options}")
+                return enrich_result.ranking_dimension_options
+        except Exception as e:
+            logger.warning(f"[IntentRouter] 语义层获取维度选项失败: {e}")
 
-                # 跳过时间维度
-                if column_name.upper() in time_column_names:
-                    continue
-
-                # 跳过没有维度名称的
-                if not dim_name:
-                    continue
-
-                # column_name 作为维度类型代码（如 "PLATFORM"、"FSITE"）
-                # 用于 SQL 生成器的 DIMENSION_COLUMN_MAP 映射
-                value = column_name
-                if value and value not in seen_values:
-                    seen_values.add(value)
-                    # dimension_name 本身就是中文名称（如"平台"、"店铺"）
-                    label = f"按{dim_name}" if not dim_name.startswith("按") else dim_name
-                    options.append({"label": label, "value": value})
-
-            if options:
-                logger.info(f"[IntentRouter] 排名维度选项: {options}")
-                return options
-        # 回退到默认选项
+        # 最终回退到默认选项
         return self.RANKING_DIMENSION_OPTIONS
 
-    async def route(self, question: str, inherited_mql: Optional[MQLSchema] = None) -> Dict[str, Any]:
+    async def route(self, question: str, inherited_mql: Optional[MQLSchema] = None,
+                    use_semantic_layer: bool = False) -> Dict[str, Any]:
         """
         路由用户问题
 
         Args:
             question: 用户问题
             inherited_mql: 继承的 MQL（用于多轮对话）
+            use_semantic_layer: 是否使用独立语义层（默认 False）
 
         Returns:
             {
@@ -219,7 +227,7 @@ class IntentRouter:
                 "clarification_message": str,
             }
         """
-        logger.info(f"[IntentRouter] 路由问题: {question[:50]}...")
+        logger.info(f"[IntentRouter] 路由问题: {question[:50]}..., use_semantic_layer={use_semantic_layer}")
 
         # 0. 下钻特殊处理：识别 __DRILLDOWN__:xxx__ 格式
         if question.startswith("__DRILLDOWN__:"):
@@ -233,31 +241,232 @@ class IntentRouter:
         if inherited_mql and self._is_short_followup(question):
             return await self._handle_followup(question, inherited_mql)
 
-        # 3. 本地模型预识别（精准匹配 + LLM 兜底）
+        # 3. 独立语义层（如果启用）
+        if use_semantic_layer:
+            return await self._semantic_layer_intent_recognition(question, inherited_mql)
+
+        # 4. 本地模型预识别（精准匹配 + LLM 兜底）
         return await self._local_then_llm_intent_recognition(question, inherited_mql)
 
+    async def _semantic_layer_intent_recognition(self, question: str,
+                                                 inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
+        """
+        独立语义层意图识别
+
+        使用语义层解析问题，然后复用 _build_mql_from_local 的丰富处理逻辑
+        构建 MQL（维度解析、过滤器、多指标、指标增强等）。
+        """
+        try:
+            from ai.services.semantic_layer.service import get_semantic_layer_service
+            semantic_layer = get_semantic_layer_service()
+            parse_result = semantic_layer.parse_query(question)
+
+            # 未知意图 → 追问
+            if parse_result.intent == "unknown":
+                return {
+                    "mql": None,
+                    "needs_clarification": True,
+                    "clarification_message": parse_result.error or "抱歉，我无法理解您的问题，请换一种问法。",
+                    "clarification_options": [],
+                    "source": "semantic_layer_failed",
+                }
+
+            # 将 ParseResult 转换为 _build_mql_from_local 期望的格式
+            entities = []
+            for ent in (parse_result.entities or []):
+                entities.append({"text": ent.text, "type": ent.type, "start": ent.start, "end": ent.end})
+
+            # 如果语义层没有提取到 METRIC 实体但有 metric_name，手动添加
+            if parse_result.metric_name and not any(e['type'] == 'METRIC' for e in entities):
+                entities.append({"text": parse_result.metric_name, "type": "METRIC", "start": 0, "end": 0})
+
+            # 如果语义层没有提取到 TIME 实体但有 time_expr，手动添加
+            if parse_result.time_expr and not any(e['type'] == 'TIME' for e in entities):
+                entities.append({"text": parse_result.time_expr, "type": "TIME", "start": 0, "end": 0})
+
+            # 如果维度列表有值但 entities 中没有 DIM/DIM_VALUE，补充
+            for dim in (parse_result.dimensions or []):
+                dim_type = dim.get("type", "")
+                dim_value = dim.get("value", "")
+                if dim_value and not any(e['type'] == 'DIM_VALUE' and e['text'] == dim_value for e in entities):
+                    entities.append({"text": dim_value, "type": "DIM_VALUE", "start": 0, "end": 0})
+                elif dim_type and not any(e['type'] == 'DIM' and e['text'] == dim_type for e in entities):
+                    entities.append({"text": dim_type, "type": "DIM", "start": 0, "end": 0})
+
+            local_result = {
+                "intent": parse_result.intent,
+                "confidence": parse_result.confidence,
+                "entities": entities,
+                "match_success": True,
+                "local_only": True,
+            }
+
+            logger.info(f"[IntentRouter] 语义层→本地MQL构建: intent={parse_result.intent}, "
+                       f"entities={[f'{e['type']}:{e['text']}' for e in entities]}, "
+                       f"method={parse_result.parse_method}")
+
+            # 复用 _build_mql_from_local 的全部逻辑（维度解析、过滤器、多指标、聚合检测等）
+            mql = self._build_mql_from_local(local_result, question)
+
+            # 泛指维度校验
+            mql = self._validate_generic_dimensions(mql, question)
+            clarification = self._check_generic_dimensions(mql, question)
+            if clarification.get("is_generic"):
+                return {
+                    "mql": mql,
+                    "needs_clarification": True,
+                    "clarification_message": clarification.get("clarification_message", ""),
+                    "clarification_options": clarification.get("clarification_options", []),
+                    "source": "semantic_layer",
+                    "original_question": question,
+                }
+
+            return {
+                "mql": mql,
+                "needs_clarification": False,
+                "source": "semantic_layer",
+                "drilldown_type": parse_result.drilldown_type,
+            }
+
+        except Exception as e:
+            logger.error(f"[IntentRouter] 语义层解析异常: {e}，回退到本地模型+LLM")
+            import traceback
+            traceback.print_exc()
+            return await self._local_then_llm_intent_recognition(question, inherited_mql)
+
+    def _detect_followup_action(self, question: str, entities: Optional[Dict[str, Any]] = None) -> FollowupAction:
+        """根据文本关键词 + 正则 + 实体类型检测追问动作类型
+
+        优先级：RESET > REPLACE_DIM > REMOVE_DIM > REPLACE_COMP > REPLACE_TIME
+                 > REPLACE_METRIC > ADD_METRIC > REMOVE_METRIC > INHERIT
+        """
+        entities = entities or {}
+
+        # 1. RESET — 重置
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("RESET", []):
+            if kw in question:
+                return FollowupAction.RESET
+
+        # 2. REPLACE_DIM — "换成按XX"、"改成按XX"、"按XX看"
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("REPLACE_DIM", []):
+            if kw in question:
+                return FollowupAction.REPLACE_DIM
+        if _REPLACE_DIM_PATTERN.search(question):
+            return FollowupAction.REPLACE_DIM
+
+        # 3. REMOVE_DIM — "不看XX了"
+        if _REMOVE_DIM_PATTERN.search(question):
+            return FollowupAction.REMOVE_DIM
+
+        # 4. REPLACE_COMP — 环比/同比（需在 REPLACE_TIME 之前，"环比呢"优先为对比）
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("REPLACE_COMP", []):
+            if kw in question:
+                return FollowupAction.REPLACE_COMP
+
+        # 5. REPLACE_TIME — "看看上月"、"换到本月"
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("REPLACE_TIME", []):
+            if kw in question:
+                return FollowupAction.REPLACE_TIME
+
+        # 6. "XX呢" 短文本模式：根据去掉"呢"后的内容判断
+        m = _SHORT_TEXT_METRIC_PATTERN.match(question)
+        if m:
+            core = m.group(1)
+            # 检查 core 是否是时间词
+            if core in TIME_EXPRESSION_MAP or core in ["上月", "去年", "本月", "去年", "前年"]:
+                return FollowupAction.REPLACE_TIME
+            # 检查 core 是否是对比词（已在上面 REPLACE_COMP 处理了，这里兜底）
+            if core in ["环比", "同比"]:
+                return FollowupAction.REPLACE_COMP
+            # 检查 core 是否是趋势词
+            if core in ["趋势", "变化", "走势"]:
+                return FollowupAction.REPLACE_COMP
+            # 检查 core 是否能解析为指标名（语义快照 + 同义词）
+            if self._resolve_metric_name(core):
+                return FollowupAction.REPLACE_METRIC
+            # 未知"XX呢"，走 INHERIT
+            return FollowupAction.INHERIT
+
+        # 7. ADD_METRIC — "加上XX"、"再加XX"
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("ADD_METRIC", []):
+            if kw in question:
+                return FollowupAction.ADD_METRIC
+
+        # 8. REMOVE_METRIC — "去掉XX"、"不要XX"
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("REMOVE_METRIC", []):
+            if kw in question:
+                return FollowupAction.REMOVE_METRIC
+
+        # 9. REPLACE_METRIC — "换成XX"、"改成XX"（排在 ADD/REMOVE 之后避免误判）
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("REPLACE_METRIC", []):
+            if kw in question:
+                return FollowupAction.REPLACE_METRIC
+
+        # 10. 默认 INHERIT
+        return FollowupAction.INHERIT
+
+    def _resolve_metric_name(self, candidate: str) -> Optional[Dict[str, Any]]:
+        """解析指标名（语义快照优先 → MetricClient 兜底），纯内存查找"""
+        if not candidate:
+            return None
+        # 1. 语义快照
+        try:
+            semantic_svc = self._get_semantic_service()
+            result = semantic_svc.resolve_metric(candidate)
+            if result:
+                return result
+        except Exception:
+            pass
+        # 2. 同义词 + MetricClient
+        try:
+            from ai.client.metric_client import MetricClient
+            client = MetricClient()
+            info = client.get_metric_by_name(candidate)
+            if info:
+                return info
+        except Exception:
+            pass
+        return None
+
     def _is_short_followup(self, question: str) -> bool:
-        """判断是否为短追问或维度选择"""
-        # 单独的 "？" 不算短追问（可能是完整问题的结尾）
-        if question.strip() == "？" or question.strip() == "？":
+        """判断是否为追问：语义快照实体检测 + 动作词 + 兜底关键词"""
+        if question.strip() in ("？", "?"):
             return False
-        short_keywords = ["呢", "呢？", "啊", "哦", "嗯", "再", "还有", "还要", "还在", "环比呢", "同比呢", "趋势呢", "增加", "加上", "加个", "多个", "一并", "加一个"]
-        if any(kw in question for kw in short_keywords):
+
+        # 1. 语义快照轻量实体检测（内存查找，不调 BERT）
+        try:
+            semantic_svc = self._get_semantic_service()
+            detected_metric = semantic_svc.resolve_metric(question)
+            if detected_metric:
+                logger.info(f"[_is_short_followup] 语义快照命中指标: {detected_metric.get('name')}")
+                return True
+            detected_dim = semantic_svc.resolve_dimension(question)
+            if detected_dim:
+                logger.info(f"[_is_short_followup] 语义快照命中维度: {detected_dim}")
+                return True
+        except Exception:
+            pass
+
+        # 2. 动作词检测（结构化模式，覆盖换/加/去/对比/时间/重置）
+        action = self._detect_followup_action(question)
+        if action != FollowupAction.INHERIT:
             return True
 
-        # 检测是否是单个维度类型代码（如 FSITECODE、FSITE、PLATFORM 等）
-        # 当用户从追问选项中选择维度时，前端发送的是 option.value（如 FSITECODE）
+        # 3. 维度代码选择（前端追问选项回调）
         dimension_codes = {
             "FSITECODE", "FSITE", "PLATFORM", "FCHANNEL", "FBRANDS", "FPRODUCTLINE",
             "FADTYPE", "GROUP_1", "GROUP_2", "GROUP_3", "GROUP_4", "SKU", "ASIN",
             "FCOUNTRY", "REGION", "FDATE", "MONTHS", "WEEKS", "YEARS", "QUARTERS",
             "PRODUCT_STATUS", "PRODUCT_LEVEL", "MODEL", "PEOPLEGROUP", "ADSDIRECTOR",
-            "PEOPLEGROUP_CHARGE", "PEOPLEGROUP_DIRECTOR"
+            "PEOPLEGROUP_CHARGE", "PEOPLEGROUP_DIRECTOR",
         }
         if question.upper() in dimension_codes or question in dimension_codes:
             return True
 
-        # 仅用关键词判断追问，不依赖长度（中文字长但可能是完整问题）
+        # 4. 兜底：短文本 + 语气助词
+        if len(question) <= 5 and question.endswith(("呢", "啊", "哦", "吧")):
+            return True
+
         return False
 
     def _is_greeting(self, question: str) -> bool:
@@ -295,6 +504,34 @@ class IntentRouter:
             "店铺": "店铺", "各店铺": "各店铺",
             "平台": "平台", "各平台": "各平台",
         }
+
+        # ========== 优先检查问题原文是否包含泛指品类关键词 ==========
+        # 即使 MQL 的 dimension type 设错了，只要问题里有泛指词就触发追问
+        # 但要排除"一级品类"、"二级品类"等具体级别的情况
+        if question:
+            # 先检查是否出现了具体级别（一级品类/二级品类/三级品类）
+            # 如果出现了具体级别，就不走泛指追问（让 MQL 正常解析）
+            specific_levels = ["一级品类", "二级品类", "三级品类", "四级品类", "五级品类"]
+            has_specific_level = any(level in question for level in specific_levels)
+
+            if not has_specific_level:
+                # 没有具体级别，检查泛指词
+                for kw in ["各品类", "品类", "类目", "商品类", "产品类"]:
+                    if kw in question:
+                        # 发现泛指品类词，直接触发追问
+                        return {
+                            "is_generic": True,
+                            "generic_types": ["品类"],
+                            "default_dimension": "三级品类",
+                            "clarification_message": "请问您想按哪个品类级别分析？",
+                            "clarification_options": [
+                                {"label": "一级品类", "value": "一级品类", "replace_key": kw},
+                                {"label": "二级品类", "value": "二级品类", "replace_key": kw},
+                                {"label": "三级品类", "value": "三级品类", "replace_key": kw},
+                            ],
+                            "replace_key": kw,
+                        }
+        # ============================================================
 
         generic_dims = []
         for dim in mql.dimensions:
@@ -388,7 +625,17 @@ class IntentRouter:
 
         logger.info(f"[_validate_generic_dimensions] 提取到的候选维度值: {candidates}")
 
+        # 泛指关键词：这些词应触发追问（一级/二级/三级），不应在这里自动解析
+        generic_keywords = {"品类", "类目", "商品类", "产品类", "品牌", "店铺", "平台", "渠道"}
+        specific_levels = ["一级品类", "二级品类", "三级品类", "四级品类", "一级类目", "二级类目", "三级类目"]
+        has_specific_level = any(level in question for level in specific_levels)
+
         for candidate in candidates:
+            # 跳过泛指关键词（除非问题中包含具体级别）
+            if candidate in generic_keywords and not has_specific_level:
+                logger.info(f"[_validate_generic_dimensions] 跳过泛指候选 '{candidate}'，交给追问引擎处理")
+                continue
+
             # ========== 优先用语义快照服务解析维度类型 ==========
             # 已知维度类型：一级品类/二级品类/三级品类/四级品类/品牌/平台/店铺等
             if semantic_svc:
@@ -500,10 +747,14 @@ class IntentRouter:
             all_types = semantic_svc.get_all_types()
         if not all_types and dim_service:
             all_types = dim_service.get_all_types()
+        # 收集已知维度类型字符串，用于后续过滤
+        known_type_strs = set()
         for type_info in all_types:
             dim_type_str = type_info.get("dimension_type", "")
-            if dim_type_str and dim_type_str in question and dim_type_str not in candidates:
-                candidates.append(dim_type_str)
+            if dim_type_str:
+                known_type_strs.add(dim_type_str)
+                if dim_type_str in question and dim_type_str not in candidates:
+                    candidates.append(dim_type_str)
 
         # 1. 检查 "X的品类/Y" 模式：X 是维度值
         category_words = ['品类', '类目', '商品类', '产品类']
@@ -524,24 +775,37 @@ class IntentRouter:
                     candidates.append(val)
 
         # 3. 检查时间词前面的词作为候选（去掉时间词后）
-        time_words = ['今天', '昨天', '今年', '去年', '本周', '上周', '本月', '上月']
+        # 但只取紧邻时间词的最后一个有意义的词，而不是整个前缀
+        time_words = ['今天', '昨天', '今年', '去年', '本周', '上周', '本月', '上月', '近7天', '近30天', '近3个月']
         for t in time_words:
             if t in question:
                 idx = question.find(t)
                 before = question[:idx].strip()
-                if len(before) >= 2 and before not in candidates:
-                    candidates.append(before)
+                # 从 before 中提取最后一个词（而不是整个前缀）
+                # 用已知维度类型和维度值来匹配，而不是盲目切词
+                # 先检查 before 是否以已知维度类型结尾
+                matched = False
+                for kt in sorted(known_type_strs, key=len, reverse=True):
+                    if before.endswith(kt) and kt not in candidates:
+                        candidates.append(kt)
+                        matched = True
+                        break
+                if not matched and len(before) >= 2 and before not in candidates:
+                    # 只在 before 是短词（<=4字）且不含功能词时才加入
+                    # 功能词（按/看/的/在/从）开头的短词大概率不是维度值
+                    if len(before) <= 4 and not re.match(r'^[按看在从的把被]', before):
+                        candidates.append(before)
 
         return candidates
 
     async def _handle_followup(self, question: str, inherited_mql: Optional[MQLSchema]) -> Dict[str, Any]:
-        """处理短追问"""
+        """处理追问：动作词驱动 + 合并策略"""
         if inherited_mql:
             _metric_name = inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None
             _dims = [(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else []
-            logger.info(f"[IntentRouter] 处理短追问: inherited_mql.metric={_metric_name}, inherited_mql.dimensions={_dims}")
+            logger.info(f"[IntentRouter] 处理追问: inherited_mql.metric={_metric_name}, inherited_mql.dimensions={_dims}")
         else:
-            logger.info("[IntentRouter] 处理短追问: inherited_mql is None")
+            logger.info("[IntentRouter] 处理追问: inherited_mql is None")
 
         if not inherited_mql:
             return {
@@ -551,68 +815,197 @@ class IntentRouter:
                 "source": "followup",
             }
 
+        # 构建 base MQL（全字段继承）
         mql = self._build_followup_mql(inherited_mql, question)
 
-        dimension_selection_result = self._handle_dimension_selection_followup(question, mql)
-        if dimension_selection_result:
-            return dimension_selection_result
+        # 检测追问动作类型
+        action = self._detect_followup_action(question)
+        logger.info(f"[IntentRouter] 追问动作: {action.value}, question={question}")
 
-        # 根据追问内容更新意图
-        from ..schema import ComparisonSpec
-        metric_add_keywords = ["增加", "加上", "加个", "多个", "一并", "加一个"]
-        is_add_metric = any(kw in question for kw in metric_add_keywords)
-        metric_remove_keywords = ["去掉", "去除", "移除", "删除", "删掉", "不要", "不看"]
-        is_remove_metric_or_dim = any(kw in question for kw in metric_remove_keywords)
+        # === 根据动作类型执行合并策略 ===
 
-        if is_add_metric:
-            addition_result = self._handle_addition_followup(question, mql, inherited_mql, metric_add_keywords)
-            if addition_result:
-                return addition_result
+        if action == FollowupAction.RESET:
+            return self._handle_reset_followup(question)
 
-        if is_remove_metric_or_dim:
-            removal_result = self._handle_removal_followup(question, mql, inherited_mql, metric_remove_keywords)
+        if action == FollowupAction.REPLACE_DIM:
+            dim_result = self._handle_dimension_selection_followup(question, mql)
+            if dim_result:
+                # 检查泛指维度
+                mql = dim_result.get("mql", mql)
+                clarification = self._check_generic_dimensions(mql, question)
+                if clarification.get("is_generic"):
+                    return {
+                        "mql": mql,
+                        "needs_clarification": True,
+                        "clarification_message": clarification.get("clarification_message", ""),
+                        "clarification_options": clarification.get("clarification_options", []),
+                        "source": "followup",
+                        "original_question": question,
+                    }
+                return dim_result
+            # "按XX看" 未匹配到维度代码，回退到 REPLACE_METRIC
+            return self._handle_replace_metric_followup(question, mql)
+
+        if action == FollowupAction.REMOVE_DIM:
+            removal_result = self._handle_removal_followup(question, mql, inherited_mql, ["不看"])
             if removal_result:
                 return removal_result
 
-        # 检查是否是新的独立问题（不应该继承上轮指标）
-        # 注意：增加类追问已经处理过了，这里不会匹配到
-        new_question_keywords = ["多少", "总额", "金额", "抽走", "赚了", "亏了", "收入", "支出", "利润", "成本"]
-        is_new_question = any(kw in question for kw in new_question_keywords)
+        if action == FollowupAction.REPLACE_COMP:
+            return self._handle_comparison_followup(question, mql, inherited_mql)
 
-        if is_new_question:
-            # 新问题：不继承指标，让后续 LLM 识别新指标
-            logger.info(f"[IntentRouter] 检测到新问题（{question[:20]}...），不继承上轮指标")
-            return {
-                "mql": mql,
-                "needs_clarification": False,
-                "source": "llm",  # 改为 llm，让系统重新识别
-            }
+        if action == FollowupAction.REPLACE_TIME:
+            return self._handle_time_followup(question, mql)
 
-        # 处理环比/同比/趋势类追问
-        if "环比" in question:
-            mql.intent = MQLIntent.QUERY_COMPARISON
-            mql.comparison = inherited_mql.comparison if inherited_mql.comparison else ComparisonSpec()
-            mql.comparison.types = ["环比"]
-            mql.comparison.enabled = True
-        elif "同比" in question:
-            mql.intent = MQLIntent.QUERY_COMPARISON
-            mql.comparison = inherited_mql.comparison if inherited_mql.comparison else ComparisonSpec()
-            mql.comparison.types = ["同比"]
-            mql.comparison.enabled = True
-        elif "趋势" in question:
-            mql.intent = MQLIntent.QUERY_TREND
-        else:
-            # 继承上轮意图（仅当确实是追问时）
+        if action == FollowupAction.REPLACE_METRIC:
+            swap_result = self._handle_replace_metric_followup(question, mql)
+            if swap_result:
+                return swap_result
+            # "换成XX" 中 XX 无法解析为指标 → 可能是新问题
+            logger.info(f"[IntentRouter] 换指标追问中指标解析失败，回退到继承")
             mql.intent = inherited_mql.intent
+            return {"mql": mql, "needs_clarification": False, "source": "followup"}
 
-        _debug_info = f"[DEBUG: inherited_metric={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}, inherited_dims={[(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else []}]"
+        if action == FollowupAction.ADD_METRIC:
+            add_keywords = FOLLOWUP_ACTION_KEYWORDS.get("ADD_METRIC", [])
+            addition_result = self._handle_addition_followup(question, mql, inherited_mql, add_keywords)
+            if addition_result:
+                return addition_result
+
+        if action == FollowupAction.REMOVE_METRIC:
+            remove_keywords = FOLLOWUP_ACTION_KEYWORDS.get("REMOVE_METRIC", [])
+            removal_result = self._handle_removal_followup(question, mql, inherited_mql, remove_keywords)
+            if removal_result:
+                return removal_result
+
+        # INHERIT：检查是否是独立新问题
+        if self._is_new_question(question):
+            logger.info(f"[IntentRouter] 检测到新问题（{question[:20]}...），不继承上轮指标")
+            return {"mql": mql, "needs_clarification": False, "source": "llm"}
+
+        # 兜底继承上轮意图
+        mql.intent = inherited_mql.intent
+        _debug_info = f"[DEBUG: action={action.value}, inherited_metric={inherited_mql.metric.name if inherited_mql and inherited_mql.metric else None}, inherited_dims={[(d.type, d.value) for d in inherited_mql.dimensions] if inherited_mql and inherited_mql.dimensions else []}]"
         mql.resolved_question = f"{_debug_info} | question={question}"
+        return {"mql": mql, "needs_clarification": False, "source": "followup"}
 
+    def _handle_replace_metric_followup(self, question: str, mql: MQLSchema) -> Optional[Dict[str, Any]]:
+        """换指标：替换 mql.metric，清空 mql.metrics，继承维度/时间/对比"""
+        # 从文本中提取新指标名（去掉动作词）
+        candidate = question
+        for kw in FOLLOWUP_ACTION_KEYWORDS.get("REPLACE_METRIC", []):
+            candidate = candidate.replace(kw, " ")
+        candidate = candidate.strip()
+        # "XX呢" 模式
+        m = _SHORT_TEXT_METRIC_PATTERN.match(question)
+        if m:
+            candidate = m.group(1)
+
+        if not candidate:
+            return None
+
+        # 解析新指标（语义快照 → 同义词 → MetricClient）
+        metric_info = self._resolve_metric_name(candidate)
+        if not metric_info:
+            logger.info(f"[_handle_replace_metric_followup] 无法解析指标: {candidate}")
+            return None
+
+        from ..schema import MQLMetric
+        mql.metric = MQLMetric(
+            code=metric_info.get("metric_code") or metric_info.get("code", ""),
+            name=metric_info.get("name", candidate),
+            table=metric_info.get("starrocks_table") or metric_info.get("table", ""),
+            field=metric_info.get("starrocks_field") or metric_info.get("field", ""),
+            unit=metric_info.get("unit", ""),
+            starrocks_sql=metric_info.get("starrocks_sql", ""),
+        )
+        mql.metrics = []
+        logger.info(f"[_handle_replace_metric_followup] 换指标: {candidate} → {mql.metric.name} ({mql.metric.code})")
+        return {"mql": mql, "needs_clarification": False, "source": "followup_replace_metric"}
+
+    def _handle_comparison_followup(self, question: str, mql: MQLSchema, inherited_mql: MQLSchema) -> Dict[str, Any]:
+        """对比/趋势类追问：环比/同比/趋势"""
+        from ..schema import ComparisonSpec
+        comp_types = []
+        if "环比" in question:
+            comp_types.append("环比")
+        if "同比" in question:
+            comp_types.append("同比")
+
+        # 趋势类
+        if "趋势" in question:
+            mql.intent = MQLIntent.QUERY_TREND
+            logger.info(f"[_handle_comparison_followup] 趋势追问")
+            return {"mql": mql, "needs_clarification": False, "source": "followup_comp"}
+
+        mql.intent = MQLIntent.QUERY_COMPARISON
+        mql.comparison = ComparisonSpec(
+            enabled=True,
+            types=comp_types or ["环比"],
+        )
+        logger.info(f"[_handle_comparison_followup] 对比追问: {comp_types}")
+        return {"mql": mql, "needs_clarification": False, "source": "followup_comp"}
+
+    def _handle_time_followup(self, question: str, mql: MQLSchema) -> Dict[str, Any]:
+        """时间类追问：上月呢、看看去年"""
+        # 提取时间词
+        time_word = None
+        m = _SHORT_TEXT_METRIC_PATTERN.match(question)
+        if m:
+            time_word = m.group(1)
+        if not time_word:
+            for kw in ["看看", "换到", "换成"]:
+                if kw in question:
+                    time_word = question.replace(kw, "").strip()
+                    break
+        if not time_word:
+            time_word = question.strip()
+
+        # 用 TimeParser 解析
+        try:
+            parsed = TimeParser().parse(time_word)
+            if parsed:
+                mql.time = TimeRange(
+                    type=TimeType(parsed.get("type", "relative")),
+                    original=time_word,
+                    start=parsed.get("start", ""),
+                    end=parsed.get("end", ""),
+                )
+                # 换时间清空对比
+                mql.comparison = None
+                logger.info(f"[_handle_time_followup] 时间追问: {time_word} → {mql.time.start} ~ {mql.time.end}")
+        except Exception as e:
+            logger.warning(f"[_handle_time_followup] TimeParser 解析失败: {e}")
+            mql.time = TimeRange(type=TimeType.RELATIVE, original=time_word)
+
+        return {"mql": mql, "needs_clarification": False, "source": "followup_time"}
+
+    def _handle_reset_followup(self, question: str) -> Dict[str, Any]:
+        """重置追问：清空上下文"""
+        logger.info(f"[_handle_reset_followup] 重置上下文: {question}")
         return {
-            "mql": mql,
-            "needs_clarification": False,
-            "source": "followup",
+            "mql": None,
+            "needs_clarification": True,
+            "clarification_message": "好的，请问您想查询什么？",
+            "source": "followup_reset",
         }
+
+    def _is_new_question(self, question: str) -> bool:
+        """判断是否为独立新问题（不应继承上轮指标）"""
+        # 规则1：包含完整指标名 + 疑问词 → 新问题
+        has_question_word = any(q in question for q in ["多少", "是多少", "怎么样", "如何", "为什么", "是什么"])
+        if has_question_word:
+            metric_info = self._resolve_metric_name(question)
+            if metric_info:
+                return True
+
+        # 规则2：长文本 + 无动作词 + 有疑问词 → 可能新问题
+        if len(question) > 10 and has_question_word:
+            action = self._detect_followup_action(question)
+            if action == FollowupAction.INHERIT:
+                return True
+
+        return False
 
     def _handle_dimension_selection_followup(self, question: str, mql: MQLSchema) -> Optional[Dict[str, Any]]:
         """Handle dimension replacement follow-ups like `ASIN` or `按站点`."""
@@ -1100,10 +1493,22 @@ class IntentRouter:
         mql.resolved_question = question
 
         # 意图映射
+        intent_str = local_result['intent']
+        # drilldown 映射：BERT 识别 query_drilldown，MQLIntent 无此类型
+        if intent_str == 'query_drilldown':
+            intent_str = 'query_value'
+            mql.drilldown_type = True
         try:
-            mql.intent = MQLIntent(local_result['intent'])
+            mql.intent = MQLIntent(intent_str)
         except ValueError:
-            mql.intent = MQLIntent.UNKNOWN
+            # 尝试模糊映射
+            intent_fallback = {
+                'query_drilldown': 'query_value',
+                'query_forecast': 'query_trend',
+                'query_anomaly': 'query_trend',
+                'query_filter': 'query_value',
+            }
+            mql.intent = MQLIntent(intent_fallback.get(intent_str, 'unknown'))
         mql.confidence = local_result['confidence']
 
         # 解析实体
@@ -1170,6 +1575,26 @@ class IntentRouter:
                     unit="",
                 )
                 logger.info(f"[IntentRouter] 本地模型提取主指标: {metric_text}")
+
+                # 聚合关键词检测："平均"→AVG，"最高/最大"→MAX，"最低/最小"→MIN，"总数/总量"→SUM
+                agg_keywords = {
+                    "平均": AggregationType.AVG,
+                    "avg": AggregationType.AVG,
+                    "最高": AggregationType.MAX,
+                    "最大": AggregationType.MAX,
+                    "max": AggregationType.MAX,
+                    "最低": AggregationType.MIN,
+                    "最小": AggregationType.MIN,
+                    "min": AggregationType.MIN,
+                    "总数": AggregationType.SUM,
+                    "总量": AggregationType.SUM,
+                    "合计": AggregationType.SUM,
+                }
+                for kw, agg_type in agg_keywords.items():
+                    if kw in question:
+                        mql.metric.aggregation = agg_type
+                        logger.info(f"[IntentRouter] 检测到聚合关键词 '{kw}' → {agg_type.value}")
+                        break
 
                 # 多指标：其余 METRIC 实体加入 metrics 列表
                 if len(metric_entities) > 1:

@@ -19,9 +19,11 @@ export function buildAssistantMessage({
   finalStarrocksSql,
   finalMomChange,
   finalYoyChange,
+  finalSupplementaryInfo,
   currentMqlDimensions,
   currentMqlTime,
   currentTime,
+  finalMetricUnit,
 }) {
   let displayAnswer = finalAnswer
   if (!displayAnswer && finalResultData && finalResultData.length > 0) {
@@ -88,8 +90,10 @@ export function buildAssistantMessage({
     starrocksSql: finalStarrocksSql,
     momChange: finalMomChange,
     yoyChange: finalYoyChange,
+    supplementary_info: finalSupplementaryInfo || [],
     dimensionFilters: currentMqlDimensions,
     timeRange: currentMqlTime,
+    metricUnit: finalMetricUnit || '',
     time: currentTime,
   }
 }

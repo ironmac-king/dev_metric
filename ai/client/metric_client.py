@@ -21,16 +21,24 @@ _SYNONYMS = {
     "税前利润": ["毛利润", "利润", "profit"],
     "税前利润率": ["毛利率", "利润率", "profit_margin", "margin"],
     # 销售额相关
-    "销售额": ["销售", "sales", "收入", "总销售额", "营收"],
-    "订单量": ["订单数", "订单", "orders", "total_orders"],
-    "客单价": ["平均订单价值", "aov", "average_order_value"],
+    "销售额": ["销售", "sales", "收入", "总销售额", "营收", "销售额"],
+    "订单量": ["订单数", "订单", "orders", "total_orders", "总订单量", "总订单", "totalorders"],
+    "客单价": ["平均订单价值", "aov", "average_order_value", "平均客单价"],
     # 访客相关
     "访客数": ["访客", "visitors", "流量", "sessions"],
     "转化率": ["cvr", "conversion_rate"],
     # 页面访问相关
-    "页面访问量": ["pv", "PV", "page views", "PageViews", "访问量", "页面pv"],
+    "页面访问量": ["pv", "PV", "page views", "PageViews", "访问量", "页面pv", "页面浏览量", "浏览量"],
     # 退货相关
     "退货订单": ["退货订单量", "退货笔数", "退订"],
+    # 会话相关
+    "会话数": ["session", "sessions", "会话", "session_total"],
+    # 占比相关
+    "购物车占比": ["buybox", "buybox_percentage", "购物车比例", "buy box占比", "buy box比例"],
+    # ROI相关
+    "ROI": ["投资回报率", "投资回报", "roi", "return_on_investment", "广告ROI"],
+    # 曝光相关
+    "曝光量": ["impressions", "展示量", "impr", "曝光"],
 }
 
 # 反向映射（从同义词到标准名称）- 初始化一次

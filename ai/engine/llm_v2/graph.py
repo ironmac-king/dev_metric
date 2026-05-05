@@ -11,7 +11,9 @@ V2 LangGraph StateGraph 编排
 - Checkpoint 状态持久化
 - 多轮对话状态管理
 - 链路追踪（OpenTelemetry）
+- 独立语义层支持（USE_SEMANTIC_LAYER=1 启用）
 """
+import os
 import time
 import json
 from typing import Dict, Any, Literal, Optional, Tuple
@@ -100,7 +102,11 @@ async def intent_router(state: V2State):
 
         try:
             router = IntentRouter()
-            result = await router.route(state.question, state.inherited_mql)
+            # 检查是否启用独立语义层
+            use_semantic_layer = os.getenv("USE_SEMANTIC_LAYER", "0") == "1"
+            if use_semantic_layer:
+                logger.info("[intent_router] ★★★ 启用独立语义层进行解析")
+            result = await router.route(state.question, state.inherited_mql, use_semantic_layer=use_semantic_layer)
 
             # 更新状态
             if result.get("mql"):
@@ -245,14 +251,20 @@ async def mql_generator(state: V2State) -> V2State:
 
         # 当 intent_router 已经构建出可直接使用的 MQL 时，传入该结果跳过 LLM 调用
         source = getattr(state, 'source', '')
-        logger.info(f"[mql_generator] state.source={source!r}, state.mql.metric.name={state.mql.metric.name if state.mql and state.mql.metric else None}")
+        logger.info(f"[mql_generator] state.source={source!r}, state.mql.metric.name={state.mql.metric.name if state.mql and state.mql.metric else None}, state.mql.metrics count={len(state.mql.metrics) if state.mql and state.mql.metrics else 0}, state.mql.metrics={[(m.name, m.code) for m in (state.mql.metrics or [])] if state.mql and state.mql.metrics else []}")
         intent_router_mql = state.mql if source in (
             'local_model',
+            'semantic_layer',  # 语义层已解析，直接使用
             'drilldown',
+            'followup',
             'followup_add_metric',
             'followup_add_dimension',
             'followup_remove_metric',
             'followup_remove_dimension',
+            'followup_replace_metric',
+            'followup_comp',
+            'followup_time',
+            'followup_reset',
         ) else None
 
         # 生成 MQL
@@ -275,7 +287,9 @@ async def mql_generator(state: V2State) -> V2State:
             inherited_comparison = state.mql.comparison if state.mql and state.mql.comparison else None
             # 保留 intent_router 设置的 calculation_patterns
             inherited_calculation_patterns = state.mql.calculation_patterns if state.mql and state.mql.calculation_patterns else []
-            logger.info(f"[mql_generator] 保存继承状态: inherited_comparison={inherited_comparison}, inherited_dimensions={[(d.type, d.value) for d in inherited_dimensions] if inherited_dimensions else []}, is_followup={getattr(state, 'source', '')}")
+            # 保留 intent_router 设置的 time（追问场景：时间范围必须继承）
+            inherited_time = state.mql.time if state.mql and state.mql.time else None
+            logger.info(f"[mql_generator] 保存继承状态: inherited_comparison={inherited_comparison}, inherited_time={inherited_time}, inherited_dimensions={[(d.type, d.value) for d in inherited_dimensions] if inherited_dimensions else []}, is_followup={getattr(state, 'source', '')}")
             state.mql = mql
             if inherited_order_by and not mql.order_by:
                 mql.order_by = inherited_order_by
@@ -336,6 +350,12 @@ async def mql_generator(state: V2State) -> V2State:
                 # 非追问场景：只有新 MQL 没有 comparison 时才恢复
                 mql.comparison = inherited_comparison
                 logger.info(f"[mql_generator] 恢复 comparison from intent_router: types={inherited_comparison.types}, enabled={inherited_comparison.enabled}")
+            # 保留继承的时间范围（追问场景：时间范围必须继承，否则分析 SQL 无法生成）
+            # 注意：mql.time 可能存在但 start/end 为空，需要检查 start 是否有效
+            mql_time_invalid = not mql.time or not (mql.time.start or mql.time.end)
+            if inherited_time and mql_time_invalid:
+                mql.time = inherited_time
+                logger.info(f"[mql_generator] 恢复 inherited_time: {inherited_time.start} ~ {inherited_time.end}")
             # 如果有 comparison 但没有 calculation_patterns，根据 comparison.types 转换
             if mql.comparison and mql.comparison.enabled and not mql.calculation_patterns:
                 from .schema import CalculationPattern
@@ -468,6 +488,40 @@ async def mql_semantic_validator(state: V2State) -> V2State:
             llm_used=True,
             duration_ms=int((time.time() - start_time) * 1000),
         )
+
+    return state
+
+
+async def slot_clarifier(state: V2State) -> V2State:
+    """
+    步骤 5.5: 槽位消解
+    - 检测 MQL 中缺失的必要槽位（指标、时间、维度）
+    - 生成追问消息和选项
+    """
+    from .nodes.slot_clarifier import SlotClarifier
+
+    start_time = time.time()
+    state.current_step = "slot_clarifier"
+
+    try:
+        clarifier = SlotClarifier()
+        result = clarifier.check(state.mql)
+
+        if result and result.get("needs_clarification"):
+            state.needs_clarification = True
+            state.clarification_message = result["message"]
+            state.clarification_options = result.get("options", [])
+            logger.info(f"[slot_clarifier] 追问: {result['message']}, missing={result.get('missing_slots')}")
+
+        state.add_thinking_step(
+            "slot_clarifier",
+            status="completed",
+            content=f"槽位检查: {'需要追问' if result else '完整'}",
+            llm_used=False,
+            duration_ms=int((time.time() - start_time) * 1000),
+        )
+    except Exception as e:
+        logger.warning(f"[slot_clarifier] 槽位检查失败(非阻断): {e}")
 
     return state
 
@@ -1013,30 +1067,28 @@ async def trigger_analyzer(state: V2State) -> V2State:
         # ============================================================
 
         # 检查触发器
-        trigger_result = await analyzer.check_triggers(
-            mql=state.mql,
-            result=result_dict,
-            state=session_state
-        )
+        try:
+            trigger_result = await analyzer.check_triggers(
+                mql=state.mql,
+                result=result_dict,
+                state=session_state
+            )
+        except Exception as call_e:
+            import traceback
+            logger.error(f"[trigger_analyzer] check_triggers 直接异常: {call_e}")
+            logger.error(f"[trigger_analyzer] 堆栈: {traceback.format_exc()}")
+            raise  # 重新抛出，不吞掉
 
         if trigger_result.should_analyze:
             # 生成 AnalysisOutput
             try:
-                logger.info(f"[trigger_analyzer] CALLING generate_output, trigger_result type={type(trigger_result)}, is_TriggerResult={isinstance(trigger_result, TriggerResult)}, mql type={type(state.mql)}")
                 analysis_output = await analyzer.generate_output(
                     trigger_result=trigger_result,
                     mql=state.mql,
                     result=result_dict
                 )
-                logger.info(f"[trigger_analyzer] analysis_output type: {type(analysis_output)}")
-                logger.info(f"[trigger_analyzer] analysis_output fields: {analysis_output.__dataclass_fields__.keys() if hasattr(analysis_output, '__dataclass_fields__') else 'N/A'}")
-                # 直接调用 to_dict 方法
                 state.analysis = analysis_output.to_dict()
-                logger.info(f"[trigger_analyzer] analysis_output.to_dict() success")
-
-                # 一句话结论 = AnalysisOutput.summary
                 state.one_sentence_summary = analysis_output.summary or ""
-                # 详细摘要 = summary + breakdown 维度贡献
                 parts = [analysis_output.summary] if analysis_output.summary else []
                 for b in (analysis_output.breakdown or [])[:3]:
                     dim_name = b.get("dimension", "")
@@ -1045,14 +1097,11 @@ async def trigger_analyzer(state: V2State) -> V2State:
                         parts.append(f"{dim_name}：{impact}" if impact else dim_name)
                 state.analysis_summary = "；".join(parts)
 
-                # ✶ 修复：设置 state.category 让前端能显示下钻按钮
-                # 从 drilldown_options 中提取 category（格式：{"label": "📊 看销售", "action": "drilldown", "params": {"check": "sales"}}）
                 if trigger_result.drilldown_options:
                     first_option = trigger_result.drilldown_options[0]
                     params = first_option.get("params", {})
                     if "check" in params:
                         state.category = params["check"]
-                        logger.info(f"[trigger_analyzer] 设置 category={state.category} 来自 drilldown_options")
 
             except Exception as e:
                 import traceback
@@ -1072,9 +1121,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
             state.analysis = None
             # 即使 should_analyze=False，如果 analysis_data 有有效 KPI，也构造 summary
             analysis_data = getattr(trigger_result, 'analysis_data', None) or {}
-            logger.info(f"[trigger_analyzer] should_analyze=False, analysis_data keys={analysis_data.keys() if analysis_data else 'None'}")
             kpi = analysis_data.get("kpi") or {}
-            logger.info(f"[trigger_analyzer] kpi={kpi}")
             if kpi.get("mom") is not None or kpi.get("yoy") is not None:
                 metric_name = state.mql.metric.name if (state.mql and state.mql.metric) else ""
                 mom = kpi.get("mom")
@@ -1094,7 +1141,7 @@ async def trigger_analyzer(state: V2State) -> V2State:
             elif state.mql and state.mql.intent and state.mql.intent.value == "query_trend":
                 # 趋势查询但无 YoY/MoM：从渲染 SQL 数据构造趋势摘要
                 metric_name = state.mql.metric.name if (state.mql and state.mql.metric) else "指标"
-                rows = result.get("data", [])
+                rows = result_dict.get("data", [])
                 # 收集数值列（跳过月份字符串列）
                 metric_col = None
                 for k in (rows[0].keys() if rows else []):
@@ -1124,6 +1171,36 @@ async def trigger_analyzer(state: V2State) -> V2State:
             else:
                 state.one_sentence_summary = ""
                 state.analysis_summary = ""
+
+            # 维度探索：多行数据 + group by 维度 → 调用 generate_output
+            rows = result_dict.get("data", [])
+            if rows and len(rows) > 1 and state.mql and state.mql.dimensions and any(dim.value is None and dim.column for dim in state.mql.dimensions):
+                try:
+                    from ai.engine.llm_v2.nodes.trigger_analyzer import TriggerResult, TriggerType, Priority
+                    dim_trigger_result = TriggerResult(
+                        should_analyze=True,
+                        trigger_type=TriggerType.GENERIC_QUERY,
+                        trigger_reason="多维度数据展示",
+                        priority=Priority.P1,
+                        affected_dimensions=[],
+                        drilldown_options=[]
+                    )
+                    dim_trigger_result.analysis_data = {
+                        "data": rows,
+                        "total": len(rows),
+                        "kpi": {},
+                        "is_dimension_exploration": True,
+                        "attribution_data": analysis_data.get("attribution_data")
+                    }
+                    analysis_output = await analyzer.generate_output(dim_trigger_result, state.mql, {"data": rows})
+                    if analysis_output:
+                        state.analysis = analysis_output.to_dict()
+                        state.one_sentence_summary = analysis_output.summary or ""
+                        state.analysis_summary = analysis_output.summary or ""
+                except Exception as e:
+                    import traceback
+                    logger.warning(f"[trigger_analyzer] 维度探索 generate_output 失败: {e}, 堆栈: {traceback.format_exc()}")
+
             state.add_thinking_step(
                 "trigger_analyzer",
                 status="completed",
@@ -1329,6 +1406,7 @@ def create_v2_graph():
     builder.add_node("mql_generator", mql_generator)
     builder.add_node("mql_syntax_validator", mql_syntax_validator)
     builder.add_node("mql_semantic_validator", mql_semantic_validator)
+    builder.add_node("slot_clarifier", slot_clarifier)
     builder.add_node("sql_generator", sql_generator)
     builder.add_node("sql_security_auditor", sql_security_auditor)
     builder.add_node("sql_executor", sql_executor)
@@ -1373,8 +1451,23 @@ def create_v2_graph():
         }
     )
 
-    # 7. mql_semantic_validator → sql_generator（成功时）
-    builder.add_edge("mql_semantic_validator", "sql_generator")
+    # 7. mql_semantic_validator → slot_clarifier（成功时）
+    builder.add_edge("mql_semantic_validator", "slot_clarifier")
+
+    # 7.5. slot_clarifier → 条件边（需要追问则结束，否则继续 sql_generator）
+    def route_after_slot_clarifier(state: V2State) -> str:
+        if state.needs_clarification:
+            return "clarify"
+        return "sql_generator"
+
+    builder.add_conditional_edges(
+        "slot_clarifier",
+        route_after_slot_clarifier,
+        {
+            "sql_generator": "sql_generator",
+            "clarify": END,
+        }
+    )
 
     # 8. sql_generator → sql_security_auditor
     builder.add_edge("sql_generator", "sql_security_auditor")
@@ -1488,6 +1581,9 @@ class V2Graph:
 
         # 真正需要追问的才中断
         if state.error == "needs_clarification":
+            state.needs_clarification = True
+            if hasattr(state.context_cache, 'clarification_message') and state.context_cache.clarification_message:
+                state.clarification_message = state.context_cache.clarification_message
             logger.info(f"[ainvoke] 需要追问，中断流程")
             return state
 
@@ -1510,6 +1606,12 @@ class V2Graph:
                 state.error = ""
                 state = await mql_generator(state)
                 state = await mql_semantic_validator(state)
+            return state
+
+        # 槽位消解检查
+        state = await slot_clarifier(state)
+        if state.needs_clarification:
+            logger.info(f"[ainvoke] 槽位缺失需要追问，中断流程")
             return state
 
         state = await sql_generator(state)
@@ -1570,7 +1672,11 @@ class V2Graph:
         # 泛指维度不需要在这里中断，intent_router 已经设置了默认维度
         # 继续执行让用户先看到数据，追问引导在 result_analyzer 中附加
         if state.error == "needs_clarification":
+            state.needs_clarification = True
+            if hasattr(state.context_cache, 'clarification_message') and state.context_cache.clarification_message:
+                state.clarification_message = state.context_cache.clarification_message
             logger.info(f"[astream] 需要追问，中断流程")
+            yield state
             return
 
         state = await context_enhancer(state)
@@ -1595,6 +1701,13 @@ class V2Graph:
                 state = await mql_generator(state)
                 state = await mql_semantic_validator(state)
             yield state
+            return
+
+        # 槽位消解检查
+        state = await slot_clarifier(state)
+        yield state
+        if state.needs_clarification:
+            logger.info(f"[astream] 槽位缺失需要追问，中断流程")
             return
 
         state = await sql_generator(state)

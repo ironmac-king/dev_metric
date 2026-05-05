@@ -192,6 +192,10 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  metricUnit: {
+    type: String,
+    default: ''
+  },
   timeStart: {
     type: String,
     default: ''
@@ -444,14 +448,15 @@ function formatTableCell(key, val, colIdx) {
   if (val === null || val === undefined) return '-'
 
   // 已知维度列（不是指标列），直接返回原始值
-  const dimKeys = new Set(['MONTHS', 'FDATE', 'FDATE_START', 'FDATE_END', 'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'BRAND', 'PLATFORM', 'SHOP', 'FSITE', 'FSITECODE'])
+  const dimKeys = new Set(['MONTHS', 'FDATE', 'FDATE_START', 'FDATE_END', 'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'BRAND', 'PLATFORM', 'SHOP', 'FSITE', 'FSITECODE', '月份', '月', '年月'])
   if (dimKeys.has(key)) {
-    // 月份列加"月"后缀
+    // MONTHS 列：整数如 202601 → "202601月"；字符串如 "2026-01" → 直接返回
     if (key === 'MONTHS') {
       const num = typeof val === 'number' ? val : parseFloat(val)
       if (!isNaN(num)) return num + '月'
       return val + '月'
     }
+    // 月份列（中文）等：直接返回原始值，不要做数字解析
     return val
   }
 
@@ -486,9 +491,15 @@ function formatTableCell(key, val, colIdx) {
   const rawNum = typeof val === 'number' ? val : parseFloat(String(val).replace(/,/g, ''))
   if (isNaN(rawNum)) return val
 
-  if (usePercentFormat) {
-    // 率类指标：显示为百分比（小数 * 100）
-    return (rawNum * 100).toFixed(2) + '%'
+  // 指标单位感知格式化
+  const unit = props.metricUnit || ''
+  if (unit === '%' || usePercentFormat) {
+    // 率类指标：显示为百分比
+    const pct = rawNum < 1 ? rawNum * 100 : rawNum
+    return pct.toFixed(2) + '%'
+  }
+  if (unit === '$' || unit === '¥' || unit === '￥' || unit === '€') {
+    return unit + formatChartValue(rawNum)
   }
 
   if (useCommaFormat) {
@@ -567,6 +578,12 @@ const chartType = computed(() => {
     k === 'FBRAND' || k === 'FPRODUCTLINE'
   )
 
+  // 查找时间列（FDATE, MONTHS 等）
+  const timeKeys = keys.filter(k =>
+    k === 'FDATE' || k === 'FDATE_END' || k === 'FDATE_START' ||
+    k === 'MONTHS' || k === '日期' || k === '月份' || k === '年份'
+  )
+
   // 优先使用指定的 xAxisKey，如果没有则使用维度列
   const xAxisKey = props.xAxisKey || (dimensionKeys.length > 0 ? dimensionKeys[0] : keys[0])
 
@@ -580,7 +597,10 @@ const chartType = computed(() => {
     return val && (val.includes('-') || val.includes('/') || !isNaN(Date.parse(val)))
   })
 
-  console.log('[DEBUG chartType] keys:', keys, 'numericKeys:', numericKeys, 'dimensionKeys:', dimensionKeys, 'xAxisKey:', xAxisKey, 'isTimeSeries:', isTimeSeries)
+  // 多指标且有时间列时，返回 line（多系列折线图）
+  const hasTimeColumn = timeKeys.length > 0
+
+  console.log('[DEBUG chartType] keys:', keys, 'numericKeys:', numericKeys, 'dimensionKeys:', dimensionKeys, 'timeKeys:', timeKeys, 'xAxisKey:', xAxisKey, 'isTimeSeries:', isTimeSeries, 'hasTimeColumn:', hasTimeColumn)
 
   if (numericKeys.length === 1) {
     // 檢測是否是佔比/比率數據，優先顯示餅圖
@@ -600,7 +620,12 @@ const chartType = computed(() => {
     }
     return isTimeSeries ? 'line' : 'bar'
   } else if (numericKeys.length > 1) {
-    return 'table'  // 多指标用表格展示
+    // 多指标：有时间列时用折线图，否则用表格
+    if (hasTimeColumn || isTimeSeries) {
+      console.log('[DEBUG chartType] multi-metric with time, returning line')
+      return 'line'
+    }
+    return 'table'
   }
 
   return 'table'
@@ -626,16 +651,27 @@ const chartOptions = computed(() => {
     k === 'FBRAND' || k === 'FPRODUCTLINE'
   )
 
-  // 优先使用指定的 xAxisKey，如果没有则使用维度列
-  const xKey = props.xAxisKey || (dimensionKeys.length > 0 ? dimensionKeys[0] : keys[0])
+  // 查找时间列
+  const timeKeys = keys.filter(k =>
+    k === 'FDATE' || k === 'FDATE_END' || k === 'FDATE_START' ||
+    k === 'MONTHS' || k === '日期' || k === '月份' || k === '年份'
+  )
+
+  // 优先使用指定的 xAxisKey，否则智能选择：
+  // - 维度列优先（GROUP_X 等）
+  // - 折线图+有时间列时，用时间列
+  // - 否则用第一列
+  const xKey = props.xAxisKey ||
+    (dimensionKeys.length > 0 ? dimensionKeys[0] :
+     (chartType.value === 'line' && timeKeys.length > 0 ? timeKeys[0] : keys[0]))
   // 支持字符串数字
   const isNumeric = (val) => typeof val === 'number' || (!isNaN(parseFloat(val)) && typeof val !== 'boolean')
   // 排除的维度列（时间维度列不是指标）
-  const excludeDateKeys = ['FDATE', 'FDATE_END', 'FDATE_START', 'MONTHS']
-  // 计算数值列：检查所有行，只要任意一行有有效数值就认为是数值列
+  const excludeDateKeys = ['FDATE', 'FDATE_END', 'FDATE_START', 'MONTHS', '日期', '月份', '年份', '时间']
+  // 计算数值列：排除维度列和 xKey，只要任意一行有有效数值就认为是数值列
   const numericKeys = props.seriesConfig.length > 0
     ? props.seriesConfig.map(s => s.key)
-    : keys.filter(k => !excludeDateKeys.includes(k) && data.some(row => {
+    : keys.filter(k => !excludeDateKeys.includes(k) && k !== xKey && data.some(row => {
         const val = row[k]
         return val !== null && val !== '' && (typeof val === 'number' || !isNaN(parseFloat(val)))
       }))
@@ -757,8 +793,34 @@ const chartOptions = computed(() => {
     // 数据超过5个时启用滚动拖动
     const enableDataZoom = data.length > 5
 
+    // 计算标签显示策略：数据多时间隔显示 + 始终显示极值和首尾
+    const denseThreshold = 10
+    const isDense = data.length > denseThreshold
+    const labelStep = isDense ? Math.ceil(data.length / 8) : 1
+    const allValues = data.map(row => {
+      const v = numericKeys.reduce((sum, key) => sum + (parseFloat(row[key]) || 0), 0)
+      return v
+    })
+    const maxIdx = allValues.indexOf(Math.max(...allValues))
+    const minIdx = allValues.indexOf(Math.min(...allValues))
+    const showLabelAt = (idx) => {
+      if (!isDense) return true
+      return idx === 0 || idx === data.length - 1 || idx === maxIdx || idx === minIdx || idx % labelStep === 0
+    }
+
     const options = {
       ...baseOptions,
+      // 多系列时显示图例
+      ...(numericKeys.length > 1 ? {
+        legend: {
+          show: true,
+          top: 0,
+          textStyle: { color: '#6b7280', fontSize: 11 },
+          itemWidth: 16,
+          itemHeight: 8,
+        },
+        grid: { left: 80, right: 20, top: 30, bottom: 40 }
+      } : {}),
       xAxis: {
         type: 'category',
         data: data.map(row => row[xKey]),
@@ -778,9 +840,12 @@ const chartOptions = computed(() => {
         splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } }
       },
       series: numericKeys.map((key, idx) => ({
-        name: props.metricName || FIELD_NAME_MAP[key] || key,
+        name: numericKeys.length > 1 ? (FIELD_NAME_MAP[key] || key) : (props.metricName || FIELD_NAME_MAP[key] || key),
         type: 'line',
-        data: data.map(row => row[key]),
+        data: data.map((row, i) => ({
+          value: row[key],
+          label: { show: showLabelAt(i) }
+        })),
         smooth: true,
         symbol: 'circle',
         symbolSize: 6,
@@ -791,6 +856,13 @@ const chartOptions = computed(() => {
             { offset: 0, color: `${getSeriesColor(idx)}20` },
             { offset: 1, color: `${getSeriesColor(idx)}05` }
           ])
+        },
+        label: {
+          show: true,
+          position: 'top',
+          fontSize: 10,
+          color: '#6b7280',
+          formatter: (params) => formatChartValue(params.value)
         }
       }))
     }
@@ -833,6 +905,15 @@ const chartOptions = computed(() => {
     // 数据超过5个时启用滚动拖动
     const enableDataZoom = data.length > 5
 
+    // bar 图标签策略：数据多时间隔显示
+    const denseThreshold = 10
+    const isDense = data.length > denseThreshold
+    const labelStep = isDense ? Math.ceil(data.length / 8) : 1
+    const showLabelAt = (idx) => {
+      if (!isDense) return true
+      return idx === 0 || idx === data.length - 1 || idx % labelStep === 0
+    }
+
     const options = {
       ...baseOptions,
       xAxis: {
@@ -854,9 +935,12 @@ const chartOptions = computed(() => {
         splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } }
       },
       series: numericKeys.map((key, idx) => ({
-        name: props.metricName || FIELD_NAME_MAP[key] || key,
+        name: numericKeys.length > 1 ? (FIELD_NAME_MAP[key] || key) : (props.metricName || FIELD_NAME_MAP[key] || key),
         type: 'bar',
-        data: data.map(row => row[key]),
+        data: data.map((row, i) => ({
+          value: row[key],
+          label: { show: showLabelAt(i) }
+        })),
         barWidth: '60%',
         itemStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
@@ -864,6 +948,13 @@ const chartOptions = computed(() => {
             { offset: 1, color: `${getSeriesColor(idx)}80` }
           ]),
           borderRadius: [4, 4, 0, 0]
+        },
+        label: {
+          show: true,
+          position: 'top',
+          fontSize: 10,
+          color: '#6b7280',
+          formatter: (params) => formatChartValue(params.value)
         }
       }))
     }

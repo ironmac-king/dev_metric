@@ -128,25 +128,61 @@
           <div v-else class="chat-view">
             <!-- 消息列表 -->
             <div class="messages-container" ref="messagesContainer">
+              <!-- 文档样式切换按钮 -->
+              <div v-if="messages.length > 0" class="document-style-toggle">
+                <button
+                  class="toggle-btn"
+                  :class="{ active: enableDocumentStyle }"
+                  @click="enableDocumentStyle = !enableDocumentStyle"
+                  title="切换文档样式"
+                >
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <rect x="2" y="1" width="10" height="12" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+                    <path d="M4 4H10M4 7H10M4 10H8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                  </svg>
+                  <span>{{ enableDocumentStyle ? '文档样式' : '气泡样式' }}</span>
+                </button>
+                <button
+                  v-if="enableDocumentStyle"
+                  class="toggle-btn secondary"
+                  :class="{ active: mergeView }"
+                  @click="mergeView = !mergeView"
+                  title="合并/分离视图"
+                >
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                    <rect x="1" y="2" width="5" height="10" rx="1" stroke="currentColor" stroke-width="1.2"/>
+                    <rect x="8" y="2" width="5" height="10" rx="1" stroke="currentColor" stroke-width="1.2"/>
+                  </svg>
+                  <span>{{ mergeView ? '合并视图' : '分离视图' }}</span>
+                </button>
+              </div>
               <div class="messages-list">
-                <ModernAskMessage
-                  v-for="(msg, idx) in messages"
-                  :key="`modern-${msg.role}-${idx}-${msg.time || msg.created_at || ''}`"
-                  :msg="msg"
-                  :idx="idx"
-                  :expanded-interpretation="!!expandedInterpretation[idx]"
-                  @copy="copyMessage"
-                  @toggle-interpretation="toggleInterpretation"
-                  @rate="rateMessage"
-                  @open-process="openThinkingDrawer"
-                  @select-suggestion="selectSuggestion"
-                  @clarification-select="handleClarificationSelect"
-                  @clarification-confirm="handleClarificationConfirm"
-                  @plan-confirm="handlePlanConfirm"
-                  @plan-modify="handlePlanModify"
-                  @legacy-clarification="selectClarification"
-                  @drilldown="handleDrilldown"
-                />
+                <template v-for="(msg, idx) in messages" :key="`msg-${idx}`">
+                  <DocumentMessage
+                    v-if="enableDocumentStyle && msg.role === 'assistant' && (msg.resultData?.length > 0 || msg.content)"
+                    :msg="msg"
+                    :merge-view="mergeView"
+                    @select-suggestion="selectSuggestion"
+                    @drilldown="handleDrilldown"
+                  />
+                  <ModernAskMessage
+                    v-else
+                    :msg="msg"
+                    :idx="idx"
+                    :expanded-interpretation="!!expandedInterpretation[idx]"
+                    @copy="copyMessage"
+                    @toggle-interpretation="toggleInterpretation"
+                    @rate="rateMessage"
+                    @open-process="openThinkingDrawer"
+                    @select-suggestion="selectSuggestion"
+                    @clarification-select="handleClarificationSelect"
+                    @clarification-confirm="handleClarificationConfirm"
+                    @plan-confirm="handlePlanConfirm"
+                    @plan-modify="handlePlanModify"
+                    @legacy-clarification="selectClarification"
+                    @drilldown="handleDrilldown"
+                  />
+                </template>
                 <div
                   v-if="false"
                   v-for="(msg, idx) in messages"
@@ -273,6 +309,7 @@
                       :truncation-length="12"
                       :metric-name="msg.metricName || ''"
                       :metric-names="msg.metricNames || []"
+                      :metric-unit="msg.metricUnit || ''"
                       :time-start="msg.mql?.time?.start"
                       :time-end="msg.mql?.time?.end"
                       class="message-chart"
@@ -332,7 +369,7 @@
                     </div>
 
                     <!-- 思考过程（默认隐藏） -->
-                    <div v-if="false && msg.thinkingSteps && msg.thinkingSteps.length > 0" class="thinking-panel">
+                    <div v-if="msg.thinkingSteps && msg.thinkingSteps.length > 0" class="thinking-panel">
                       <button class="thinking-toggle" @click="toggleThinking(idx)">
                         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                           <circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.2"/>
@@ -371,7 +408,7 @@
                           v-for="s in msg.suggest"
                           :key="s"
                           class="suggest-item"
-                          @click="selectSuggestion(s)"
+                          @click="selectSuggestion(s, msg)"
                         >
                           {{ s }}
                         </button>
@@ -515,6 +552,7 @@ import VolatilityPanel from '../components/ask/VolatilityPanel.vue'
 import ReportPreview from '../components/ask/ReportPreview.vue'
 import SessionHistory from '../components/ask/SessionHistory.vue'
 import ModernAskMessage from '../components/ask/ModernAskMessage.vue'
+import DocumentMessage from '../components/ask/DocumentMessage.vue'
 
 const router = useRouter()
 const $route = useRoute()
@@ -530,6 +568,10 @@ const DRILLDOWN_LABELS = {
 const activeMode = ref('query')
 const messages = ref([])
 const loading = ref(false)
+
+// 文档样式开关
+const enableDocumentStyle = ref(false)
+const mergeView = ref(false)
 
 // Session ID for multi-turn conversation
 const sessionId = ref('')
@@ -1243,8 +1285,63 @@ function closeCommandPanel() {
   showCommandPanel.value = false
 }
 
-function selectSuggestion(s) {
-  question.value = s
+function selectSuggestion(s, contextMsg = null) {
+  let fullQuestion = s
+
+  // 携带上下文：时间范围和筛选条件
+  if (contextMsg) {
+    // 时间范围：优先用 timeRange，其次用 mql.time
+    const timeRange = contextMsg.timeRange || contextMsg.mql?.time
+    // 筛选条件 dimensionFilters 可能是对象 {key: value}、对象数组 [{dim1: val1}, ...] 或简单数组
+    let dimensionFilters = contextMsg.dimensionFilters || contextMsg.dimensions || []
+
+    // 统一转换为字符串数组
+    if (Array.isArray(dimensionFilters)) {
+      dimensionFilters = dimensionFilters.map(dim => {
+        if (typeof dim === 'object' && dim !== null) {
+          // 处理对象如 {value: '智能云存储', column: 'GROUP_2', ...}
+          // 优先取 value 字段
+          if (dim.value !== undefined) {
+            return String(dim.value)
+          }
+          // 否则取第一个键值对
+          const entries = Object.entries(dim)
+          return entries.length > 0 ? String(entries[0][1]) : ''
+        }
+        return String(dim)
+      }).filter(v => v) // 过滤空值
+    } else if (typeof dimensionFilters === 'object' && dimensionFilters !== null) {
+      // 处理单个对象
+      dimensionFilters = Object.entries(dimensionFilters).map(([k, v]) => String(v))
+    }
+
+    // 如果有时间范围，附加到问题中
+    if (timeRange?.start && timeRange?.end) {
+      // 检查问题是否已包含时间表达
+      const hasTimeExpr = /近\d+[天日月年]|今天|昨天|本周|本月|本年|上月|去年/.test(s)
+      if (!hasTimeExpr) {
+        fullQuestion = `${timeRange.start} ~ ${timeRange.end}的${s}`
+      }
+    } else if (timeRange?.start) {
+      // 只有 start 的情况
+      const hasTimeExpr = /近\d+[天日月年]|今天|昨天|本周|本月|本年|上月|去年/.test(s)
+      if (!hasTimeExpr) {
+        fullQuestion = `${timeRange.start}以来的${s}`
+      }
+    }
+
+    // 如果有筛选条件（dimensionFilters），附加到问题中
+    if (dimensionFilters && dimensionFilters.length > 0) {
+      const dimStr = dimensionFilters.join('、')
+      // 检查问题是否已包含维度
+      const hasDimExpr = dimensionFilters.some(dim => s.includes(dim))
+      if (!hasDimExpr) {
+        fullQuestion = `${dimStr}的${fullQuestion}`
+      }
+    }
+  }
+
+  question.value = fullQuestion
   handleSend()
 }
 
@@ -3424,5 +3521,52 @@ function scrollToBottom() {
   .tool-label {
     display: none;
   }
+}
+
+/* 文档样式切换按钮 */
+.document-style-toggle {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+  margin-bottom: 12px;
+  background: linear-gradient(to bottom, var(--bg-primary) 60%, transparent);
+}
+
+.toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-white);
+  border-radius: 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.toggle-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.toggle-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.toggle-btn.secondary {
+  background: var(--bg-primary);
+}
+
+.toggle-btn.secondary.active {
+  background: var(--text-secondary);
+  border-color: var(--text-secondary);
+  color: #fff;
 }
 </style>

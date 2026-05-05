@@ -14,6 +14,7 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
   let finalResultData = []
   let finalMetricName = ''
   let finalMetricNames = []
+  let finalMetricUnit = ''
   let finalAnalysis = null
   let finalMultiMetricData = []
   let finalDimensionalData = {}
@@ -28,6 +29,7 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
   let finalStarrocksSql = ''
   let finalMomChange = null
   let finalYoyChange = null
+  let finalSupplementaryInfo = []
   let currentMqlDimensions = []
   let currentMqlTime = null
   const thinkingStepsMap = new Map()
@@ -132,6 +134,7 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       finalResultData = data.result_data || []
       finalMetricName = data.metric_name || ''
       finalMetricNames = data.metric_names || []
+      finalMetricUnit = data.metric_unit || ''
       finalAnalysis = data.analysis || null
       const didParse = _parseAnalysisLLMContent(finalAnalysis)
       // 只在成功解析 markdown JSON 时更新缓存，防止被后续 result_ready 覆盖
@@ -143,6 +146,7 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       finalMultiMetricData = data.multi_metric_data || []
       finalDimensionalData = data.dimensional_data || {}
       finalCategory = data.category || ''
+      finalSupplementaryInfo = data.supplementaryInfo || []
       finalStarrocksSql = data.starrocks_sql || ''
       finalMomChange = data.mom_change ?? null
       finalYoyChange = data.yoy_change ?? null
@@ -226,9 +230,11 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       finalStarrocksSql,
       finalMomChange,
       finalYoyChange,
+      finalSupplementaryInfo,
       currentMqlDimensions,
       currentMqlTime,
       currentTime,
+      finalMetricUnit,
     })
     return msg
   }

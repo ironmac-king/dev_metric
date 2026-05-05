@@ -189,6 +189,8 @@ class AskResponseV2(BaseModel):
     metric_name: Optional[str] = None  # 指标名称（用于图表 tooltip）
     analysis: Optional[Dict[str, Any]] = None  # 触发分析结果
     mode: Optional[str] = "direct"  # "direct" or "triggered"
+    one_sentence_summary: Optional[str] = None  # 一句话核心结论
+    analysis_summary: Optional[str] = None  # 详细分析摘要
 
 
 # ==================== 会话持久化辅助函数 ====================
@@ -212,6 +214,7 @@ async def _save_v2_session_to_go(
             "resultData": result_data,
             "metricName": _get_metric_name(result_state.mql) if result_state.mql else "",
             "metricNames": _get_metric_names(result_state.mql) if result_state.mql else [],
+            "metricUnit": result_state.mql.metric.unit if result_state.mql and result_state.mql.metric else "",
             "analysis": result_state.analysis,
             "multiMetricData": getattr(result_state, "multi_metric_data", []),
             "dimensionalData": getattr(result_state, "dimensional_data", {}),
@@ -354,11 +357,16 @@ async def ask_question_v2(req: AskRequestV2):
             clarification_message=clarification_message,
             clarification_options=result_state.context_cache.clarification_options if needs_clarification else None,
             error=result_state.error if not result_state.answer else None,
-            result_data=result_state.sql_result.data if result_state.sql_result else None,
+            result_data=_rename_result_columns(
+                result_state.sql_result.data if result_state.sql_result else None,
+                _build_column_rename_map(result_state.mql) if result_state.mql else {}
+            ),
             total=result_state.sql_result.total if result_state.sql_result else 0,
             metric_name=_get_metric_name(result_state.mql) if result_state.mql else None,
             analysis=result_state.analysis,
             mode="triggered" if result_state.analysis else "direct",
+            one_sentence_summary=getattr(result_state, "one_sentence_summary", ""),
+            analysis_summary=getattr(result_state, "analysis_summary", ""),
         )
 
         duration_ms = int((time.time() - start_time) * 1000)
@@ -535,6 +543,7 @@ async def ask_question_v2_stream(req: AskRequestV2):
                 return
 
             # 流式执行
+            sent_events = set()
             async for step_name, step_state in _stream_graph(v2_graph, state):
                 # 发送步骤开始
                 yield StreamEvent(SSSEvent.STEP_START, {
@@ -567,14 +576,16 @@ async def ask_question_v2_stream(req: AskRequestV2):
                     }).to_sse()
                     await asyncio.sleep(0.05)  # 让浏览器有时间渲染当前步骤
 
-                # 发送 SQL（一旦就绪）
-                if step_state.get("sql"):
+                # 发送 SQL（仅首次就绪）
+                if step_state.get("sql") and "sql_ready" not in sent_events:
+                    sent_events.add("sql_ready")
                     yield StreamEvent(SSSEvent.SQL_READY, {
                         "sql": step_state["sql"],
                     }).to_sse()
 
-                # 发送结果（一旦就绪）
-                if step_state.get("result_data"):
+                # 发送结果（仅首次就绪）
+                if step_state.get("result_data") and "result_ready" not in sent_events:
+                    sent_events.add("result_ready")
                     # 从 mql 中提取 starrocks_sql（用于波动分析自行计算 MoM/YoY）
                     mql_obj = step_state.get("mql")
                     starrocks_sql = None
@@ -586,11 +597,21 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         mql_metric = getattr(mql_obj, "metric", None)
                         if mql_metric and hasattr(mql_metric, "starrocks_sql"):
                             starrocks_sql = getattr(mql_metric, "starrocks_sql") or ""
+                    # 从 mql 中提取 metric_unit
+                    metric_unit = ""
+                    if mql_obj and isinstance(mql_obj, dict):
+                        metric = mql_obj.get("metric") or {}
+                        metric_unit = metric.get("unit", "")
+                    elif mql_obj and hasattr(mql_obj, "metric"):
+                        mql_metric = getattr(mql_obj, "metric", None)
+                        if mql_metric and hasattr(mql_metric, "unit"):
+                            metric_unit = getattr(mql_metric, "unit", "") or ""
                     yield StreamEvent(SSSEvent.RESULT_READY, {
                         "result_data": step_state["result_data"],
                         "total": step_state.get("total", 0),
                         "metric_name": step_state.get("metric_name", ""),
                         "metric_names": step_state.get("metric_names", []),
+                        "metric_unit": metric_unit,
                         "columns": step_state.get("columns", []),
                         "multi_metric_data": step_state.get("multi_metric_data", []),
                         "dimensional_data": step_state.get("dimensional_data", {}),
@@ -602,8 +623,9 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "starrocks_sql": starrocks_sql,
                     }).to_sse()
 
-                # 发送回答（一旦就绪）
-                if step_state.get("answer"):
+                # 发送回答（仅首次就绪）
+                if step_state.get("answer") and "answer_ready" not in sent_events:
+                    sent_events.add("answer_ready")
                     yield StreamEvent(SSSEvent.ANSWER_READY, {
                         "answer": step_state["answer"],
                         "suggestions": step_state.get("suggestions", []),
@@ -727,6 +749,15 @@ async def _stream_graph(graph, state: V2State):
                 columns = sql_result.columns if sql_result and hasattr(sql_result, 'columns') else []
                 total = sql_result.total if sql_result and hasattr(sql_result, 'total') else 0
 
+                # 列名中文化：CTE 新别名 → 前端展示中文
+                mql = getattr(state_update, 'mql', None)
+                if result_data and mql:
+                    col_map = _build_column_rename_map(mql)
+                    result_data = _rename_result_columns(result_data, col_map)
+                    # 从重命名后的数据派生 columns，避免前端看到 "dummy" 等 CTE 内部别名
+                    if result_data and isinstance(result_data, list) and len(result_data) > 0:
+                        columns = list(result_data[0].keys())
+
                 # 获取 answer 和 suggestions
                 answer = getattr(state_update, 'answer', '') or ''
                 suggestions = []
@@ -795,7 +826,13 @@ async def _stream_graph(graph, state: V2State):
                     # 传递 mom/yoy（供波动分析使用）
                     "momChange": getattr(state_update, 'mom_change', None),
                     "yoyChange": getattr(state_update, 'yoy_change', None),
+                    # 传递补充信息（供文档样式类型B使用）
+                    "supplementaryInfo": getattr(state_update, 'supplementary_info', []),
+                    # 一句话结论和详细摘要
+                    "one_sentence_summary": getattr(state_update, 'one_sentence_summary', ''),
+                    "analysis_summary": getattr(state_update, 'analysis_summary', ''),
                 }
+                logger.info(f"[_stream_graph] yielding supplementaryInfo={getattr(state_update, 'supplementary_info', [])}")
         logger.info(f"[_stream_graph] 流式执行完成")
     except Exception as e:
         logger.error(f"[_stream_graph] 错误: {e}")
@@ -884,6 +921,117 @@ def _get_step_duration(state: V2State) -> int:
         last_step = state.thinking_steps[-1]
         return last_step.duration_ms
     return 0
+
+
+# ============================================================
+# 列名中文化（CTE 新别名 → 前端展示中文列名）
+# ============================================================
+
+# 维度列名 → 中文
+DIM_COL_CHINESE = {
+    "GROUP_3": "三级品类",
+    "GROUP_2": "二级品类",
+    "GROUP_1": "一级品类",
+    "GROUP_4": "四级品类",
+    "FSITE": "店铺",
+    "FCOUNTRY": "国家",
+    "FREGION": "区域",
+    "FCHANNEL": "渠道",
+    "PLATFORM": "平台",
+    "FDATE": "日期",
+    "MONTHS": "月份",
+    "YEARS": "年份",
+    "WEEKS": "周",
+    "QUARTERS": "季度",
+    "SKU": "SKU",
+    "ASIN": "ASIN",
+    "FBRANDS": "品牌",
+    "FPRODUCTLINE": "产品线",
+    "FADTYPE": "广告类型",
+    "DT": "日期",
+    "DATE": "日期",
+    "STAT_DATE": "统计日期",
+}
+
+# 指标后缀 → 中文标签
+METRIC_SUFFIX_CHINESE = {
+    "_raw": "当前值",
+    "current_val": "当前值",
+    "mom_val": "环比",
+    "yoy_val": "同比",
+    "_yoy": "同比",
+    "_mom": "环比",
+    "_wow": "周环比",
+    "_wow_val": "周环比",
+    "_rank": "排名",
+    "_running_sum": "累计值",
+    "_ratio": "占比",
+    "_pct": "占比",
+    "_ma7": "7日均值",
+}
+
+
+def _build_column_rename_map(mql) -> Dict[str, str]:
+    """从 MQL 构建列名→中文的映射表，供 result_data 列名替换用"""
+    col_map: Dict[str, str] = {}
+
+    # 1. 维度列（固定映射）
+    for en, zh in DIM_COL_CHINESE.items():
+        col_map[en] = zh
+
+    # 2. Generic 计算模式列名（与 metric name 无关）
+    generic_map = {
+        "current_val": "当前值",
+        "mom_val": "环比",
+        "yoy_val": "同比",
+        "wow_val": "周环比",
+        "mom_change": "环比变化",
+        "yoy_change": "同比变化",
+        "wow_change": "周环比变化",
+    }
+    for col, label in generic_map.items():
+        col_map[col] = label
+
+    # 3. 指标特定列名：{metric_name}_{suffix} → {metric_name}{中文标签}
+    metric = getattr(mql, 'metric', None) if mql else None
+    if metric:
+        name = getattr(metric, 'name', '') or ''
+        if name:
+            for suffix, label in METRIC_SUFFIX_CHINESE.items():
+                col_map[f"{name}{suffix}"] = f"{name}{label}"
+
+            # running_sum 中文为"累计"
+            col_map[f"{name}_running_sum"] = f"{name}累计"
+
+    # 4. 多指标：mql.metrics 列表中的指标也需要映射
+    metrics_list = getattr(mql, 'metrics', None) if mql else None
+    if metrics_list:
+        for m in metrics_list:
+            name = getattr(m, 'name', '') or ''
+            if name and name not in col_map:
+                for suffix, label in METRIC_SUFFIX_CHINESE.items():
+                    col_map[f"{name}{suffix}"] = f"{name}{label}"
+                col_map[f"{name}_running_sum"] = f"{name}累计"
+
+    return col_map
+
+
+def _rename_result_columns(
+    result_data: Optional[List[Dict[str, Any]]],
+    col_map: Dict[str, str],
+) -> Optional[List[Dict[str, Any]]]:
+    """将英文列名替换为中文列名（前端展示用）"""
+    if not result_data or not isinstance(result_data, list) or not col_map:
+        return result_data
+
+    renamed = []
+    for row in result_data:
+        new_row = {}
+        for k, v in row.items():
+            new_key = col_map.get(k, k)
+            new_row[new_key] = v
+        renamed.append(new_row)
+    return renamed
 
 
 @router.get("/v2/health")

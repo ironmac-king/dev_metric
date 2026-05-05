@@ -31,6 +31,33 @@ class MQLGenerator:
         self._llm_engine = get_llm_engine()
         self._dimension_name_to_column = None  # 动态维度映射
         self._semantic_service = None  # 语义快照服务延迟加载
+        # 语义层增强数据（通过 enrich() 加载）
+        self._enrichment_data = None  # EnrichResult
+
+    def _get_semantic_service(self):
+        """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
+        if self._semantic_service is None:
+            from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
+            self._semantic_service = get_semantic_snapshot_service()
+        return self._semantic_service
+
+    def _load_enrichment_for_mql_generation(self):
+        """通过语义层统一加载 MQL 生成所需的增强数据"""
+        if self._enrichment_data is not None:
+            return self._enrichment_data
+
+        try:
+            from ai.services.semantic_layer import get_semantic_layer_service, EnrichStage
+            from ai.services.semantic_layer.api import ParseResult
+
+            semantic_layer = get_semantic_layer_service()
+            empty_parse_result = ParseResult(intent="unknown", confidence=0.0)
+            self._enrichment_data = semantic_layer.enrich(empty_parse_result, stage=EnrichStage.MQL_GENERATION)
+            logger.info("[MQLGenerator] 通过语义层加载 MQL 生成增强数据成功")
+            return self._enrichment_data
+        except Exception as e:
+            logger.warning(f"[MQLGenerator] 语义层加载失败: {e}，回退到直接调用语义快照")
+            return None
 
     def _get_semantic_service(self):
         """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
@@ -43,15 +70,14 @@ class MQLGenerator:
         """从 API 加载维度配置，构建 dimension_name → column_name 映射"""
         if self._dimension_name_to_column is not None:
             return
-        # 优先从语义快照获取
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            dim_name_map = semantic_svc.get_dimension_name_to_code_map()
-            if dim_name_map:
-                self._dimension_name_to_column = dim_name_map
-                logger.info(f"[MQLGenerator] 从语义快照加载了 {len(self._dimension_name_to_column)} 个维度映射")
-                return
-        # 快照为空，回退到 API 加载
+        # ========== 使用语义层 enrich() 获取 ==========
+        enrichment = self._load_enrichment_for_mql_generation()
+        if enrichment and enrichment.dimension_name_to_code_map:
+            self._dimension_name_to_column = enrichment.dimension_name_to_code_map
+            logger.info(f"[MQLGenerator] 从语义层加载了 {len(self._dimension_name_to_column)} 个维度映射")
+            return
+        # ====================================================
+        # 回退到 API 加载
         try:
             from ai.client.metric_client import MetricClient
             client = MetricClient()
@@ -226,16 +252,14 @@ class MQLGenerator:
         synonym_map: Dict[str, str] = {用户词: 标准值}
         valid_values: set = 所有有效的维度值集合
         """
-        # 优先用语义快照获取
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            result = semantic_svc.get_business_term_maps()
-            if result:
-                synonym_map, valid_values = result
-                if synonym_map or valid_values:
-                    logger.info(f"[_load_business_terms] 从语义快照加载了 {len(synonym_map)} 个同义词映射")
-                    return synonym_map, valid_values
-        # 快照为空，回退到 HTTP 调用
+        # ========== 使用语义层 enrich() 获取 ==========
+        enrichment = self._load_enrichment_for_mql_generation()
+        if enrichment and enrichment.business_term_maps:
+            synonym_map = enrichment.business_term_maps
+            logger.info(f"[_load_business_terms] 从语义层加载了 {len(synonym_map)} 个同义词映射")
+            return synonym_map, set()
+        # ====================================================
+        # 回退到 HTTP 调用
         try:
             from ai.client.metric_client import MetricClient
             client = MetricClient()
@@ -265,13 +289,12 @@ class MQLGenerator:
         格式：用户词 → 标准值 (field=列名)
         说明：当用户问题中出现"用户词"时，应生成 filter {"field": "列名", "value": "标准值"}
         """
-        # 优先用语义快照获取
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            result = semantic_svc.get_dimension_synonym_context(limit=20)
-            if result:
-                return result
-        # 快照为空，回退到 HTTP 调用
+        # ========== 使用语义层 enrich() 获取 ==========
+        enrichment = self._load_enrichment_for_mql_generation()
+        if enrichment and enrichment.synonym_context:
+            return enrichment.synonym_context
+        # ====================================================
+        return ""  # 回退到空字符串
         try:
             from ai.client.metric_client import MetricClient
             from ai.services.dimension_service import DimensionService
@@ -411,13 +434,13 @@ class MQLGenerator:
         return template
 
     def _get_dimension_values_context(self) -> str:
-        """从 dim_value_mapping 获取维度值上下文（优先语义快照，失败则走 DimensionService HTTP）"""
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            result = semantic_svc.get_dimension_values_context()
-            if result:
-                return result
-        # 快照为空，回退到 DimensionService HTTP
+        """从 dim_value_mapping 获取维度值上下文"""
+        # ========== 使用语义层 enrich() 获取 ==========
+        enrichment = self._load_enrichment_for_mql_generation()
+        if enrichment and enrichment.dimension_values_context:
+            return enrichment.dimension_values_context
+        # ====================================================
+        return ""  # 回退到空字符串
         try:
             from ai.services.dimension_service import DimensionService
             svc = DimensionService()
@@ -435,22 +458,19 @@ class MQLGenerator:
         if not question or not dim_type:
             return dim_type
 
-        # 检查用户是否提到了具体级别（优先语义快照，失败则走 DimensionService HTTP）
+        # ========== 使用语义层 enrich() 获取 ==========
         level_keywords = None
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            level_keywords = semantic_svc.get_level_keywords()
+        enrichment = self._load_enrichment_for_mql_generation()
+        if enrichment and enrichment.level_keywords:
+            level_keywords = enrichment.level_keywords
+        # ====================================================
         if not level_keywords:
-            try:
-                from ai.services.dimension_service import DimensionService
-                level_keywords = DimensionService().get_level_keywords()
-            except Exception:
-                level_keywords = {
-                    "一级品类": "GROUP_1",
-                    "二级品类": "GROUP_2",
-                    "三级品类": "GROUP_3",
-                    "四级品类": "GROUP_4",
-                }
+            level_keywords = {
+                "一级品类": "GROUP_1",
+                "二级品类": "GROUP_2",
+                "三级品类": "GROUP_3",
+                "四级品类": "GROUP_4",
+            }
 
         for keyword, correct_type in level_keywords.items():
             if keyword in question:
@@ -598,34 +618,31 @@ class MQLGenerator:
         if self._dimension_name_to_column:
             dim_type_map.update(self._dimension_name_to_column)
 
-        # 硬编码映射作为回退（优先语义快照，失败则走 DimensionService HTTP）
+        # ========== 使用语义层 enrich() 获取 ==========
         fallback_map = None
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            fallback_map = semantic_svc.get_dimension_fallback_map()
+        enrichment = self._load_enrichment_for_mql_generation()
+        if enrichment and enrichment.dimension_fallback_map:
+            fallback_map = enrichment.dimension_fallback_map
+        # ====================================================
         if not fallback_map:
-            try:
-                from ai.services.dimension_service import DimensionService
-                fallback_map = DimensionService().get_fallback_map()
-            except Exception:
-                fallback_map = {
-                    "店铺": "SHOP",
-                    "站点": "SITE",
-                    "平台": "PLATFORM",
-                    "渠道": "CHANNEL",
-                    "品类": "CATEGORY",
-                    "商品": "PRODUCT",
-                    "产品": "PRODUCT",
-                    "SKU": "SKU",
-                    "ASIN": "ASIN",
-                    "国家": "COUNTRY",
-                    "地区": "REGION",
-                    "区域": "REGION",
-                    "部门": "DEPARTMENT",
-                    "产品线": "PRODUCT_LINE",
-                    "广告类型": "AD_TYPE",
-                    "广告": "AD_TYPE",
-                    "日": "DAY",
+            fallback_map = {
+                "店铺": "SHOP",
+                "站点": "SITE",
+                "平台": "PLATFORM",
+                "渠道": "CHANNEL",
+                "品类": "CATEGORY",
+                "商品": "PRODUCT",
+                "产品": "PRODUCT",
+                "SKU": "SKU",
+                "ASIN": "ASIN",
+                "国家": "COUNTRY",
+                "地区": "REGION",
+                "区域": "REGION",
+                "部门": "DEPARTMENT",
+                "产品线": "PRODUCT_LINE",
+                "广告类型": "AD_TYPE",
+                "广告": "AD_TYPE",
+                "日": "DAY",
                     "月": "MONTH",
                     "年": "YEAR",
                     "周": "WEEK",
@@ -761,10 +778,30 @@ class MQLGenerator:
         """填充默认值"""
         logger.info(f"[_fill_defaults] 进入方法，dimensions={mql.dimensions}, original_question={mql.original_question}")
         # 时间默认本月
-        if not mql.time and inherited_mql and inherited_mql.time:
+        # 注意：mql.time 可能存在但 start/end 为空，需要检查 start/end 是否有效
+        mql_time_invalid = not mql.time or not (mql.time.start or mql.time.end)
+        if mql_time_invalid and inherited_mql and inherited_mql.time:
             mql.time = inherited_mql.time
-        elif not mql.time:
+            logger.info(f"[_fill_defaults] 继承 inherited_mql.time: {inherited_mql.time.start} ~ {inherited_mql.time.end}")
+        elif mql_time_invalid:
             mql.time = TimeRange(type=TimeType.RELATIVE, original="本月")
+
+        # 如果 time.original 有值但 start/end 为空，用 TimeParser 解析
+        if mql.time and mql.time.original and not (mql.time.start and mql.time.end):
+            try:
+                from ai.engine.time_parser import TimeParser
+                parsed = TimeParser().parse(mql.time.original)
+                if parsed:
+                    mql.time.start = mql.time.start or parsed.get("start", "")
+                    mql.time.end = mql.time.end or parsed.get("end", "")
+                    if parsed.get("type"):
+                        try:
+                            mql.time.type = TimeType(parsed["type"])
+                        except ValueError:
+                            pass
+                    logger.info(f"[_fill_defaults] TimeParser 解析时间: {mql.time.original} → {mql.time.start} ~ {mql.time.end}")
+            except Exception as e:
+                logger.warning(f"[_fill_defaults] TimeParser 解析失败: {e}")
 
         # 指标继承
         if not mql.metric and inherited_mql and inherited_mql.metric:
