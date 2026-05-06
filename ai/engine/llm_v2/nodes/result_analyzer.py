@@ -280,10 +280,12 @@ class ResultAnalyzer:
             return result
 
         # 1.5 处理全空值数据（有行但指标值全为 None/0）
+        # 但如果 trigger_analyzer 已经产出 analysis 数据，说明分析SQL查到了有效数据，不走空处理
         all_empty = self._all_values_empty(sql_result.data)
         logger.info(f"[ResultAnalyzer] _all_values_empty={all_empty}, data_sample={sql_result.data[:2] if sql_result.data else 'empty'}")
-        if all_empty:
-            logger.info("[ResultAnalyzer] 数据全为空值，按无数据处理")
+        has_analysis_kpi = bool(analysis and analysis.get("kpi", {}).get("current") is not None)
+        if all_empty and not has_analysis_kpi:
+            logger.info("[ResultAnalyzer] 数据全为空值且无分析数据，按无数据处理")
             result = await self._handle_empty_result(mql, question)
             return result
 

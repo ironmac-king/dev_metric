@@ -30,19 +30,39 @@ class FollowupAction(Enum):
     REPLACE_TIME = "replace_time"
     REPLACE_COMP = "replace_comp"
     RESET = "reset"
+    CORRECT = "correct"  # 纠错/回退
     INHERIT = "inherit"
 
 
 FOLLOWUP_ACTION_KEYWORDS: Dict[str, List[str]] = {
-    "REPLACE_METRIC": ["换成", "改成", "换为", "改为"],
-    "ADD_METRIC": ["加上", "再加", "还有", "加个", "一并", "加一个", "顺便"],
-    "REMOVE_METRIC": ["去掉", "去除", "移除", "删除", "删掉", "不要"],
-    "REPLACE_DIM": ["换成按", "改成按"],
-    "REMOVE_DIM": ["不看"],
-    "REPLACE_COMP": ["环比", "同比"],
-    "REPLACE_TIME": ["看看上月", "看看上周", "看看去年", "看看本月", "看看今年", "换到本月"],
-    "RESET": ["重新来", "重来", "换一个", "重新"],
+    "REPLACE_METRIC": ["换成", "改成", "换为", "改为", "换做", "调整为", "改成用", "换成用", "改算", "算算"],
+    "ADD_METRIC": ["加上", "再加", "还有", "加个", "一并", "加一个", "顺便", "增加", "加上去", "添加", "加一下", "再加上", "加进去", "顺带加", "也看看", "也看下", "带上", "一起看"],
+    "REMOVE_METRIC": ["去掉", "去除", "移除", "删除", "删掉", "不要", "剔除", "排除", "别要", "去掉这个", "去掉那个", "不要了", "不用了"],
+    "REPLACE_DIM": ["换成按", "改成按", "改为按", "换为按", "改成以", "换为以", "改按", "按"],
+    "REMOVE_DIM": ["不看", "不按", "别按", "去掉按", "别用", "不用"],
+    "REPLACE_COMP": ["环比", "同比", "趋势"],
+    "REPLACE_TIME": ["看看上月", "看看上周", "看看去年", "看看本月", "看看今年", "换到本月", "上月呢", "上月吧", "去年呢", "去年吧", "换上月", "换去年", "看上月", "看去年", "本周呢", "上周呢", "上季度"],
+    "RESET": ["重新来", "重来", "换一个", "重新", "算了", "换个话题"],
 }
+
+# 纠错关键词（最高优先级）
+_CORRECTION_KEYWORDS = [
+    "不对", "错了", "不是这个", "搞错了",
+    "不对不对", "重算",
+]
+
+# 时间纠错模式（纠错 + 时间词组合）
+_TIME_CORRECTION_PATTERNS = [
+    (r"换上月", "上月"),
+    (r"换成上月", "上月"),
+    (r"改成上月", "上月"),
+    (r"换去年", "去年"),
+    (r"换成去年", "去年"),
+    (r"改成去年", "去年"),
+    (r"换本月", "本月"),
+    (r"换成本月", "本月"),
+    (r"改成本月", "本月"),
+]
 
 # "按XX看" 模式需要正则匹配，不在关键词列表中
 _REPLACE_DIM_PATTERN = re.compile(r"按.{1,6}看")
@@ -301,6 +321,13 @@ class IntentRouter:
                 "local_only": True,
             }
 
+            # 意图纠正：含"环比/同比+变化"关键词时应为 comparison 而非 trend
+            intent_val = parse_result.intent
+            if intent_val == "query_trend":
+                if ("环比" in question or "同比" in question) and "变化" in question:
+                    local_result["intent"] = "query_comparison"
+                    logger.info(f"[IntentRouter] 意图纠正: query_trend → query_comparison (含环比/同比+变化)")
+
             logger.info(f"[IntentRouter] 语义层→本地MQL构建: intent={parse_result.intent}, "
                        f"entities={[f'{e['type']}:{e['text']}' for e in entities]}, "
                        f"method={parse_result.parse_method}")
@@ -341,6 +368,14 @@ class IntentRouter:
                  > REPLACE_METRIC > ADD_METRIC > REMOVE_METRIC > INHERIT
         """
         entities = entities or {}
+
+        # 0. CORRECT — 纠错（最高优先级）
+        if any(kw in question for kw in _CORRECTION_KEYWORDS):
+            return FollowupAction.CORRECT
+        # 纠错+时间组合模式："换上月"、"换成去年"
+        for pattern, _ in _TIME_CORRECTION_PATTERNS:
+            if re.search(pattern, question):
+                return FollowupAction.CORRECT
 
         # 1. RESET — 重置
         for kw in FOLLOWUP_ACTION_KEYWORDS.get("RESET", []):
@@ -405,6 +440,28 @@ class IntentRouter:
         # 10. 默认 INHERIT
         return FollowupAction.INHERIT
 
+    def _extract_metric_from_text(self, question: str) -> Optional[str]:
+        """从文本中提取可能的指标名（用于纠错场景）"""
+        # 去掉纠错关键词
+        cleaned = question
+        for kw in _CORRECTION_KEYWORDS:
+            cleaned = cleaned.replace(kw, "")
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return None
+        # 尝试语义快照匹配
+        try:
+            semantic_svc = self._get_semantic_service()
+            result = semantic_svc.resolve_metric(cleaned)
+            if result:
+                return result.get("name") or result.get("display_name") or cleaned
+        except Exception:
+            pass
+        # 如果清理后的文本像是一个指标名（>1 字且不是时间词），返回它
+        if len(cleaned) >= 2 and cleaned not in TIME_EXPRESSION_MAP:
+            return cleaned
+        return None
+
     def _resolve_metric_name(self, candidate: str) -> Optional[Dict[str, Any]]:
         """解析指标名（语义快照优先 → MetricClient 兜底），纯内存查找"""
         if not candidate:
@@ -450,6 +507,12 @@ class IntentRouter:
         # 2. 动作词检测（结构化模式，覆盖换/加/去/对比/时间/重置）
         action = self._detect_followup_action(question)
         if action != FollowupAction.INHERIT:
+            # REPLACE_COMP/REPLACE_TIME 类追问通常很短（"环比"、"看看环比"等）
+            # 超过15字还带这些关键词的，基本是独立新问题
+            # 例如 "智能云存储的2026-01-01 ~ 2026-05-05的查看各站点销售额环比变化"
+            if len(question) > 15 and action in (FollowupAction.REPLACE_COMP, FollowupAction.REPLACE_TIME):
+                logger.info(f"[_is_short_followup] 问题较长({len(question)}字)且含{action.value}动作词，视为新问题")
+                return False
             return True
 
         # 3. 维度代码选择（前端追问选项回调）
@@ -824,6 +887,9 @@ class IntentRouter:
 
         # === 根据动作类型执行合并策略 ===
 
+        if action == FollowupAction.CORRECT:
+            return self._handle_correction_followup(question, mql, inherited_mql)
+
         if action == FollowupAction.RESET:
             return self._handle_reset_followup(question)
 
@@ -879,8 +945,10 @@ class IntentRouter:
                 return removal_result
 
         # INHERIT：检查是否是独立新问题
-        if self._is_new_question(question):
-            logger.info(f"[IntentRouter] 检测到新问题（{question[:20]}...），不继承上轮指标")
+        if self._is_new_question(question, inherited_mql):
+            logger.info(f"[IntentRouter] 检测到新问题（{question[:20]}...），清除继承指标")
+            # 清除继承的追加指标，避免旧指标污染新问题
+            mql.metrics = []
             return {"mql": mql, "needs_clarification": False, "source": "llm"}
 
         # 兜底继承上轮意图
@@ -921,6 +989,21 @@ class IntentRouter:
         )
         mql.metrics = []
         logger.info(f"[_handle_replace_metric_followup] 换指标: {candidate} → {mql.metric.name} ({mql.metric.code})")
+
+        # 追问中可能同时切换维度，检测并更新
+        dim_keywords = [
+            ("一级品类", "GROUP_1"), ("二级品类", "GROUP_2"), ("三级品类", "GROUP_3"), ("四级品类", "GROUP_4"),
+            ("一级类目", "GROUP_1"), ("二级类目", "GROUP_2"), ("三级类目", "GROUP_3"),
+            ("站点", "FSITE"), ("品牌", "FBRANDS"), ("平台", "PLATFORM"),
+            ("渠道", "FCHANNEL"), ("国家", "FCOUNTRY"), ("广告类型", "FADTYPE"),
+        ]
+        for dim_name, dim_col in dim_keywords:
+            if dim_name in question:
+                from ..schema import MQLDimension
+                mql.dimensions = [MQLDimension(type=dim_name, column=dim_col)]
+                logger.info(f"[_handle_replace_metric_followup] 追问检测到维度变更: {dim_name} -> {dim_col}")
+                break
+
         return {"mql": mql, "needs_clarification": False, "source": "followup_replace_metric"}
 
     def _handle_comparison_followup(self, question: str, mql: MQLSchema, inherited_mql: MQLSchema) -> Dict[str, Any]:
@@ -990,7 +1073,63 @@ class IntentRouter:
             "source": "followup_reset",
         }
 
-    def _is_new_question(self, question: str) -> bool:
+    def _handle_correction_followup(self, question: str, mql: MQLSchema, inherited_mql: MQLSchema) -> Dict[str, Any]:
+        """处理纠错追问：分析用户想修正什么，执行回退/修正"""
+        logger.info(f"[_handle_correction_followup] 纠错追问: {question}")
+
+        # 1. 时间纠错："不对，换上月" → 替换时间
+        time_correction = self._detect_time_correction(question)
+        if time_correction:
+            try:
+                from ai.engine.time_parser import TimeParser
+                parser = TimeParser()
+                parsed_time = parser.parse(time_correction)
+                if parsed_time:
+                    from ..schema import TimeRange, TimeType
+                    mql.time = TimeRange(
+                        type=TimeType(parsed_time.get("type", "relative")),
+                        start=parsed_time.get("start", ""),
+                        end=parsed_time.get("end", ""),
+                        original=time_correction,
+                    )
+                    mql.comparison = None
+                    logger.info(f"[_handle_correction_followup] 时间纠错: {time_correction} → {mql.time.start}~{mql.time.end}")
+                    return {"mql": mql, "source": "followup_correction"}
+            except Exception as e:
+                logger.warning(f"[_handle_correction_followup] 时间解析失败: {e}")
+
+        # 2. 指标纠错："不对，应该是利润" → 替换指标
+        metric_correction = self._extract_metric_from_text(question)
+        if metric_correction:
+            resolved = self._resolve_metric_name(metric_correction)
+            if resolved:
+                mql.metric = resolved
+                mql.metrics = []
+                logger.info(f"[_handle_correction_followup] 指标纠错: {metric_correction} → {resolved.name}")
+                return {"mql": mql, "source": "followup_correction"}
+
+        # 3. 纯否定（"不对"、"错了"）→ 追问让用户说明要什么
+        logger.info(f"[_handle_correction_followup] 纯否定纠错，触发追问")
+        return {
+            "mql": None,
+            "needs_clarification": True,
+            "clarification_message": "抱歉理解有误，请问您希望查询什么？可以更具体描述一下。",
+            "source": "followup_correction",
+        }
+
+    def _detect_time_correction(self, question: str) -> Optional[str]:
+        """从纠错文本中提取新的时间表达式"""
+        # 检查纠错+时间组合模式
+        for pattern, time_expr in _TIME_CORRECTION_PATTERNS:
+            if re.search(pattern, question):
+                return time_expr
+        # 检查文本中是否有已知时间词
+        for time_word in ["上月", "去年", "本月", "本周", "上周", "去年", "前年", "上上月"]:
+            if time_word in question:
+                return time_word
+        return None
+
+    def _is_new_question(self, question: str, inherited_mql: Optional["MQLSchema"] = None) -> bool:
         """判断是否为独立新问题（不应继承上轮指标）"""
         # 规则1：包含完整指标名 + 疑问词 → 新问题
         has_question_word = any(q in question for q in ["多少", "是多少", "怎么样", "如何", "为什么", "是什么"])
@@ -1004,6 +1143,17 @@ class IntentRouter:
             action = self._detect_followup_action(question)
             if action == FollowupAction.INHERIT:
                 return True
+
+        # 规则3：问题中解析出的指标与继承指标不同 → 新问题
+        # 例如继承指标是"毛利"，但问题中明确提到"销售额"
+        if inherited_mql and inherited_mql.metric:
+            metric_info = self._resolve_metric_name(question)
+            if metric_info:
+                resolved_name = metric_info.get("name", "")
+                inherited_name = inherited_mql.metric.name if inherited_mql.metric else ""
+                if resolved_name and inherited_name and resolved_name != inherited_name:
+                    logger.info(f"[_is_new_question] 指标不同: resolved={resolved_name}, inherited={inherited_name}")
+                    return True
 
         return False
 
