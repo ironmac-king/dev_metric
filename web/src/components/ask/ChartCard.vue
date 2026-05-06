@@ -386,7 +386,9 @@ function isNumericColumn(key, val) {
     const parsed = parseFloat(val)
     if (isNaN(parsed)) return false
     // 纯数值字符串（如 "123", "3430.94"）才是数值
-    return /^-?\d+(\.\d+)?$/.test(val)
+    // 也接受带百分号的对比列值（如 "-35.43%", "+12.5%"）
+    if (/^-?\d+(\.\d+)?%?$/.test(val)) return true
+    return false
   }
   return typeof val === 'number'
 }
@@ -400,6 +402,25 @@ const KNOWN_DIM_COLUMNS = new Set([
 ])
 
 // 多指标表格的列 header（中文名）
+// 对比查询列名后缀映射
+const COMP_SUFFIX_MAP = {
+  '_raw': '',
+  '_mom_val': '(上期)',
+  '_mom_change': '(环比)',
+  '_yoy_val': '(同比上期)',
+  '_yoy_change': '(同比)',
+}
+
+// 解析对比查询列名：销售额_mom_change → { base: '销售额', label: '(环比)' }
+function parseCompColumn(key) {
+  for (const [suffix, label] of Object.entries(COMP_SUFFIX_MAP)) {
+    if (key.endsWith(suffix)) {
+      return { base: key.slice(0, -suffix.length), label }
+    }
+  }
+  return null
+}
+
 // 保持与 tableKeys 完全一致的顺序（按 result_data 原始 key 顺序）
 const tableHeaders = computed(() => {
   if (!props.data || props.data.length === 0) return []
@@ -427,10 +448,22 @@ const tableHeaders = computed(() => {
       if (foundIdx >= 0) {
         return metricNames[foundIdx]
       }
+      // 对比查询列名：销售额_mom_change → 销售额(环比)
+      const comp = parseCompColumn(k)
+      if (comp) {
+        const baseName = metricNames.find(n => n.includes(comp.base) || comp.base.includes(n)) || comp.base
+        return `${baseName}${comp.label}`
+      }
       // fallback：用 FIELD_NAME_MAP 映射
       return FIELD_NAME_MAP[k] || k
     }
     // 非数值列（维度列）：中文映射
+    // 对比查询列名可能因值为 null/百分比字符串被判为非数值列
+    const comp = parseCompColumn(k)
+    if (comp) {
+      const baseName = metricNames.find(n => n.includes(comp.base) || comp.base.includes(n)) || comp.base
+      return `${baseName}${comp.label}`
+    }
     if (k === 'GROUP_2') return '二级品类'
     if (k === 'GROUP_1') return '一级品类'
     if (k === 'GROUP_3') return '三级品类'
@@ -487,6 +520,19 @@ function formatTableCell(key, val, colIdx) {
     const foundName = metricNames.find(name => name.includes(key))
     return foundName ? foundName.includes('率') : false
   })()
+
+  // 同比/环比变化列：值已经是百分比字符串（如 "+3836.557346109200%"），截断小数
+  if (key.endsWith('变化')) {
+    if (typeof val === 'string' && val.includes('%')) {
+      const numMatch = val.match(/([+-]?\d+\.?\d*)/)
+      if (numMatch) {
+        const num = parseFloat(numMatch[1])
+        const sign = num >= 0 ? '+' : ''
+        return `${sign}${num.toFixed(1)}%`
+      }
+    }
+    return val
+  }
 
   const rawNum = typeof val === 'number' ? val : parseFloat(String(val).replace(/,/g, ''))
   if (isNaN(rawNum)) return val
@@ -640,6 +686,21 @@ const chartOptions = computed(() => {
   const data = props.data
   const keys = Object.keys(data[0])
 
+  // 单值卡片模式：直接提取，避免被 xKey 过滤
+  if (chartType.value === 'card') {
+    const numericKey = keys.find(k => {
+      const val = data[0][k]
+      return typeof val === 'number' || (typeof val === 'string' && !isNaN(parseFloat(val)))
+    })
+    if (numericKey) {
+      return {
+        type: 'card',
+        value: data[0][numericKey],
+        label: props.metricName || numericKey
+      }
+    }
+  }
+
   // 排除非指标列：FDATE系列、MONTHS、ASIN、SKU等分组维度列
   const excludeKeys = ['FDATE', 'FDATE_END', 'FDATE_START', 'MONTHS', 'ASIN', 'SKU', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4']
 
@@ -724,17 +785,6 @@ const chartOptions = computed(() => {
       trendText: trend === '增长' ? `↑ ${changeRate}%` : trend === '下降' ? `↓ ${changeRate}%` : '持平',
       currentPeriod,
       comparePeriod
-    }
-  }
-
-  // 单值卡片模式优先检查
-  if (chartType.value === 'card' && numericKeys.length > 0) {
-    const numericKey = numericKeys[0]
-    const value = data[0][numericKey]
-    return {
-      type: 'card',
-      value: value,
-      label: props.metricName || numericKey
     }
   }
 
