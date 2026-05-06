@@ -4,7 +4,7 @@ function normalizeText(value) {
 
 function splitParagraphs(text) {
   return normalizeText(text)
-    .split(/\n+/)
+    .split(/\n{2,}/)
     .map(item => item.trim())
     .filter(Boolean)
 }

@@ -14,6 +14,22 @@ from ..schema import MQLSchema, SQLResult, AnomalyAnnotation
 
 logger = get_logger("ai.llm_v2.result_analyzer")
 
+# 列名→中文映射（与 router.py 保持一致）
+_DIM_COL_CHINESE = {
+    "GROUP_3": "三级品类", "GROUP_2": "二级品类", "GROUP_1": "一级品类", "GROUP_4": "四级品类",
+    "FSITE": "店铺", "FCOUNTRY": "国家", "FREGION": "区域", "FCHANNEL": "渠道",
+    "PLATFORM": "平台", "FDATE": "日期", "MONTHS": "月份", "YEARS": "年份",
+    "WEEKS": "周", "QUARTERS": "季度", "SKU": "SKU", "ASIN": "ASIN",
+    "FBRANDS": "品牌", "FPRODUCTLINE": "产品线", "FADTYPE": "广告类型",
+    "DT": "日期", "DATE": "日期", "STAT_DATE": "统计日期",
+    "FSITECODE": "站点编码",
+}
+_METRIC_SUFFIX_CHINESE = {
+    "_raw": "当前值", "current_val": "当前值", "mom_val": "环比", "yoy_val": "同比",
+    "_yoy": "同比", "_mom": "环比", "_wow": "周环比", "_wow_val": "周环比",
+    "_rank": "排名", "_running_sum": "累计值", "_ratio": "占比", "_pct": "占比", "_ma7": "7日均值",
+}
+
 
 class ResultAnalyzer:
     """
@@ -61,17 +77,34 @@ class ResultAnalyzer:
         if not metric_code:
             return []
 
-        semantic_svc = self._get_semantic_service()
-        snapshot = semantic_svc.get_active_snapshot() if semantic_svc else None
-        if not snapshot:
-            logger.warning(f"[ResultAnalyzer] _generate_supplementary_info: no active snapshot, metric_code={metric_code}")
-            return []
+        # ========== 优先使用语义层 enrich() 获取 ==========
+        metric_cap = None
+        try:
+            from ai.services.semantic_layer import get_semantic_layer_service, EnrichStage
+            from ai.services.semantic_layer.api import ParseResult
+
+            semantic_layer = get_semantic_layer_service()
+            parse_result = ParseResult(intent="", confidence=0.0, metric_code=metric_code)
+            enrich_result = semantic_layer.enrich(parse_result, stage=EnrichStage.RESULT_ANALYSIS)
+            if enrich_result.metric_capability:
+                metric_cap = enrich_result.metric_capability
+                logger.info(f"[ResultAnalyzer] 从语义层获取 metric_capability: {metric_code}")
+        except Exception as e:
+            logger.warning(f"[ResultAnalyzer] 语义层获取 metric_capability 失败: {e}")
+        # ====================================================
+
+        # 回退到直接调用语义快照
+        if not metric_cap:
+            semantic_svc = self._get_semantic_service()
+            snapshot = semantic_svc.get_active_snapshot() if semantic_svc else None
+            if not snapshot:
+                logger.warning(f"[ResultAnalyzer] _generate_supplementary_info: no active snapshot, metric_code={metric_code}")
+                return []
+            capabilities = snapshot.get("capabilities", {}) or {}
+            metric_cap = capabilities.get(f"metric:{metric_code}", {}) or {}
 
         # 获取当前指标值（从 sql_result）
         row = sql_result.data[0] if sql_result.data else {}
-
-        capabilities = snapshot.get("capabilities", {}) or {}
-        metric_cap = capabilities.get(f"metric:{metric_code}", {}) or {}
         logger.info(f"[ResultAnalyzer] _generate_supplementary_info: metric_code={metric_code}, supports_yoy={metric_cap.get('supports_yoy')}, supports_mom={metric_cap.get('supports_mom')}, row_keys={list(row.keys()) if row else []}")
 
         info: List[Dict[str, Any]] = []
@@ -246,6 +279,14 @@ class ResultAnalyzer:
                     result["answer"] += f" {options_text}"
             return result
 
+        # 1.5 处理全空值数据（有行但指标值全为 None/0）
+        all_empty = self._all_values_empty(sql_result.data)
+        logger.info(f"[ResultAnalyzer] _all_values_empty={all_empty}, data_sample={sql_result.data[:2] if sql_result.data else 'empty'}")
+        if all_empty:
+            logger.info("[ResultAnalyzer] 数据全为空值，按无数据处理")
+            result = await self._handle_empty_result(mql, question)
+            return result
+
         # 2. 根据意图生成回答
         intent = mql.intent.value if mql.intent else "query_value"
 
@@ -263,14 +304,17 @@ class ResultAnalyzer:
         else:
             result = await self._handle_default(mql, sql_result, question)
 
-        # 3. 检测异常并自动标注
-        metric_name = mql.metric.name if mql.metric else "指标"
-        dim_types = [d.type for d in mql.dimensions] if mql.dimensions else []
-        anomalies = self.detect_anomalies(sql_result.data, metric_name, dim_types)
-        if anomalies:
-            anomaly_messages = [a.message for a in anomalies]
-            result["answer"] += f"\n\n⚠️ 异常提醒：{'；'.join(anomaly_messages)}"
-            result["anomalies"] = [a.to_dict() for a in anomalies]
+        # 3. 检测异常（仅记录到 result，不追加到 answer 文本）
+        # metric_name = mql.metric.name if mql.metric else "指标"
+        # dim_types = [d.type for d in mql.dimensions] if mql.dimensions else []
+        # anomalies = self.detect_anomalies(sql_result.data, metric_name, dim_types)
+        # if anomalies:
+        #     anomaly_messages = [a.message for a in anomalies]
+        #     result["answer"] += f"\n\n⚠️ 异常提醒：{'；'.join(anomaly_messages)}"
+        #     result["anomalies"] = [a.to_dict() for a in anomalies]
+
+        # 3.5 构建解释信息
+        result["explanation"] = self._build_explanation(mql)
 
         # 4. 附加泛指维度追问引导
         if is_generic_result and clarification_message:
@@ -282,45 +326,158 @@ class ResultAnalyzer:
                 result["clarification_options"] = clarification_options
                 result["clarification_message"] = clarification_message
 
-        # 5. 添加触发分析结果
+        # 5. 添加触发分析结果 — 固定5段模板
+        logger.info(f"[ResultAnalyzer] analysis is {'truthy' if analysis else 'falsy'}, summary={analysis.get('summary') if analysis else None}")
         if analysis:
             result["analysis"] = analysis
             result["mode"] = "triggered"
+
+            # 构建固定5段模板回答
+            metric_name = mql.metric.name if mql.metric else "指标"
+            kpi = analysis.get("kpi", {})
+            breakdown = analysis.get("breakdown", [])
+            action_items = analysis.get("action_items", [])
+            summary = analysis.get("summary", "")
+
+            sections = []
+
+            # 一、整体结论
+            if summary:
+                sections.append(f"**一、整体结论**\n{summary}")
+
+            # 二、核心指标
+            kpi_parts = []
+            current = kpi.get("current")
+            if current is not None:
+                kpi_parts.append(f"{metric_name}：{self._format_value(current)}")
+            mom = kpi.get("mom")
+            if mom is not None:
+                mom_sign = "增长" if mom >= 0 else "下降"
+                kpi_parts.append(f"环比{mom_sign} {abs(mom):.1f}%")
+            yoy = kpi.get("yoy")
+            if yoy is not None:
+                yoy_sign = "增长" if yoy >= 0 else "下降"
+                kpi_parts.append(f"同比{yoy_sign} {abs(yoy):.1f}%")
+            if kpi_parts:
+                sections.append("**二、核心指标**\n" + "，".join(kpi_parts))
+
+            # 三、数据图表（占位，前端渲染）
+            sections.append("**三、数据图表**\n（前端展示：维度对比图、贡献占比图）")
+
+            # 四、维度明细 & 影响归因
+            if breakdown:
+                bd_lines = []
+                for item in breakdown:
+                    dim = item.get("dimension", "")
+                    change = item.get("change", "")
+                    impact = item.get("impact", "")
+                    priority = item.get("priority", "")
+                    line_parts = [f"{dim}："]
+                    if change:
+                        line_parts.append(f"环比 {change}，")
+                    if impact:
+                        line_parts.append(f"{impact}")
+                    if priority:
+                        line_parts.append(f"（{priority}）")
+                    bd_lines.append("".join(line_parts))
+                sections.append("**四、维度明细 & 影响归因**\n" + "\n".join(bd_lines))
+
+            # 五、运营建议
+            if action_items:
+                adv_lines = []
+                for item in action_items:
+                    text = item.get("text", "")
+                    item_type = item.get("type", "normal")
+                    if item_type == "urgent":
+                        priority = "P0"
+                    elif item_type == "warning":
+                        priority = "P1"
+                    else:
+                        priority = "P2"
+                    adv_lines.append(f"{priority} {text}")
+                sections.append("**五、运营建议**\n" + "\n".join(adv_lines))
+
+            if sections:
+                result["answer"] = "\n\n".join(sections)
         else:
             result["mode"] = "direct"
 
         # 6. 优先从语义快照增强 suggestions（如果当前 suggestions 为空或过少）
-        semantic_svc = self._get_semantic_service()
-        if semantic_svc:
-            scene_type_map = {
-                "query_value": "query_value",
-                "query_trend": "query_trend",
-                "query_comparison": "query_comparison",
-                "query_ranking": "query_ranking",
-                "query_ratio": "query_ratio",
-            }
-            scene_type = scene_type_map.get(intent, "query_value")
-            snapshot_suggestions = semantic_svc.recommend_next_questions(mql, scene_type)
-            if snapshot_suggestions:
+        # ========== 优先使用语义层 recommend() 获取 ==========
+        try:
+            from ai.services.semantic_layer import get_semantic_layer_service
+            from ai.services.semantic_layer.api import RecommendContext, ParseResult
+
+            semantic_layer = get_semantic_layer_service()
+            parse_result = ParseResult(intent=intent, confidence=0.0,
+                                       metric_name=mql.metric.name if mql.metric else None,
+                                       metric_code=mql.metric.code if mql.metric else None)
+            recommend_context = RecommendContext(stage="result_analysis", parse_result=parse_result)
+            recommend_result = semantic_layer.recommend(recommend_context)
+            if recommend_result.next_questions:
                 current = result.get("suggestions") or []
-                # 快照建议补充到现有建议之后（去重）
                 seen = set(current)
-                for s in snapshot_suggestions:
+                for s in recommend_result.next_questions:
                     if s not in seen:
                         seen.add(s)
                         current.append(s)
-                result["suggestions"] = current[:6]  # 最多6条
-                logger.info(f"[ResultAnalyzer] 从语义快照增强 suggestions: {snapshot_suggestions}")
+                result["suggestions"] = current[:6]
+                logger.info(f"[ResultAnalyzer] 从语义层增强 suggestions: {recommend_result.next_questions}")
+        except Exception as e:
+            logger.warning(f"[ResultAnalyzer] 语义层 recommend 失败: {e}")
+            # 回退到直接调用语义快照
+            semantic_svc = self._get_semantic_service()
+            if semantic_svc:
+                scene_type_map = {
+                    "query_value": "query_value",
+                    "query_trend": "query_trend",
+                    "query_comparison": "query_comparison",
+                    "query_ranking": "query_ranking",
+                    "query_ratio": "query_ratio",
+                }
+                scene_type = scene_type_map.get(intent, "query_value")
+                snapshot_suggestions = semantic_svc.recommend_next_questions(mql, scene_type)
+                if snapshot_suggestions:
+                    current = result.get("suggestions") or []
+                    seen = set(current)
+                    for s in snapshot_suggestions:
+                        if s not in seen:
+                            seen.add(s)
+                            current.append(s)
+                    result["suggestions"] = current[:6]
+                    logger.info(f"[ResultAnalyzer] 从语义快照增强 suggestions: {snapshot_suggestions}")
 
         return result
 
     async def _handle_empty_result(self, mql: MQLSchema, question: str) -> Dict[str, Any]:
         """处理空结果"""
-        # 调用 LLM 生成智能追问
+        # 从语义快照获取元数据，帮助 LLM 给出具体建议
+        snapshot_hints = ""
+        try:
+            from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
+            snap = get_semantic_snapshot_service()
+            snapshot = snap.get_active_snapshot()
+            if snapshot:
+                payload = snapshot.get("payload", snapshot)
+                metrics = payload.get("metrics", {})
+                metric_code = mql.metric.code if mql.metric else ""
+                metric_data = metrics.get(metric_code, {})
+                if metric_data:
+                    cap = metric_data.get("metric_capability", {})
+                    earliest = cap.get("earliest_data_date", "")
+                    time_grains = cap.get("supported_time_grains", [])
+                    if earliest:
+                        snapshot_hints += f"\n数据最早日期：{earliest}"
+                    if time_grains:
+                        snapshot_hints += f"\n支持的时间粒度：{', '.join(time_grains)}"
+        except Exception:
+            pass
+
         prompt = f"""用户问题：{question}
 查询结果：暂无数据
+{snapshot_hints}
 
-请分析可能的原因，并给出 2-3 个建议问题。
+请分析可能的原因，并给出 2-3 个具体的建议问题（包含明确的时间范围或维度）。
 
 请以 JSON 格式返回：
 {{"analysis": "原因分析", "suggestions": ["建议问题1", "建议问题2"]}}
@@ -409,7 +566,6 @@ class ResultAnalyzer:
         # 获取指标列名（用于判断哪些列需要格式化）
         metric_columns = set()
         if mql.metric and mql.metric.name:
-            # 尝试从 starrocks_sql 或 field 中推断指标列名
             pass
         if mql.metrics:
             for m in mql.metrics:
@@ -418,15 +574,18 @@ class ResultAnalyzer:
         if mql.metric and mql.metric.name:
             metric_columns.add(mql.metric.name)
 
+        col_map = self._build_col_map(mql)
+
         lines = []
         for row in data[:5]:
             parts = []
             for k, v in row.items():
-                # 只有指标列才格式化（数值格式化），维度列（如SKU、日期）保持原样
+                display_k = col_map.get(k, k)
+                # 用原始列名判断是否需要格式化
                 if k in metric_columns or self._is_metric_column(k):
-                    parts.append(f"{k}: {self._format_value(v)}")
+                    parts.append(f"{display_k}: {self._format_value(v)}")
                 else:
-                    parts.append(f"{k}: {v}")
+                    parts.append(f"{display_k}: {v}")
             lines.append(" | ".join(parts))
 
         answer = "查询结果：\n" + "\n".join(lines)
@@ -748,10 +907,47 @@ class ResultAnalyzer:
                 "suggestions": [],
             }
 
+        # 多行对比数据（按维度分组的同比/环比）：生成有意义的回答
+        col_map = self._build_col_map(mql)
+        is_yoy = mql.has_yoy
+        is_mom = mql.has_mom
+        dim_type = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else "维度"
+
+        # 尝试从数据中提取汇总信息
+        metric_alias = metric_name
+        raw_key = f"{metric_alias}_raw"
+        yoy_val_key = f"{metric_alias}_yoy_val"
+        mom_val_key = f"{metric_alias}_mom_val"
+        yoy_change_key = f"{metric_alias}_yoy_change"
+        mom_change_key = f"{metric_alias}_mom_change"
+
+        total_current = 0
+        total_compare = 0
+        valid_count = 0
+        for row in data:
+            try:
+                val = float(str(row.get(raw_key, 0)).replace(',', ''))
+                total_current += val
+                comp_key = yoy_val_key if is_yoy else mom_val_key
+                comp_val = float(str(row.get(comp_key, 0)).replace(',', ''))
+                total_compare += comp_val
+                if comp_val > 0:
+                    valid_count += 1
+            except (ValueError, TypeError):
+                pass
+
+        change_label = "同比" if is_yoy else "环比"
+        if total_current > 0 and valid_count > 0:
+            total_change_pct = ((total_current - total_compare) / total_compare * 100) if total_compare != 0 else 0
+            trend = "上升" if total_change_pct > 0 else "下降"
+            answer = f"{metric_name}按{dim_type}{change_label}{trend}，整体{change_label}{abs(total_change_pct):.1f}%。共{len(data)}个{dim_type}，{valid_count}个有对比数据。"
+        else:
+            answer = f"{metric_name}按{dim_type}{change_label}对比已生成，详见数据。"
+
         current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
         _, alt_label = self._get_alternative_dimensions(current_dim)
         return {
-            "answer": f"对比结果已生成，详见数据",
+            "answer": answer,
             "suggestions": [
                 f"查看{time_context}各{alt_label}{metric_name}详细数据",
                 f"查看{time_context}各{alt_label}{metric_name}趋势变化",
@@ -767,15 +963,58 @@ class ResultAnalyzer:
         """处理排名查询"""
         data = sql_result.data
         time_context = self._get_time_context(mql)
-
-        lines = ["排名结果："]
-        for i, row in enumerate(data[:10], 1):
-            parts = [f"{k}: {self._format_value(v)}" for k, v in row.items()]
-            lines.append(f"{i}. " + " | ".join(parts))
+        col_map = self._build_col_map(mql)
 
         metric_name = mql.metric.name if mql.metric else "指标值"
+        time_context = self._get_time_context(mql)
 
-        # 生成维度错开的建议
+        # 构建 LLM 摘要用的精简数据（中文列名 + 格式化数值）
+        summary_rows = []
+        for i, row in enumerate(data[:10], 1):
+            parts = [f"{col_map.get(k, k)}: {self._format_value(v)}" for k, v in row.items()]
+            summary_rows.append(f"{i}. " + " | ".join(parts))
+        data_text = "\n".join(summary_rows)
+
+        dim_label = ""
+        if mql.dimensions:
+            for d in mql.dimensions:
+                if d.column:
+                    dim_label = col_map.get(d.column, d.column)
+                    break
+
+        prompt = f"""用户问题：{question}
+指标：{metric_name}
+维度：{dim_label}
+排名数据：
+{data_text}
+
+请用一句话总结排名数据的核心特征（如榜首是谁及数值、前几名差距、整体分布等），不要重复罗列数据。
+例如："日本亚马逊以2.68万推广订单位居第一，前三名差距不大，前五站点贡献超70%。"
+只输出总结，不要有其他内容。"""
+
+        try:
+            llm_summary = self._llm_engine.call(prompt, temperature=0.3, max_tokens=200)
+            if llm_summary and len(llm_summary.strip()) > 10:
+                logger.info(f"[ResultAnalyzer] LLM 排名总结: {llm_summary[:80]}")
+                # 生成维度错开的建议
+                current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+                _, alt_label = self._get_alternative_dimensions(current_dim)
+                return {
+                    "answer": llm_summary.strip(),
+                    "suggestions": [
+                        f"查看更多{time_context}各{alt_label}{metric_name}排名",
+                        f"查看{time_context}各{alt_label}{metric_name}占比分布",
+                    ],
+                }
+        except Exception as e:
+            logger.warning(f"[ResultAnalyzer] LLM 排名总结失败，回退纯文本: {e}")
+
+        # LLM 失败回退：简短摘要
+        lines = ["排名结果："]
+        for i, row in enumerate(data[:10], 1):
+            parts = [f"{col_map.get(k, k)}: {self._format_value(v)}" for k, v in row.items()]
+            lines.append(f"{i}. " + " | ".join(parts))
+
         current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
         _, alt_label = self._get_alternative_dimensions(current_dim)
 
@@ -841,6 +1080,16 @@ class ResultAnalyzer:
             ],
         }
 
+    def _build_col_map(self, mql) -> Dict[str, str]:
+        """构建列名映射（原始列名 → 中文展示名）"""
+        col_map = dict(_DIM_COL_CHINESE)
+        if mql and mql.metric:
+            mname = getattr(mql.metric, 'name', '') or ''
+            if mname:
+                for suffix, label in _METRIC_SUFFIX_CHINESE.items():
+                    col_map[f"{mname}{suffix}"] = f"{mname}{label}"
+        return col_map
+
     async def _handle_default(
         self,
         mql: MQLSchema,
@@ -849,16 +1098,79 @@ class ResultAnalyzer:
     ) -> Dict[str, Any]:
         """处理默认查询"""
         data = sql_result.data
+        col_map = self._build_col_map(mql)
 
+        # 多行维度数据：用 LLM 生成一句话结论
+        if len(data) > 1:
+            metric_name = mql.metric.name if mql.metric else "指标值"
+            dim_label = ""
+            if mql.dimensions:
+                for d in mql.dimensions:
+                    if d.column:
+                        dim_label = col_map.get(d.column, d.column)
+                        break
+
+            # 构建精简数据摘要供 LLM 分析（中文列名 + 格式化数值）
+            summary_rows = []
+            for row in data[:10]:
+                parts = []
+                for k, v in row.items():
+                    display_k = col_map.get(k, k)
+                    parts.append(f"{display_k}: {self._format_value(v)}")
+                summary_rows.append(" | ".join(parts))
+            data_text = "\n".join(summary_rows)
+
+            prompt = f"""用户问题：{question}
+指标：{metric_name}
+维度：{dim_label}
+数据：
+{data_text}
+
+请用一句话总结数据特征（如最大值、整体分布、显著差异等），不要重复罗列数据。
+例如："美国亚马逊推广订单最高达669万，占总量近30%，前5站点贡献超80%。"
+只输出总结，不要有其他内容。"""
+
+            try:
+                llm_summary = self._llm_engine.call(prompt, temperature=0.3, max_tokens=200)
+                if llm_summary and len(llm_summary.strip()) > 10:
+                    logger.info(f"[ResultAnalyzer] LLM 维度总结: {llm_summary[:80]}")
+                    return {
+                        "answer": llm_summary.strip(),
+                        "suggestions": [],
+                    }
+            except Exception as e:
+                logger.warning(f"[ResultAnalyzer] LLM 维度总结失败，回退表格: {e}")
+
+        # 单行或 LLM 失败：回退表格
         lines = ["查询结果："]
         for row in data[:5]:
-            parts = [f"{k}: {self._format_value(v)}" for k, v in row.items()]
+            parts = [f"{col_map.get(k, k)}: {self._format_value(v)}" for k, v in row.items()]
             lines.append(" | ".join(parts))
 
         return {
             "answer": "\n".join(lines),
             "suggestions": [],
         }
+
+    def _all_values_empty(self, data: list) -> bool:
+        """检测所有数值列是否全为 None/0/空字符串（维度列有值但指标值全空）"""
+        if not data:
+            return False
+
+        found_nonzero = False
+        for row in data:
+            for v in row.values():
+                if v is None:
+                    continue
+                try:
+                    if float(str(v).replace(",", "")) != 0:
+                        found_nonzero = True
+                        break
+                except (ValueError, TypeError):
+                    continue
+            if found_nonzero:
+                break
+        return not found_nonzero
 
     def _format_value(self, value: Any) -> str:
         """格式化数值"""
@@ -909,6 +1221,34 @@ class ResultAnalyzer:
 
         return False
 
+    def _build_explanation(self, mql: MQLSchema) -> Dict[str, Any]:
+        """构建解释信息：指标含义 + 维度说明 + 数据来源"""
+        parts = {}
+
+        # 指标含义
+        if mql.metric:
+            meaning = mql.metric.business_meaning or mql.metric.business_summary
+            if meaning:
+                parts["metric_meaning"] = f"{mql.metric.name}：{meaning}"
+
+        # 数据来源
+        if mql.metric and mql.metric.table:
+            parts["data_source"] = f"数据来源：{mql.metric.table}"
+
+        # 时间范围
+        if mql.time and mql.time.original:
+            parts["time_range"] = f"查询时间：{mql.time.original}"
+
+        # 维度说明
+        if mql.dimensions:
+            dim_labels = []
+            for d in mql.dimensions:
+                label = _DIM_COL_CHINESE.get(d.column, d.type) if d.column else d.type
+                dim_labels.append(label)
+            parts["dimensions"] = f"按 {'、'.join(dim_labels)} 维度查看"
+
+        return parts
+
     def detect_anomalies(
         self,
         data: List[Dict[str, Any]],
@@ -928,14 +1268,25 @@ class ResultAnalyzer:
         anomalies = []
         dimensions = dimensions or []
 
+        # 从 VolatilityTrigger.DEFAULT_RULES 获取动态阈值
+        try:
+            from .trigger_analyzer import VolatilityTrigger
+            rules = VolatilityTrigger.DEFAULT_RULES.get(metric_name, {})
+            mom_threshold = rules.get("mom", -15)  # 默认 -15%
+            yoy_threshold = rules.get("yoy", -20)  # 默认 -20%
+        except Exception:
+            mom_threshold = -15
+            yoy_threshold = -20
+
         for row in data:
-            # 1. 环比异常检测（下降 > 15%）
+            # 1. 环比异常检测
             mom_change = row.get("mom_change") or row.get("环比变化") or row.get("环比")
             if mom_change is not None:
                 try:
                     mom_val = float(str(mom_change).replace("%", "").replace(",", ""))
-                    if mom_val < -0.15:  # 下降超过15%
-                        # 找出导致异常的维度值
+                    # 阈值为百分比形式，mom_val 需要转换为百分比
+                    mom_pct = mom_val * 100 if mom_val < 1 else mom_val
+                    if mom_threshold < 0 and mom_pct < mom_threshold:  # 下降超过阈值
                         dim_value = ""
                         for dim in dimensions:
                             if dim in row:
@@ -945,8 +1296,8 @@ class ResultAnalyzer:
                             type="significant_mom_drop",
                             metric=metric_name,
                             value=mom_val,
-                            threshold=-0.15,
-                            message=f"{metric_name}环比下降{abs(mom_val * 100):.1f}%",
+                            threshold=mom_threshold / 100,  # 转换为小数形式
+                            message=f"{metric_name}环比下降{abs(mom_pct):.1f}%",
                             dimension=dimensions[0] if dimensions else "",
                             dimension_value=dim_value,
                             suggestion=f"关注{(dim_value + '的' if dim_value else '')}{metric_name}变化",
@@ -954,12 +1305,13 @@ class ResultAnalyzer:
                 except (ValueError, TypeError):
                     pass
 
-            # 2. 同比异常检测（下降 > 20%）
+            # 2. 同比异常检测
             yoy_change = row.get("yoy_change") or row.get("同比变化") or row.get("同比")
-            if yoy_change is not None:
+            if yoy_change is not None and yoy_threshold is not None:
                 try:
                     yoy_val = float(str(yoy_change).replace("%", "").replace(",", ""))
-                    if yoy_val < -0.20:  # 下降超过20%
+                    yoy_pct = yoy_val * 100 if yoy_val < 1 else yoy_val
+                    if yoy_threshold < 0 and yoy_pct < yoy_threshold:
                         dim_value = ""
                         for dim in dimensions:
                             if dim in row:
@@ -969,8 +1321,8 @@ class ResultAnalyzer:
                             type="significant_yoy_drop",
                             metric=metric_name,
                             value=yoy_val,
-                            threshold=-0.20,
-                            message=f"{metric_name}同比下降{abs(yoy_val * 100):.1f}%",
+                            threshold=yoy_threshold / 100,
+                            message=f"{metric_name}同比下降{abs(yoy_pct):.1f}%",
                             dimension=dimensions[0] if dimensions else "",
                             dimension_value=dim_value,
                             suggestion=f"关注{(dim_value + '的' if dim_value else '')}{metric_name}同比变化",
@@ -1006,7 +1358,7 @@ class ResultAnalyzer:
                             metric=metric_name,
                             value=mom_val,
                             threshold=0.5,
-                            message=f"{metric_name}环比增长{abs(mom_val * 100):.1f}%，注意确认异常原因",
+                            message=f"{metric_name}环比增长{abs(mom_val):.1f}%，注意确认异常原因",
                             dimension=dimensions[0] if dimensions else "",
                             suggestion="确认是否活动促销或数据口径变化",
                         ))
