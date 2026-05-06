@@ -18,10 +18,26 @@
         <!-- 主回答 -->
         <div class="answer-text" v-html="renderHtml(presentation.lead)"></div>
 
-        <!-- 补充段落 -->
-        <div v-if="presentation.paragraphs.length" class="answer-details">
-          <p v-for="(p, i) in presentation.paragraphs" :key="i" class="detail-line" v-html="renderHtml(p)"></p>
-        </div>
+        <!-- 补充段落（识别模板占位符，插入对应组件） -->
+        <template v-if="presentation.paragraphs.length">
+          <template v-for="(p, i) in presentation.paragraphs" :key="i">
+            <!-- 第三段：数据图表占位 → 插入 ChartCard -->
+            <ChartCard
+              v-if="isChartPlaceholder(p) && msg.resultData && msg.resultData.length > 0"
+              :data="msg.resultData"
+              :columns="msg.columns || []"
+              :height="280"
+              :interpretation="msg.interpretation"
+              :metric-name="msg.metricName || ''"
+              :metric-names="msg.metricNames || []"
+              :time-start="msg.mql?.time?.start"
+              :time-end="msg.mql?.time?.end"
+              class="data-section"
+            />
+            <!-- 其他段落正常渲染 -->
+            <p v-else-if="!isChartPlaceholder(p)" class="detail-line" v-html="renderHtml(p)"></p>
+          </template>
+        </template>
 
         <!-- 补充信息标签 -->
         <div v-if="supplementTags.length" class="tag-strip">
@@ -51,9 +67,9 @@
           </div>
         </div>
 
-        <!-- 数据表格 -->
+        <!-- 非模板模式下独立渲染图表（无触发分析时） -->
         <ChartCard
-          v-if="msg.resultData && msg.resultData.length > 0"
+          v-if="!isTemplateMode && msg.resultData && msg.resultData.length > 0"
           :data="msg.resultData"
           :columns="msg.columns || []"
           :height="280"
@@ -64,34 +80,6 @@
           :time-end="msg.mql?.time?.end"
           class="data-section"
         />
-
-        <!-- 归因分析 -->
-        <div v-if="msg.analysis?.breakdown?.length" class="breakdown-section">
-          <div class="breakdown-title">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L13 7L7 13L1 7Z" stroke="currentColor" stroke-width="1.2"/></svg>
-            归因分析
-          </div>
-          <div class="breakdown-list">
-            <div v-for="(item, i) in msg.analysis.breakdown" :key="i" class="breakdown-row" :class="item.role">
-              <span class="bd-dim">{{ item.dimension }}</span>
-              <span class="bd-change" :class="isNegative(item.change) ? 'neg' : 'pos'">{{ item.change }}</span>
-              <span class="bd-impact">{{ item.impact }}</span>
-              <span v-if="item.priority" class="bd-priority" :class="'p-' + item.priority.toLowerCase()">{{ item.priority }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 行动建议 -->
-        <div v-if="msg.analysis?.action_items?.length" class="action-items-section">
-          <div class="action-items-title">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1V9M7 11V13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-            行动建议
-          </div>
-          <div v-for="(item, i) in msg.analysis.action_items" :key="i" class="action-item" :class="item.type">
-            <span class="ai-dot"></span>
-            <span class="ai-text">{{ item.text }}</span>
-          </div>
-        </div>
 
         <!-- 下钻选项（暂隐藏） -->
         <!-- <div v-if="drilldownOptions.length" class="drilldown-section">
@@ -177,6 +165,16 @@ marked.setOptions({ breaks: true, gfm: true })
 
 const showReasoning = ref(false)
 const presentation = computed(() => buildAssistantPresentation(props.msg))
+
+const CHART_PLACEHOLDER_RE = /数据图表|前端展示|维度对比图|贡献占比图/
+
+const isTemplateMode = computed(() => {
+  return presentation.value.paragraphs.some(p => CHART_PLACEHOLDER_RE.test(p))
+})
+
+function isChartPlaceholder(text) {
+  return CHART_PLACEHOLDER_RE.test(text)
+}
 
 const timeLabel = computed(() => {
   const v = props.msg.time || props.msg.created_at
