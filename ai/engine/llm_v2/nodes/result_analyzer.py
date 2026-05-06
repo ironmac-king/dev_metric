@@ -386,16 +386,16 @@ class ResultAnalyzer:
         if has_multi_dim:
             sections.append("**三、数据图表**\n（前端展示）")
 
-        # 四、维度明细（有多维度才出）
+        # 四、维度明细（有多维度才出，只展示维度名+数值，不含归因）
         if has_multi_dim:
             if analysis and analysis.get("breakdown"):
-                sections.append("**四、维度明细**\n" + self._build_breakdown_text(analysis["breakdown"]))
+                sections.append("**四、维度明细**\n" + self._build_dim_value_text(analysis["breakdown"]))
             elif data:
                 sections.append("**四、维度明细**\n" + self._build_dim_detail_text(mql, data))
 
-        # 五、归因分析（有涨跌波动才出）
+        # 五、归因分析（有涨跌波动才出，展示影响+优先级）
         if has_fluctuation:
-            sections.append("**五、归因分析**\n" + self._build_breakdown_text(analysis["breakdown"]))
+            sections.append("**五、归因分析**\n" + self._build_attribution_text(analysis["breakdown"]))
 
         # 六、建议结论（有分析就给）
         if has_actionable:
@@ -1174,19 +1174,37 @@ class ResultAnalyzer:
                 break
         return not found_nonzero
 
-    def _build_breakdown_text(self, breakdown: list) -> str:
-        """格式化归因明细为纯文本"""
+    def _build_dim_value_text(self, breakdown: list) -> str:
+        """维度明细：只展示维度名+环比变化，不含归因影响"""
         lines = []
         for item in breakdown:
             dim = item.get("dimension", "")
             change = item.get("change", "")
+            raw_value = item.get("raw_value", "")
+            parts = [f"{dim}："]
+            if raw_value is not None and raw_value != "":
+                parts.append(f"{self._format_value(raw_value)}，")
+            if change:
+                parts.append(f"环比 {change}")
+            lines.append("".join(parts))
+        return "\n".join(lines)
+
+    def _build_attribution_text(self, breakdown: list) -> str:
+        """归因分析：展示影响程度+优先级"""
+        lines = []
+        for item in breakdown:
+            dim = item.get("dimension", "")
             impact = item.get("impact", "")
             priority = item.get("priority", "")
+            role = item.get("role", "")
+            role_label = "拖累" if "drag" in role else ("贡献" if "boost" in role or "positive" in role else "")
             parts = [f"{dim}："]
-            if change:
-                parts.append(f"环比 {change}，")
             if impact:
                 parts.append(f"{impact}")
+            elif role_label:
+                contribution = item.get("contribution_rate", "")
+                if contribution:
+                    parts.append(f"{role_label}整体 {contribution}")
             if priority:
                 parts.append(f"（{priority}）")
             lines.append("".join(parts))
