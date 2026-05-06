@@ -990,19 +990,19 @@ class IntentRouter:
         mql.metrics = []
         logger.info(f"[_handle_replace_metric_followup] 换指标: {candidate} → {mql.metric.name} ({mql.metric.code})")
 
-        # 追问中可能同时切换维度，检测并更新
-        dim_keywords = [
-            ("一级品类", "GROUP_1"), ("二级品类", "GROUP_2"), ("三级品类", "GROUP_3"), ("四级品类", "GROUP_4"),
-            ("一级类目", "GROUP_1"), ("二级类目", "GROUP_2"), ("三级类目", "GROUP_3"),
-            ("站点", "FSITE"), ("品牌", "FBRANDS"), ("平台", "PLATFORM"),
-            ("渠道", "FCHANNEL"), ("国家", "FCOUNTRY"), ("广告类型", "FADTYPE"),
-        ]
-        for dim_name, dim_col in dim_keywords:
-            if dim_name in question:
-                from ..schema import MQLDimension
-                mql.dimensions = [MQLDimension(type=dim_name, column=dim_col)]
-                logger.info(f"[_handle_replace_metric_followup] 追问检测到维度变更: {dim_name} -> {dim_col}")
-                break
+        # 追问中可能同时切换维度，从维度配置表动态获取维度关键词
+        from ai.services.dimension_service import DimensionService
+        dim_service = DimensionService()
+        dim_types = dim_service.get_all_types(use_cache=True)  # [{column_name, dimension_type}, ...]
+        if dim_types:
+            for dim_info in dim_types:
+                dim_name = dim_info.get("dimension_type", "")
+                dim_col = dim_info.get("column_name", "")
+                if dim_name and dim_col and dim_name in question:
+                    from ..schema import MQLDimension
+                    mql.dimensions = [MQLDimension(type=dim_name, column=dim_col)]
+                    logger.info(f"[_handle_replace_metric_followup] 追问检测到维度变更: {dim_name} -> {dim_col}")
+                    break
 
         return {"mql": mql, "needs_clarification": False, "source": "followup_replace_metric"}
 
