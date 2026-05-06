@@ -326,27 +326,44 @@ class ResultAnalyzer:
                 result["clarification_options"] = clarification_options
                 result["clarification_message"] = clarification_message
 
-        # 5. 添加触发分析结果 — 固定5段模板
-        logger.info(f"[ResultAnalyzer] analysis is {'truthy' if analysis else 'falsy'}, summary={analysis.get('summary') if analysis else None}")
+        # 5. 固定骨架模板（所有查询统一）
+        logger.info(f"[ResultAnalyzer] analysis is {'truthy' if analysis else 'falsy'}")
+
         if analysis:
             result["analysis"] = analysis
             result["mode"] = "triggered"
+        else:
+            result["mode"] = "direct"
 
-            # 构建固定5段模板回答
-            metric_name = mql.metric.name if mql.metric else "指标"
-            kpi = analysis.get("kpi", {})
-            breakdown = analysis.get("breakdown", [])
-            action_items = analysis.get("action_items", [])
-            summary = analysis.get("summary", "")
+        metric_name = mql.metric.name if mql.metric else "指标"
 
-            sections = []
+        # 三个开关
+        data = sql_result.data if sql_result else []
+        has_multi_dim = len(data) > 1
+        if not has_multi_dim and len(data) == 1 and data[0]:
+            # 单行但有维度列（如 GROUP_1, FSITE 等）也算多维度
+            has_multi_dim = any(
+                k for k in data[0].keys()
+                if k in _DIM_COL_CHINESE or k.startswith("GROUP_")
+            )
+        has_fluctuation = bool(analysis and analysis.get("breakdown"))
+        has_actionable = bool(analysis and analysis.get("action_items"))
 
-            # 一、整体结论
-            if summary:
-                sections.append(f"**一、整体结论**\n{summary}")
+        sections = []
 
-            # 二、核心指标
-            kpi_parts = []
+        # 一、小结（必有）
+        conclusion = ""
+        if analysis and analysis.get("summary"):
+            conclusion = analysis["summary"]
+        else:
+            conclusion = result.get("answer", "")
+        if conclusion:
+            sections.append(f"**一、小结**\n{conclusion}")
+
+        # 二、核心指标（必有）
+        kpi_parts = []
+        if analysis and analysis.get("kpi"):
+            kpi = analysis["kpi"]
             current = kpi.get("current")
             if current is not None:
                 kpi_parts.append(f"{metric_name}：{self._format_value(current)}")
@@ -358,49 +375,34 @@ class ResultAnalyzer:
             if yoy is not None:
                 yoy_sign = "增长" if yoy >= 0 else "下降"
                 kpi_parts.append(f"同比{yoy_sign} {abs(yoy):.1f}%")
-            if kpi_parts:
-                sections.append("**二、核心指标**\n" + "，".join(kpi_parts))
+        elif result.get("supplementary_info"):
+            for info in result["supplementary_info"]:
+                if info.get("label") and info.get("value"):
+                    kpi_parts.append(f"{info['label']} {info['value']}")
+        if kpi_parts:
+            sections.append("**二、核心指标**\n" + "，".join(kpi_parts))
 
-            # 三、数据图表（占位，前端渲染）
-            sections.append("**三、数据图表**\n（前端展示：维度对比图、贡献占比图）")
+        # 三、数据图表（有多维度/趋势才出）
+        if has_multi_dim:
+            sections.append("**三、数据图表**\n（前端展示）")
 
-            # 四、维度明细 & 影响归因
-            if breakdown:
-                bd_lines = []
-                for item in breakdown:
-                    dim = item.get("dimension", "")
-                    change = item.get("change", "")
-                    impact = item.get("impact", "")
-                    priority = item.get("priority", "")
-                    line_parts = [f"{dim}："]
-                    if change:
-                        line_parts.append(f"环比 {change}，")
-                    if impact:
-                        line_parts.append(f"{impact}")
-                    if priority:
-                        line_parts.append(f"（{priority}）")
-                    bd_lines.append("".join(line_parts))
-                sections.append("**四、维度明细 & 影响归因**\n" + "\n".join(bd_lines))
+        # 四、维度明细（有多维度才出）
+        if has_multi_dim:
+            if analysis and analysis.get("breakdown"):
+                sections.append("**四、维度明细**\n" + self._build_breakdown_text(analysis["breakdown"]))
+            elif data:
+                sections.append("**四、维度明细**\n" + self._build_dim_detail_text(mql, data))
 
-            # 五、运营建议
-            if action_items:
-                adv_lines = []
-                for item in action_items:
-                    text = item.get("text", "")
-                    item_type = item.get("type", "normal")
-                    if item_type == "urgent":
-                        priority = "P0"
-                    elif item_type == "warning":
-                        priority = "P1"
-                    else:
-                        priority = "P2"
-                    adv_lines.append(f"{priority} {text}")
-                sections.append("**五、运营建议**\n" + "\n".join(adv_lines))
+        # 五、归因分析（有涨跌波动才出）
+        if has_fluctuation:
+            sections.append("**五、归因分析**\n" + self._build_breakdown_text(analysis["breakdown"]))
 
-            if sections:
-                result["answer"] = "\n\n".join(sections)
-        else:
-            result["mode"] = "direct"
+        # 六、建议结论（有分析就给）
+        if has_actionable:
+            sections.append("**六、建议结论**\n" + self._build_action_text(analysis["action_items"]))
+
+        if sections:
+            result["answer"] = "\n\n".join(sections)
 
         # 6. 优先从语义快照增强 suggestions（如果当前 suggestions 为空或过少）
         # ========== 优先使用语义层 recommend() 获取 ==========
@@ -1171,6 +1173,64 @@ class ResultAnalyzer:
             if found_nonzero:
                 break
         return not found_nonzero
+
+    def _build_breakdown_text(self, breakdown: list) -> str:
+        """格式化归因明细为纯文本"""
+        lines = []
+        for item in breakdown:
+            dim = item.get("dimension", "")
+            change = item.get("change", "")
+            impact = item.get("impact", "")
+            priority = item.get("priority", "")
+            parts = [f"{dim}："]
+            if change:
+                parts.append(f"环比 {change}，")
+            if impact:
+                parts.append(f"{impact}")
+            if priority:
+                parts.append(f"（{priority}）")
+            lines.append("".join(parts))
+        return "\n".join(lines)
+
+    def _build_dim_detail_text(self, mql: MQLSchema, data: list) -> str:
+        """从 sql_result 提取维度明细文本"""
+        col_map = self._build_col_map(mql)
+        metric_columns = set()
+        if mql.metric and mql.metric.name:
+            metric_columns.add(mql.metric.name)
+        if mql.metrics:
+            for m in mql.metrics:
+                if m.name:
+                    metric_columns.add(m.name)
+
+        lines = []
+        for row in data[:10]:
+            parts = []
+            for k, v in row.items():
+                display_k = col_map.get(k, k)
+                if k in metric_columns or self._is_metric_column(k):
+                    parts.append(f"{display_k}：{self._format_value(v)}")
+                else:
+                    parts.append(f"{display_k}：{v}")
+            lines.append("，".join(parts))
+        if len(data) > 10:
+            lines.append(f"... 还有 {len(data) - 10} 条")
+        return "\n".join(lines)
+
+    def _build_action_text(self, action_items: list) -> str:
+        """格式化运营建议为纯文本"""
+        lines = []
+        for item in action_items:
+            text = item.get("text", "")
+            item_type = item.get("type", "normal")
+            if item_type == "urgent":
+                priority = "P0"
+            elif item_type == "warning":
+                priority = "P1"
+            else:
+                priority = "P2"
+            lines.append(f"{priority} {text}")
+        return "\n".join(lines)
 
     def _format_value(self, value: Any) -> str:
         """格式化数值"""
