@@ -24,6 +24,8 @@ export function buildAssistantMessage({
   currentMqlTime,
   currentTime,
   finalMetricUnit,
+  finalExplanation,
+  finalKpiTooltip,
 }) {
   let displayAnswer = finalAnswer
   if (!displayAnswer && finalResultData && finalResultData.length > 0) {
@@ -95,5 +97,7 @@ export function buildAssistantMessage({
     timeRange: currentMqlTime,
     metricUnit: finalMetricUnit || '',
     time: currentTime,
+    explanation: finalExplanation || null,
+    kpiTooltip: finalKpiTooltip || null,
   }
 }

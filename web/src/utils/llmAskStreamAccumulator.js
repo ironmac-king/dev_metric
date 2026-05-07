@@ -30,6 +30,8 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
   let finalMomChange = null
   let finalYoyChange = null
   let finalSupplementaryInfo = []
+  let finalExplanation = null
+  let finalKpiTooltip = null
   let currentMqlDimensions = []
   let currentMqlTime = null
   const thinkingStepsMap = new Map()
@@ -172,6 +174,8 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       if (data.multi_metric_data) finalMultiMetricData = data.multi_metric_data
       if (data.dimensional_data) finalDimensionalData = data.dimensional_data
       if (data.category) finalCategory = data.category
+      if (data.explanation) finalExplanation = data.explanation
+      if (data.kpi_tooltip) finalKpiTooltip = data.kpi_tooltip
       return
     }
 
@@ -231,6 +235,8 @@ export function createLlmAskStreamAccumulator(callbacks = {}) {
       finalMomChange,
       finalYoyChange,
       finalSupplementaryInfo,
+      finalExplanation,
+      finalKpiTooltip,
       currentMqlDimensions,
       currentMqlTime,
       currentTime,

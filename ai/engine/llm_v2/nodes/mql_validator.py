@@ -190,6 +190,8 @@ class MQLSemanticValidator:
                                 # 透出业务口径（供触发分析器 LLM 生成用）
                                 if metric_info_by_name.get("business_summary"):
                                     metric.business_summary = metric_info_by_name.get("business_summary", "")
+                                if metric_info_by_name.get("business_definition"):
+                                    metric.business_meaning = metric_info_by_name.get("business_definition", "")
                                 logger.info(f"[_validate_metric] 通过 name 找到指标: name={metric.name}, code={metric.code}, sql={metric.starrocks_sql[:50] if metric.starrocks_sql else 'None'}...")
                         # 继续验证 starrocks_sql
                         if metric.starrocks_sql:
@@ -210,7 +212,9 @@ class MQLSemanticValidator:
                 # 透出业务口径（供触发分析器 LLM 生成用）
                 if metric_info.get("business_summary"):
                     metric.business_summary = metric_info.get("business_summary", "")
-                logger.info(f"[_validate_metric] 填充 starrocks_sql: code={metric.code}, sql={metric.starrocks_sql[:80]}...")
+                if metric_info.get("business_definition"):
+                    metric.business_meaning = metric_info.get("business_definition", "")
+                logger.info(f"[_validate_metric] 填充 starrocks_sql: code={metric.code}, sql={metric.starrocks_sql[:80] if metric.starrocks_sql else 'None'}...")
             else:
                 logger.warning(f"[_validate_metric] 未找到指标，尝试通过名称查找: code={metric.code}")
                 # code 不存在时，通过 name 查找
@@ -228,6 +232,8 @@ class MQLSemanticValidator:
                         # 透出业务口径（供触发分析器 LLM 生成用）
                         if metric_info.get("business_summary"):
                             metric.business_summary = metric_info.get("business_summary", "")
+                        if metric_info.get("business_definition"):
+                            metric.business_meaning = metric_info.get("business_definition", "")
                         logger.info(f"[_validate_metric] 通过 name 找到指标: name={metric.name}, code={metric.code}, sql={metric.starrocks_sql[:50] if metric.starrocks_sql else 'None'}...")
 
         # 如果没有 code 但有 name，尝试通过 name 查找
@@ -249,7 +255,8 @@ class MQLSemanticValidator:
                 # 透出业务口径（供触发分析器 LLM 生成用）
                 if metric_info.get("business_summary"):
                     metric.business_summary = metric_info.get("business_summary", "")
-                logger.info(f"[_validate_metric] 通过 name 填充: name={metric.name}, code={metric.code}, field={metric.field}")
+                if metric_info.get("business_definition"):
+                    metric.business_meaning = metric_info.get("business_definition", "")
             else:
                 # 找不到指标，清空错误的 name，防止下游误用
                 logger.warning(f"[_validate_metric] 指标名'{metric.name}'在数据库中不存在，清空该字段")
@@ -265,11 +272,26 @@ class MQLSemanticValidator:
         return True, ""
 
     def _validate_dimension(self, dim: MQLDimension) -> Tuple[bool, str]:
-        """验证维度"""
-        # TODO: 从维度配置表验证
-        # valid_dimensions = self._get_valid_dimensions()
-        # if dim.type and dim.type not in valid_dimensions:
-        #     return False, f"非法的维度类型: {dim.type}"
+        """验证维度是否在语义层中有定义"""
+        if not dim.type and not dim.column:
+            return True, ""
+
+        # 从维度映射检查
+        from .sql_generator import SQLGeneratorNode
+        dim_map = SQLGeneratorNode.DIMENSION_COLUMN_MAP
+        dim_values_upper = {v.upper() for v in dim_map.values()}
+
+        if dim.type and dim.type in dim_map:
+            return True, ""
+        if dim.column and dim.column.upper() in dim_values_upper:
+            return True, ""
+
+        # 时间列也合法
+        if dim.column and dim.column.upper() in {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DT", "DATE", "STAT_DATE"}:
+            return True, ""
+
+        # 警告但不阻断（避免过度限制新维度）
+        logger.warning(f"[MQLValidator] 未识别的维度: type={dim.type}, column={dim.column}")
         return True, ""
 
     def _validate_time(self, time_obj) -> Tuple[bool, str]:

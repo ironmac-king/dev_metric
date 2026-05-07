@@ -34,6 +34,22 @@
               :time-end="msg.mql?.time?.end"
               class="data-section"
             />
+            <!-- 核心指标段落：加 tooltip -->
+            <div v-else-if="isKpiSection(p)" class="kpi-section">
+              <div class="kpi-header">
+                <strong>{{ kpiSectionTitle(p) }}</strong>
+                <span v-if="kpiTooltipText" class="kpi-tip-icon" @mouseenter="showKpiTip = true" @mouseleave="showKpiTip = false">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </span>
+                <div v-if="showKpiTip && kpiTooltipText" class="kpi-popover">
+                  <div v-for="line in kpiTooltipLines" :key="line.label" class="kpi-popover-row">
+                    <span class="kpi-popover-label">{{ line.label }}</span>
+                    <span class="kpi-popover-value">{{ line.value }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="kpi-values" v-html="renderHtml(stripKpiTitle(p))"></div>
+            </div>
             <!-- 其他段落正常渲染 -->
             <p v-else-if="!isChartPlaceholder(p)" class="detail-line" v-html="renderHtml(p)"></p>
           </template>
@@ -176,6 +192,45 @@ function isChartPlaceholder(text) {
   return CHART_PLACEHOLDER_RE.test(text)
 }
 
+function isKpiSection(text) {
+  return /^\*\*[一二三四五六]、核心指标\*\*/.test(text)
+}
+
+function stripKpiTitle(text) {
+  return text.replace(/^\*\*[一二三四五六]、核心指标\*\*\n?/, '')
+}
+
+function kpiSectionTitle(text) {
+  const m = text.match(/^\*\*([一二三四五六]、核心指标)\*\*/)
+  return m ? m[1] : '核心指标'
+}
+
+const showKpiTip = ref(false)
+
+const kpiTooltipText = computed(() => {
+  const tip = props.msg.kpiTooltip
+  if (!tip) return ''
+  const lines = []
+  if (tip.metric_definition) lines.push(tip.metric_definition)
+  if (tip.current_period) lines.push(`查询期间：${tip.current_period}`)
+  if (tip.compare_period) lines.push(`对比期间：${tip.compare_period}`)
+  if (tip.mom_period) lines.push(tip.mom_period)
+  if (tip.yoy_period) lines.push(tip.yoy_period)
+  return lines.join('\n')
+})
+
+const kpiTooltipLines = computed(() => {
+  const tip = props.msg.kpiTooltip
+  if (!tip) return []
+  const lines = []
+  if (tip.metric_definition) lines.push({ label: '指标定义', value: tip.metric_definition })
+  if (tip.current_period) lines.push({ label: '查询期间', value: tip.current_period })
+  if (tip.compare_period) lines.push({ label: '对比期间', value: tip.compare_period })
+  if (tip.mom_period) lines.push({ label: '环比期间', value: tip.mom_period })
+  if (tip.yoy_period) lines.push({ label: '同比期间', value: tip.yoy_period })
+  return lines
+})
+
 const timeLabel = computed(() => {
   const v = props.msg.time || props.msg.created_at
   if (!v) return ''
@@ -297,6 +352,82 @@ function renderHtml(text) {
   color: #4e5969;
 }
 .detail-line :deep(p) { margin: 0; }
+
+/* 核心指标 tooltip */
+.kpi-section {
+  margin-top: 4px;
+}
+.kpi-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  position: relative;
+}
+.kpi-header strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2329;
+}
+.kpi-tip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: #a0a4b0;
+  cursor: help;
+  transition: color 0.2s;
+  flex-shrink: 0;
+}
+.kpi-tip-icon:hover {
+  color: #3370ff;
+}
+.kpi-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 315px;
+  max-width: 515px;
+  background: #fff;
+  border: 1px solid #e5e6eb;
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  padding: 12px 14px;
+  z-index: 100;
+  animation: kpi-popover-in 0.15s ease;
+}
+@keyframes kpi-popover-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.kpi-popover-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.kpi-popover-row + .kpi-popover-row {
+  border-top: 1px solid #f2f3f5;
+}
+.kpi-popover-label {
+  color: #86909c;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-weight: 500;
+}
+.kpi-popover-value {
+  color: #1f2329;
+  word-break: break-all;
+}
+.kpi-values {
+  font-size: 14px;
+  line-height: 1.8;
+  color: #4e5969;
+  margin-top: 4px;
+}
+.kpi-values :deep(p) { margin: 0; }
 
 /* 数据标签 */
 .tag-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }

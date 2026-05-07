@@ -97,6 +97,7 @@ TIME_EXPRESSION_MAP = {
     # 月
     '本月': '本月',
     '上月': '上月',
+    '上个月': '上月',
     '上上月': '上上月',
     '上上个月': '上上月',
     '下月': '下月',
@@ -1003,6 +1004,34 @@ class IntentRouter:
                     mql.dimensions = [MQLDimension(type=dim_name, column=dim_col)]
                     logger.info(f"[_handle_replace_metric_followup] 追问检测到维度变更: {dim_name} -> {dim_col}")
                     break
+
+        # 追问中可能同时切换时间，检测时间表达式并解析
+        time_detected = None
+        for time_kw in sorted(TIME_EXPRESSION_MAP.keys(), key=len, reverse=True):
+            if time_kw in question:
+                time_detected = time_kw
+                break
+        if not time_detected:
+            # 扩展匹配："上个月"、"近N天" 等不在 MAP 中的常见时间词
+            import re
+            extended_match = re.search(r'(上个月|前一个月|上上个月|近\d+天|近\d+周|近\d+个月|最近\d+天)', question)
+            if extended_match:
+                time_detected = extended_match.group(1)
+        if time_detected:
+            try:
+                parsed = TimeParser().parse(time_detected)
+                if parsed:
+                    from ..schema import TimeRange, TimeType
+                    mql.time = TimeRange(
+                        type=TimeType(parsed.get("type", "relative")),
+                        original=time_detected,
+                        start=parsed.get("start", ""),
+                        end=parsed.get("end", ""),
+                    )
+                    mql.comparison = None
+                    logger.info(f"[_handle_replace_metric_followup] 追问检测到时间变更: {time_detected} → {mql.time.start} ~ {mql.time.end}")
+            except Exception as e:
+                logger.warning(f"[_handle_replace_metric_followup] 时间解析失败: {e}")
 
         return {"mql": mql, "needs_clarification": False, "source": "followup_replace_metric"}
 

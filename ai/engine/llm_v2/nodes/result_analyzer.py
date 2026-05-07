@@ -7,6 +7,7 @@
 - 生成建议问题
 """
 import json
+import re
 from typing import Dict, Any, List
 from ai.config.logging_config import get_logger
 from ai.engine.llm import get_llm_engine
@@ -280,14 +281,21 @@ class ResultAnalyzer:
             return result
 
         # 1.5 处理全空值数据（有行但指标值全为 None/0）
-        # 但如果 trigger_analyzer 已经产出 analysis 数据，说明分析SQL查到了有效数据，不走空处理
         all_empty = self._all_values_empty(sql_result.data)
         logger.info(f"[ResultAnalyzer] _all_values_empty={all_empty}, data_sample={sql_result.data[:2] if sql_result.data else 'empty'}")
-        has_analysis_kpi = bool(analysis and analysis.get("kpi", {}).get("current") is not None)
-        if all_empty and not has_analysis_kpi:
-            logger.info("[ResultAnalyzer] 数据全为空值且无分析数据，按无数据处理")
-            result = await self._handle_empty_result(mql, question)
-            return result
+
+        if all_empty:
+            metric_name = mql.metric.name if mql.metric else "指标"
+            time_desc = mql.time.original if mql.time and mql.time.original else "指定时间段"
+            logger.info("[ResultAnalyzer] SQL有行但指标值全为空，返回一句话")
+            return {
+                "answer": f"{time_desc}{metric_name}暂无数据。",
+                "suggestions": [
+                    f"本月{metric_name}是多少",
+                    f"各站点{metric_name}排名",
+                ],
+                "explanation": self._build_explanation(mql),
+            }
 
         # 2. 根据意图生成回答
         intent = mql.intent.value if mql.intent else "query_value"
@@ -352,17 +360,25 @@ class ResultAnalyzer:
         has_actionable = bool(analysis and analysis.get("action_items"))
 
         sections = []
+        _CN = ["一", "二", "三", "四", "五", "六"]
+        _si = 0  # section index
 
-        # 一、小结（必有）
+        # 小结（必有）— 只取第一段，不混数据表
         conclusion = ""
         if analysis and analysis.get("summary"):
             conclusion = analysis["summary"]
         else:
             conclusion = result.get("answer", "")
+        # 统一截断：只保留第一段（双换行之前）
+        if conclusion and "\n\n" in conclusion:
+            conclusion = conclusion.split("\n\n")[0].strip()
+        elif conclusion and "\n" in conclusion:
+            conclusion = conclusion.split("\n")[0].strip()
         if conclusion:
-            sections.append(f"**一、小结**\n{conclusion}")
+            _si += 1
+            sections.append(f"**{_CN[_si - 1]}、小结**\n{conclusion}")
 
-        # 二、核心指标（必有）
+        # 核心指标（必有）
         kpi_parts = []
         if analysis and analysis.get("kpi"):
             kpi = analysis["kpi"]
@@ -381,30 +397,72 @@ class ResultAnalyzer:
             for info in result["supplementary_info"]:
                 if info.get("label") and info.get("value"):
                     kpi_parts.append(f"{info['label']} {info['value']}")
-        if kpi_parts:
-            sections.append("**二、核心指标**\n" + "，".join(kpi_parts))
+        # 兜底：从首行数据提取指标值（排除维度列）
+        if not kpi_parts and data:
+            row = data[0]
+            dim_cols = set()
+            if mql.dimensions:
+                for d in mql.dimensions:
+                    if d.column:
+                        dim_cols.add(d.column.upper())
+            for col, val in row.items():
+                upper = col.upper()
+                if upper in dim_cols or upper.startswith("GROUP_") or col in _DIM_COL_CHINESE:
+                    continue
+                # 跳过环比/同比/上期等非当前值列
+                skip_kw = ("环比变化", "环比上期", "同比变化", "同比上期", "MOM_CHANGE", "YOY_CHANGE",
+                           "MOM_VAL", "YOY_VAL", "FSITECODE", "FDATE", "MONTHS")
+                if any(kw in upper for kw in skip_kw):
+                    continue
+                # 清洗列名：去掉 _raw 后缀、"当前值"后缀、_raw→空
+                col_clean = col.replace("_raw", "").replace("当前值", "").replace("_change", "").strip(" _")
+                if not col_clean:
+                    col_clean = metric_name
+                formatted = self._format_value(val)
+                kpi_parts.append(f"{col_clean}：{formatted}")
+        # 最终兜底：至少显示指标名
+        if not kpi_parts:
+            kpi_parts.append(f"{metric_name}")
+        _si += 1
+        sections.append(f"**{_CN[_si - 1]}、核心指标**\n" + "，".join(kpi_parts))
 
-        # 三、数据图表（有多维度/趋势才出）
-        if has_multi_dim:
-            sections.append("**三、数据图表**\n（前端展示）")
+        # 核心指标 tooltip 信息（业务定义 + 对比期间）
+        tooltip_info = self._build_kpi_tooltip(mql, analysis)
+        if tooltip_info:
+            result["kpi_tooltip"] = tooltip_info
 
-        # 四、维度明细（有多维度才出，只展示维度名+数值，不含归因）
+        # 数据图表（有多维度/趋势/归因数据才出）
+        if has_multi_dim or has_fluctuation:
+            _si += 1
+            sections.append(f"**{_CN[_si - 1]}、数据图表**\n（前端展示）")
+
+        # 维度明细（有多维度才出，先构建内容再判断是否有效）
         if has_multi_dim:
+            dim_text = ""
             if analysis and analysis.get("breakdown"):
-                sections.append("**四、维度明细**\n" + self._build_dim_value_text(analysis["breakdown"]))
+                dim_text = self._build_dim_value_text(analysis["breakdown"])
             elif data:
-                sections.append("**四、维度明细**\n" + self._build_dim_detail_text(mql, data))
+                dim_text = self._build_dim_detail_text(mql, data)
+            if dim_text and dim_text.strip("：\n "):
+                _si += 1
+                sections.append(f"**{_CN[_si - 1]}、维度明细**\n" + dim_text)
 
-        # 五、归因分析（有涨跌波动才出，展示影响+优先级）
+        # 归因分析（有涨跌波动才出，先构建内容再判断是否有效）
         if has_fluctuation:
-            sections.append("**五、归因分析**\n" + self._build_attribution_text(analysis["breakdown"]))
+            attr_text = self._build_attribution_text(analysis["breakdown"])
+            if attr_text and attr_text.strip("：\n "):
+                _si += 1
+                sections.append(f"**{_CN[_si - 1]}、归因分析**\n" + attr_text)
 
-        # 六、建议结论（有分析就给）
+        # 建议结论（有分析就给，先构建内容再判断是否有效）
         if has_actionable:
-            sections.append("**六、建议结论**\n" + self._build_action_text(analysis["action_items"]))
+            action_text = self._build_action_text(analysis["action_items"])
+            if action_text and action_text.strip("：\n "):
+                _si += 1
+                sections.append(f"**{_CN[_si - 1]}、建议结论**\n" + action_text)
 
         if sections:
-            result["answer"] = "\n\n".join(sections)
+            result["answer"] = self._clean_raw_names("\n\n".join(sections))
 
         # 6. 优先从语义快照增强 suggestions（如果当前 suggestions 为空或过少）
         # ========== 优先使用语义层 recommend() 获取 ==========
@@ -452,6 +510,25 @@ class ResultAnalyzer:
                     logger.info(f"[ResultAnalyzer] 从语义快照增强 suggestions: {snapshot_suggestions}")
 
         return result
+
+    def _build_dimension_empty_result(
+        self,
+        mql: MQLSchema,
+        sql_result: SQLResult,
+        question: str,
+    ) -> Dict[str, Any]:
+        """SQL 有行但指标值全为空：一句话小结"""
+        metric_name = mql.metric.name if mql.metric else "指标"
+        time_desc = mql.time.original if mql.time and mql.time.original else "指定时间段"
+
+        return {
+            "answer": f"{time_desc}{metric_name}暂无数据。",
+            "suggestions": [
+                f"本月{metric_name}是多少",
+                f"各站点{metric_name}排名",
+            ],
+            "explanation": self._build_explanation(mql),
+        }
 
     async def _handle_empty_result(self, mql: MQLSchema, question: str) -> Dict[str, Any]:
         """处理空结果"""
@@ -1176,6 +1253,23 @@ class ResultAnalyzer:
                 break
         return not found_nonzero
 
+    def _has_dimension_rows(self, data: list) -> bool:
+        """检测数据中是否有维度列（字符串列有值但指标值全为空）"""
+        if not data:
+            return False
+        dim_names = []
+        for row in data[:20]:
+            for k, v in row.items():
+                if k in _DIM_COL_CHINESE or k.startswith("GROUP_"):
+                    if v and isinstance(v, str):
+                        dim_names.append(v)
+                        break
+        if not dim_names:
+            return False
+        # 只要有维度行就算有数据（即使指标值全 NULL）
+        logger.info(f"[ResultAnalyzer] _has_dimension_rows: found {len(dim_names)} dimension values")
+        return True
+
     def _build_dim_value_text(self, breakdown: list) -> str:
         """维度明细：只展示维度名+环比变化，不含归因影响"""
         lines = []
@@ -1251,6 +1345,57 @@ class ResultAnalyzer:
                 priority = "P2"
             lines.append(f"{priority} {text}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _clean_raw_names(text: str) -> str:
+        """清洗回答文本中的 _raw、当前值等 SQL 列名残留"""
+        if not text:
+            return text
+        # 去掉 _raw 后缀（带前面可能的中文字符）
+        text = re.sub(r'(\S+)_raw', r'\1', text)
+        # 去掉 "当前值" 后缀
+        text = text.replace("当前值", "")
+        # 去掉 _mom_val / _yoy_val / _mom_change / _yoy_change
+        text = re.sub(r'_(?:mom|yoy)_(?:val|change)', '', text)
+        return text
+        """构建核心指标 tooltip 信息：业务定义 + 对比期间"""
+        tooltip = {}
+        # 业务定义
+        if mql.metric:
+            meaning = mql.metric.business_meaning or mql.metric.business_summary or ""
+            if meaning:
+                tooltip["metric_definition"] = f"{mql.metric.name}：{meaning}"
+        # 当前查询期间
+        if mql.time and mql.time.start:
+            tooltip["current_period"] = f"{mql.time.start} ~ {mql.time.end}"
+        # 对比期间（环比/同比）
+        if mql.comparison and mql.comparison.compare_period_start:
+            tooltip["compare_period"] = f"{mql.comparison.compare_period_start} ~ {mql.comparison.compare_period_end}"
+        # 从 trigger_analyzer 的 analysis.kpi 推算环比/同比期间
+        if analysis and analysis.get("kpi") and not tooltip.get("compare_period"):
+            kpi = analysis["kpi"]
+            try:
+                import datetime
+                from dateutil.relativedelta import relativedelta
+                start = mql.time.start if mql.time else ""
+                if start:
+                    dt = datetime.datetime.strptime(start[:10], "%Y-%m-%d")
+                    end_dt = datetime.datetime.strptime((mql.time.end or start)[:10], "%Y-%m-%d")
+                    if kpi.get("mom") is not None:
+                        # 复用 SQL 生成器的环比计算逻辑
+                        from .sql_generator import SQLGenerator
+                        mom_start, mom_end = SQLGenerator.compute_mom_period(dt, end_dt)
+                        tooltip["mom_period"] = f"{mom_start.strftime('%Y-%m-%d')} ~ {mom_end.strftime('%Y-%m-%d')}"
+                    if kpi.get("yoy") is not None:
+                        # 同比：去年同期，与 SQL 生成器逻辑一致
+                        import calendar
+                        period_days = (end_dt - dt).days + 1
+                        yoy_start = dt - relativedelta(years=1)
+                        yoy_end = yoy_start + datetime.timedelta(days=period_days - 1)
+                        tooltip["yoy_period"] = f"{yoy_start.strftime('%Y-%m-%d')} ~ {yoy_end.strftime('%Y-%m-%d')}"
+            except Exception:
+                pass
+        return tooltip if len(tooltip) > 1 else {}  # 至少要有2个字段才有意义
 
     def _format_value(self, value: Any) -> str:
         """格式化数值"""

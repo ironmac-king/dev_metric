@@ -191,6 +191,7 @@ class AskResponseV2(BaseModel):
     mode: Optional[str] = "direct"  # "direct" or "triggered"
     one_sentence_summary: Optional[str] = None  # 一句话核心结论
     analysis_summary: Optional[str] = None  # 详细分析摘要
+    explanation: Optional[Dict[str, str]] = None  # 可解释性信息（指标含义、维度说明等）
 
 
 # ==================== 会话持久化辅助函数 ====================
@@ -226,7 +227,8 @@ async def _save_v2_session_to_go(
             "starrocksSql": result_state.sql,
             "momChange": getattr(result_state, "mom_change", None),
             "yoyChange": getattr(result_state, "yoy_change", None),
-            "dimensionFilters": [d.to_dict() for d in (result_state.mql.dimensions or [])] if result_state.mql else [],
+            # 只发送有具体值的维度（筛选维度），分组维度（value=null）不发送
+            "dimensionFilters": [d.to_dict() for d in (result_state.mql.dimensions or []) if d and d.value] if result_state.mql else [],
             "thinkingSteps": [step.to_dict() for step in result_state.thinking_steps],
             "needsClarification": result_state.error == "needs_clarification" or result_state.is_generic_result,
             "clarificationOptions": result_state.context_cache.clarification_options if result_state.context_cache else [],
@@ -367,6 +369,7 @@ async def ask_question_v2(req: AskRequestV2):
             mode="triggered" if result_state.analysis else "direct",
             one_sentence_summary=getattr(result_state, "one_sentence_summary", ""),
             analysis_summary=getattr(result_state, "analysis_summary", ""),
+            explanation=getattr(result_state, "explanation", None),
         )
 
         duration_ms = int((time.time() - start_time) * 1000)
@@ -636,6 +639,8 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "multi_metric_data": step_state.get("multi_metric_data", []),
                         "dimensional_data": step_state.get("dimensional_data", {}),
                         "category": step_state.get("category", ""),
+                        "explanation": step_state.get("explanation"),
+                        "kpi_tooltip": step_state.get("kpi_tooltip"),
                     }).to_sse()
 
             # 发送完成事件
@@ -828,6 +833,10 @@ async def _stream_graph(graph, state: V2State):
                     "yoyChange": getattr(state_update, 'yoy_change', None),
                     # 传递补充信息（供文档样式类型B使用）
                     "supplementaryInfo": getattr(state_update, 'supplementary_info', []),
+                    # 传递可解释性信息（供前端精简推理链使用）
+                    "explanation": getattr(state_update, 'explanation', None),
+                    # 核心指标 tooltip（业务定义 + 对比期间）
+                    "kpi_tooltip": getattr(state_update, 'kpi_tooltip', None),
                     # 一句话结论和详细摘要
                     "one_sentence_summary": getattr(state_update, 'one_sentence_summary', ''),
                     "analysis_summary": getattr(state_update, 'analysis_summary', ''),
@@ -957,12 +966,17 @@ DIM_COL_CHINESE = {
 METRIC_SUFFIX_CHINESE = {
     "_raw": "当前值",
     "current_val": "当前值",
-    "mom_val": "环比",
-    "yoy_val": "同比",
+    "_mom_val": "环比上期",
+    "mom_val": "环比上期",
+    "_yoy_val": "同比上期",
+    "yoy_val": "同比上期",
+    "_mom_change": "环比变化",
+    "_yoy_change": "同比变化",
+    "_wow_change": "周环比变化",
     "_yoy": "同比",
     "_mom": "环比",
     "_wow": "周环比",
-    "_wow_val": "周环比",
+    "_wow_val": "周环比上期",
     "_rank": "排名",
     "_running_sum": "累计值",
     "_ratio": "占比",

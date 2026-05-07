@@ -327,7 +327,8 @@ class SQLGeneratorNode:
 
         return renderer.render(semantic_json)
 
-    def _compute_mom_period(self, start_dt, end_dt_adjusted):
+    @staticmethod
+    def compute_mom_period(start_dt, end_dt_adjusted):
         """
         计算 MoM(环比)对比期。
 
@@ -440,7 +441,7 @@ class SQLGeneratorNode:
 
         # 环比:复用统一计算逻辑
         if supports_mom:
-            mom_start, mom_end = self._compute_mom_period(start_dt, end_dt_adjusted)
+            mom_start, mom_end = self.compute_mom_period(start_dt, end_dt_adjusted)
         else:
             mom_start = mom_end = None
 
@@ -741,13 +742,18 @@ FROM (
             if self.COL_DATE not in dimensions:
                 dimensions.append(self.COL_DATE)
         elif time_dim_col not in dimensions:
-            # 只有当用户明确提到时间粒度(如"按天"、"每日"、"按月")时,才将时间列加入 GROUP BY
-            # 否则返回时间范围内的汇总值
-            time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度", "按月", "每月", "月度", "月均",
-                                          "按周", "每周", "周度", "按季", "季度", "按年", "每年", "年度"]
-            if any(kw in question for kw in time_granularity_keywords):
+            # query_trend intent 自动添加时间维度（趋势查询必然需要时间序列）
+            intent_val = mql.intent.value if hasattr(mql.intent, 'value') else str(mql.intent)
+            if intent_val == "query_trend":
                 dimensions.append(time_dim_col)
-                logger.info(f"[SQLGenerator] 用户问题包含时间粒度关键词,添加 {time_dim_col} 到 GROUP BY")
+                logger.info(f"[SQLGenerator] query_trend intent,自动添加 {time_dim_col} 到 GROUP BY")
+            else:
+                # 只有当用户明确提到时间粒度(如"按天"、"每日"、"按月")时,才将时间列加入 GROUP BY
+                time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度", "按月", "每月", "月度", "月均",
+                                              "按周", "每周", "周度", "按季", "季度", "按年", "每年", "年度"]
+                if any(kw in question for kw in time_granularity_keywords):
+                    dimensions.append(time_dim_col)
+                    logger.info(f"[SQLGenerator] 用户问题包含时间粒度关键词,添加 {time_dim_col} 到 GROUP BY")
 
         logger.info(f"[_mql_to_semantic] 最终 dimensions={dimensions}, question='{question}'")
 
@@ -948,7 +954,7 @@ FROM (
         yoy_end = end_dt_adjusted - relativedelta(years=1)
 
         # 环比:复用统一计算逻辑
-        mom_start, mom_end = self._compute_mom_period(start_dt, end_dt_adjusted)
+        mom_start, mom_end = self.compute_mom_period(start_dt, end_dt_adjusted)
 
         # 6. 构建表名
         tables = [mql.metric.table if mql.metric and mql.metric.table else self.DEFAULT_TABLE]
@@ -1072,7 +1078,7 @@ FROM (
         # 3. 计算对比期
         yoy_start = start_dt - relativedelta(years=1)
         yoy_end = end_dt_adjusted - relativedelta(years=1)
-        mom_start, mom_end = self._compute_mom_period(start_dt, end_dt_adjusted)
+        mom_start, mom_end = self.compute_mom_period(start_dt, end_dt_adjusted)
 
         # 4. 获取表名和指标字段
         tables = [mql.metric.table if mql.metric and mql.metric.table else self.DEFAULT_TABLE]

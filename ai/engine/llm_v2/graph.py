@@ -208,6 +208,12 @@ async def context_enhancer(state: V2State) -> V2State:
         if rag_result.get("similar_cases"):
             state.context_cache.similar_cases = rag_result["similar_cases"]
 
+        # RAG 模板复用标记（>0.90 相似度时跳过 mql_generator）
+        if rag_result.get("direct_reuse"):
+            state.context_cache["direct_reuse"] = True
+            state.context_cache["suggested_mql"] = rag_result.get("suggested_mql")
+            state.context_cache["suggested_sql"] = rag_result.get("suggested_sql")
+
         # 预加载 metric_info（优化：提前调用 MetricClient，后续节点可复用缓存）
         await _preload_metric_info(state)
 
@@ -246,6 +252,25 @@ async def mql_generator(state: V2State) -> V2State:
     try:
         generator = MQLGenerator()
 
+        # RAG 模板复用：>0.90 相似度时直接复用历史 MQL，跳过 LLM
+        if state.context_cache and state.context_cache.get("direct_reuse"):
+            suggested_mql = state.context_cache.get("suggested_mql")
+            if suggested_mql:
+                state.mql = suggested_mql
+                state.source = "rag_reuse"
+                push_history(state, json.dumps(suggested_mql.to_dict(), ensure_ascii=False))
+                state.add_thinking_step(
+                    "mql_generator",
+                    status="completed",
+                    content=f"RAG 模板复用: intent={suggested_mql.intent.value}",
+                    llm_used=False,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                    source="rag_reuse",
+                    entities=_extract_entities_from_mql(suggested_mql),
+                )
+                logger.info("[mql_generator] RAG 模板复用，跳过 LLM 生成")
+                return state
+
         # 获取 RAG 上下文
         rag_context = state.context_cache.similar_cases or []
 
@@ -265,6 +290,8 @@ async def mql_generator(state: V2State) -> V2State:
             'followup_comp',
             'followup_time',
             'followup_reset',
+            'followup_correction',  # 纠错追问
+            'rag_reuse',  # RAG 模板复用
         ) else None
 
         # 生成 MQL
@@ -1263,6 +1290,9 @@ async def result_analyzer(state: V2State) -> V2State:
         state.answer = result.get("answer", "")
         state.supplementary_info = result.get("supplementary_info", [])
         state.context_cache.suggestions = result.get("suggestions", [])
+        state.explanation = result.get("explanation")  # 可解释性信息
+        if result.get("kpi_tooltip"):
+            state.kpi_tooltip = result["kpi_tooltip"]
         logger.info(f"[result_analyzer] saved supplementary_info={state.supplementary_info}, suggestions_count={len(state.context_cache.suggestions)}")
         # 保存结构化的追问选项（供前端渲染按钮）
         if result.get("clarification_options"):
