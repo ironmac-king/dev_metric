@@ -1358,6 +1358,8 @@ class ResultAnalyzer:
         # 去掉 _mom_val / _yoy_val / _mom_change / _yoy_change
         text = re.sub(r'_(?:mom|yoy)_(?:val|change)', '', text)
         return text
+
+    def _build_kpi_tooltip(self, mql: MQLSchema, analysis: Dict = None) -> Dict[str, str]:
         """构建核心指标 tooltip 信息：业务定义 + 对比期间"""
         tooltip = {}
         # 业务定义

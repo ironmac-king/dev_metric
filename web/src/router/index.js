@@ -3,7 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 const routes = [
   {
     path: '/',
-    redirect: '/dashboard'
+    redirect: '/llm-ask-v2'
   },
   {
     path: '/login',
@@ -48,6 +48,11 @@ const routes = [
         path: 'llm-ask-v2',
         name: 'LLMAskV2',
         component: () => import('../views/LLMAskV2A.vue')
+      },
+      {
+        path: 'llm-ask-v2b',
+        name: 'LLMAskV2B',
+        component: () => import('../views/LLMAskV2B.vue')
       },
       {
         path: 'llm-config',

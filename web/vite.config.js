@@ -24,7 +24,7 @@ export default defineConfig({
     }
   },
   server: {
-    port: 3002,
+    port: 3000,
     host: '0.0.0.0',
     proxy: {
       '/api/v1/admin': {
@@ -37,6 +37,11 @@ export default defineConfig({
         changeOrigin: true,
         onProxyReq: forwardAuthHeader,
         configure: disableSseBuffering
+      },
+      '/api/v1/llm-ask/history': {
+        target: 'http://localhost:18081',
+        changeOrigin: true,
+        onProxyReq: forwardAuthHeader
       },
       '/api': {
         target: 'http://localhost:18080',
