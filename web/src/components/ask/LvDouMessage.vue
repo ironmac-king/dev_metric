@@ -23,7 +23,18 @@
           <template v-for="(p, i) in presentation.paragraphs" :key="i">
             <!-- 数据图表占位 → 标题 + ChartCard -->
             <template v-if="isChartPlaceholder(p) && msg.resultData && msg.resultData.length > 0">
-              <div v-if="chartSectionTitle(p)" class="chart-section-header">{{ chartSectionTitle(p) }}</div>
+              <div v-if="chartSectionTitle(p)" class="chart-section-header">
+                {{ chartSectionTitle(p) }}
+                <span class="chart-tip-icon" @mouseenter="showChartTip = true" @mouseleave="showChartTip = false">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </span>
+                <div v-if="showChartTip" class="chart-popover">
+                  <div v-for="line in chartTooltipLines" :key="line.label" class="chart-popover-row">
+                    <span class="chart-popover-label">{{ line.label }}</span>
+                    <span class="chart-popover-value">{{ line.value }}</span>
+                  </div>
+                </div>
+              </div>
               <ChartCard
                 :data="msg.resultData"
                 :columns="msg.columns || []"
@@ -213,6 +224,7 @@ function chartSectionTitle(text) {
 }
 
 const showKpiTip = ref(false)
+const showChartTip = ref(false)
 
 const kpiTooltipText = computed(() => {
   const tip = props.msg.kpiTooltip
@@ -242,6 +254,28 @@ const kpiTooltipLines = computed(() => {
   if (tip.mom_period) lines.push({ label: '环比期间', value: tip.mom_period })
   if (tip.yoy_period) lines.push({ label: '同比期间', value: tip.yoy_period })
   return lines
+})
+
+const chartTooltipLines = computed(() => {
+  const tip = props.msg.kpiTooltip
+  const rows = []
+  if (tip?.metric_definition) {
+    rows.push({ label: '指标定义', value: tip.metric_definition.split('\n')[0] })
+  }
+  if (tip?.current_period) {
+    rows.push({ label: '查询期间', value: tip.current_period })
+  }
+  if (tip?.mom_period) {
+    rows.push({ label: '环比期间', value: tip.mom_period })
+  }
+  // 检查是否有环比变化列
+  const hasMoM = props.msg.resultData?.some(r => r['环比变化'])
+  if (hasMoM) {
+    rows.push({ label: '环比变化', value: '(本期 - 上期) / 上期 × 100%' })
+    rows.push({ label: '变化标签', value: '大幅增长≥30% / 小幅增长5~30% / 持平±5% / 小幅下滑-30~-5% / 大幅下滑≤-30%' })
+    rows.push({ label: '贡献度', value: '(本期 - 上期) / 整体变化值 × 100%' })
+  }
+  return rows
 })
 
 const timeLabel = computed(() => {
@@ -365,6 +399,40 @@ function renderHtml(text) {
   color: #4e5969;
 }
 .detail-line :deep(p) { margin: 0; }
+.detail-line :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 6px 0;
+  font-size: 13px;
+}
+.detail-line :deep(th) {
+  background: #f7f8fa;
+  font-weight: 600;
+  color: #86909c;
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid #e5e6eb;
+}
+.detail-line :deep(td) {
+  padding: 6px 10px;
+  color: #1f2329;
+  border-bottom: 1px solid #f2f3f5;
+}
+.detail-line :deep(ul), .detail-line :deep(ol) {
+  margin: 4px 0;
+  padding-left: 1.2em;
+}
+.detail-line :deep(li) {
+  margin: 2px 0;
+  line-height: 1.7;
+}
+.detail-line :deep(blockquote) {
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-left: 3px solid #e5e6eb;
+  color: #86909c;
+  font-size: 12px;
+}
 
 /* 核心指标 tooltip */
 .kpi-section {
@@ -465,10 +533,68 @@ function renderHtml(text) {
 /* 数据区 */
 .data-section { margin-top: 16px; }
 .chart-section-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  position: relative;
   font-size: 14px;
   font-weight: 600;
   color: #1f2329;
   margin-top: 16px;
+}
+.chart-tip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: #a0a4b0;
+  cursor: help;
+  transition: color 0.2s;
+  flex-shrink: 0;
+}
+.chart-tip-icon:hover {
+  color: #3370ff;
+}
+.chart-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 300px;
+  max-width: 520px;
+  background: #fff;
+  border: 1px solid #e5e6eb;
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  padding: 12px 14px;
+  z-index: 100;
+  animation: chart-popover-in 0.15s ease;
+}
+@keyframes chart-popover-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.chart-popover-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.chart-popover-row + .chart-popover-row {
+  border-top: 1px solid #f2f3f5;
+}
+.chart-popover-label {
+  color: #86909c;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-weight: 500;
+  min-width: 56px;
+}
+.chart-popover-value {
+  color: #1f2329;
+  word-break: break-all;
 }
 
 /* 归因分析 */

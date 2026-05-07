@@ -64,6 +64,18 @@ class PerformanceTracker:
             "history_reuse": 0,
         }
 
+        # 语义层统计
+        self._semantic_stats = {
+            "total_calls": 0,
+            "local_model_hits": 0,
+            "snapshot_hits": 0,
+            "rule_hits": 0,
+            "llm_fallback": 0,
+            "avg_confidence": 0.0,
+            "clarification_count": 0,
+        }
+        self._semantic_confidence_sum = 0.0
+
     def record_request(
         self,
         request_id: str,
@@ -134,6 +146,39 @@ class PerformanceTracker:
             elif level == "l2":
                 self._cache_stats["l2_misses"] += 1
 
+    def record_semantic_layer(
+        self,
+        engine: str,
+        confidence: float,
+        needs_clarification: bool = False,
+    ) -> None:
+        """记录语义层解析结果
+
+        Args:
+            engine: 使用的引擎 (local_model/snapshot/rule/llm)
+            confidence: 解析置信度
+            needs_clarification: 是否需要追问
+        """
+        with self._lock:
+            self._semantic_stats["total_calls"] += 1
+            self._semantic_confidence_sum += confidence
+
+            if engine == "local_model":
+                self._semantic_stats["local_model_hits"] += 1
+            elif engine == "snapshot":
+                self._semantic_stats["snapshot_hits"] += 1
+            elif engine == "rule":
+                self._semantic_stats["rule_hits"] += 1
+            elif engine == "llm":
+                self._semantic_stats["llm_fallback"] += 1
+
+            if needs_clarification:
+                self._semantic_stats["clarification_count"] += 1
+
+            total = self._semantic_stats["total_calls"]
+            if total > 0:
+                self._semantic_stats["avg_confidence"] = self._semantic_confidence_sum / total
+
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         with self._lock:
@@ -176,11 +221,26 @@ class PerformanceTracker:
             cache_stats["l1_hit_rate"] = cache_stats["l1_hits"] / total_l1 if total_l1 > 0 else 0
             cache_stats["l2_hit_rate"] = cache_stats["l2_hits"] / total_l2 if total_l2 > 0 else 0
 
+            # 语义层统计
+            semantic_stats = dict(self._semantic_stats)
+            total_engine_hits = (
+                semantic_stats["local_model_hits"] +
+                semantic_stats["snapshot_hits"] +
+                semantic_stats["rule_hits"] +
+                semantic_stats["llm_fallback"]
+            )
+            if total_engine_hits > 0:
+                semantic_stats["local_model_rate"] = semantic_stats["local_model_hits"] / total_engine_hits
+                semantic_stats["snapshot_rate"] = semantic_stats["snapshot_hits"] / total_engine_hits
+                semantic_stats["rule_rate"] = semantic_stats["rule_hits"] / total_engine_hits
+                semantic_stats["llm_fallback_rate"] = semantic_stats["llm_fallback"] / total_engine_hits
+
             return {
                 "request": request_stats,
                 "nodes": node_stats,
                 "llm": llm_stats,
                 "cache": cache_stats,
+                "semantic_layer": semantic_stats,
             }
 
     def _percentile(self, data: List[float], p: float) -> float:
@@ -208,6 +268,16 @@ class PerformanceTracker:
                 "l2_misses": 0,
                 "history_reuse": 0,
             }
+            self._semantic_stats = {
+                "total_calls": 0,
+                "local_model_hits": 0,
+                "snapshot_hits": 0,
+                "rule_hits": 0,
+                "llm_fallback": 0,
+                "avg_confidence": 0.0,
+                "clarification_count": 0,
+            }
+            self._semantic_confidence_sum = 0.0
 
 
 # ==================== 基准测试 ====================

@@ -46,6 +46,16 @@
           </div>
           <span class="nav-text">智能问数</span>
         </div>
+        <div class="sidebar-icon" :class="{ active: $route.path === '/llm-ask-v2b' }" @click="router.push('/llm-ask-v2b')">
+          <div class="icon-wrap">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 6V10L13 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M7 13C7.5 14 8.5 15 10 15C11.5 15 12.5 14 13 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <span class="nav-text">问数 B 版</span>
+        </div>
         <div class="sidebar-icon" :class="{ active: $route.path === '/analysis' }" @click="router.push('/analysis')">
           <div class="icon-wrap">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">

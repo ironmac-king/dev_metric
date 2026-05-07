@@ -56,6 +56,9 @@ func main() {
 
 	// ========== 015: sql_templates 表扩展（支持下钻分析）==========
 	migrateSQLTemplates()
+
+	// ========== 018: semantic_metrics 表清理（移除 calculated_config 列）==========
+	migrateSemanticMetricsCleanup()
 }
 
 func migrateDimValueMapping() {
@@ -628,4 +631,15 @@ func migrateSQLTemplates() {
 	// 为 drilldown_category 添加索引（如果还没有）
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_sql_templates_drilldown ON sql_templates(drilldown_category);`)
 	log.Println("[015] drilldown_category 索引创建完成")
+}
+
+// ========== 018: semantic_metrics 表清理（移除 calculated_config 列）==========
+func migrateSemanticMetricsCleanup() {
+	db := postgres.Get()
+	sql := `ALTER TABLE semantic_metrics DROP COLUMN IF EXISTS calculated_config;`
+	if err := db.Exec(sql).Error; err != nil {
+		log.Printf("[018] 移除 calculated_config 列失败: %v", err)
+	} else {
+		log.Println("[018] calculated_config 列已移除或原本不存在")
+	}
 }

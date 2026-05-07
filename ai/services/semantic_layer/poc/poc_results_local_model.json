@@ -1,0 +1,534 @@
+{
+  "summary": {
+    "total": 55,
+    "covered": 55,
+    "uncovered": 0,
+    "matched": 37,
+    "mismatched": 18,
+    "coverage_rate": 1.0,
+    "accuracy_rate": 0.6727272727272727,
+    "local_model_available": true
+  },
+  "by_intent": {
+    "query_value": {
+      "total": 23,
+      "covered": 23,
+      "matched": 23
+    },
+    "query_trend": {
+      "total": 8,
+      "covered": 8,
+      "matched": 8
+    },
+    "query_comparison": {
+      "total": 9,
+      "covered": 9,
+      "matched": 3
+    },
+    "query_ranking": {
+      "total": 3,
+      "covered": 3,
+      "matched": 3
+    },
+    "drilldown": {
+      "total": 2,
+      "covered": 2,
+      "matched": 0
+    },
+    "greeting": {
+      "total": 1,
+      "covered": 1,
+      "matched": 0
+    },
+    "unknown": {
+      "total": 3,
+      "covered": 3,
+      "matched": 0
+    },
+    "volatility": {
+      "total": 2,
+      "covered": 2,
+      "matched": 0
+    },
+    "analysis": {
+      "total": 2,
+      "covered": 2,
+      "matched": 0
+    },
+    "recommendation": {
+      "total": 2,
+      "covered": 2,
+      "matched": 0
+    }
+  },
+  "cases": [
+    {
+      "query": "本月销售额是多少？",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9999978542327881,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [],
+      "time_expr": "本月",
+      "entities": [
+        {
+          "text": "本月",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 2,
+          "end": 5
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "本月销售额多少",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9998793601989746,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [],
+      "time_expr": "本月",
+      "entities": [
+        {
+          "text": "本月",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 2,
+          "end": 5
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "本月销售额",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9974314570426941,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [],
+      "time_expr": "本月",
+      "entities": [
+        {
+          "text": "本月",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 2,
+          "end": 5
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "销售额如何",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9987396597862244,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [],
+      "time_expr": null,
+      "entities": [
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 0,
+          "end": 3
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "销售额怎么样",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9999737739562988,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [],
+      "time_expr": null,
+      "entities": [
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 0,
+          "end": 3
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "智能云存储毛利率",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9964483976364136,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "毛利率",
+      "dimensions": [
+        "智能云存储"
+      ],
+      "time_expr": null,
+      "entities": [
+        {
+          "text": "智能云存储",
+          "type": "DIM_VALUE",
+          "start": 0,
+          "end": 5
+        },
+        {
+          "text": "毛利率",
+          "type": "METRIC",
+          "start": 5,
+          "end": 8
+        },
+        {
+          "text": "毛利",
+          "type": "METRIC",
+          "start": 5,
+          "end": 7
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "智能云存储销售额",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9984816908836365,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [
+        "智能云存储"
+      ],
+      "time_expr": null,
+      "entities": [
+        {
+          "text": "智能云存储",
+          "type": "DIM_VALUE",
+          "start": 0,
+          "end": 5
+        },
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 5,
+          "end": 8
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "上月智能云存储毛利率",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9993522763252258,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "毛利率",
+      "dimensions": [
+        "智能云存储"
+      ],
+      "time_expr": "上月",
+      "entities": [
+        {
+          "text": "上月",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "智能云存储",
+          "type": "DIM_VALUE",
+          "start": 2,
+          "end": 7
+        },
+        {
+          "text": "毛利率",
+          "type": "METRIC",
+          "start": 7,
+          "end": 10
+        },
+        {
+          "text": "毛利",
+          "type": "METRIC",
+          "start": 7,
+          "end": 9
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "本月一级品类销售额是多少？",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9999974966049194,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [
+        "一级品类"
+      ],
+      "time_expr": "本月",
+      "entities": [
+        {
+          "text": "本月",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "一级品类",
+          "type": "DIM",
+          "start": 2,
+          "end": 6
+        },
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 6,
+          "end": 9
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "本月三级品类销售额是多少？",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9999972581863403,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [
+        "三级品类"
+      ],
+      "time_expr": "本月",
+      "entities": [
+        {
+          "text": "本月",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "三级品类",
+          "type": "DIM",
+          "start": 2,
+          "end": 6
+        },
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 6,
+          "end": 9
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "本月各品类销售额是多少？",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.999997615814209,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "销售额",
+      "dimensions": [],
+      "time_expr": "本月",
+      "entities": [
+        {
+          "text": "本月",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "销售额",
+          "type": "METRIC",
+          "start": 5,
+          "end": 8
+        }
+      ],
+      "note": "可能被识别为drilldown"
+    },
+    {
+      "query": "当月美国站业绩",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9999827146530151,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "业绩",
+      "dimensions": [
+        "美国站"
+      ],
+      "time_expr": null,
+      "entities": [
+        {
+          "text": "美国站",
+          "type": "DIM_VALUE",
+          "start": 2,
+          "end": 5
+        },
+        {
+          "text": "业绩",
+          "type": "METRIC",
+          "start": 5,
+          "end": 7
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "今年德国亚马逊业绩",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9984413981437683,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "业绩",
+      "dimensions": [
+        "德国亚马逊",
+        "亚马逊"
+      ],
+      "time_expr": "今年",
+      "entities": [
+        {
+          "text": "今年",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "德国亚马逊",
+          "type": "DIM",
+          "start": 2,
+          "end": 7
+        },
+        {
+          "text": "亚马逊",
+          "type": "DIM_VALUE",
+          "start": 4,
+          "end": 7
+        },
+        {
+          "text": "业绩",
+          "type": "METRIC",
+          "start": 7,
+          "end": 9
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "今日GMV",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9974295496940613,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "GMV",
+      "dimensions": [],
+      "time_expr": "今日",
+      "entities": [
+        {
+          "text": "今日",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "GMV",
+          "type": "METRIC",
+          "start": 2,
+          "end": 5
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "今年我们一共被亚马逊抽水抽走了多少钱？",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9999967813491821,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": null,
+      "dimensions": [
+        "亚马逊"
+      ],
+      "time_expr": "今年",
+      "entities": [
+        {
+          "text": "今年",
+          "type": "TIME",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "text": "亚马逊",
+          "type": "DIM_VALUE",
+          "start": 7,
+          "end": 10
+        }
+      ],
+      "note": ""
+    },
+    {
+      "query": "上上个月这个10494卖了多少钱，并且告诉我数量",
+      "expected_intent": "query_value",
+      "parsed_intent": "query_value",
+      "confidence": 0.9999977350234985,
+      "parse_method": "local_model",
+      "covered": true,
+      "matched": true,
+      "metric": "卖了多少钱",
+      "dimensions": [
+        "10494"
+      ],
+      "time_expr": "上上个月",
+      "entities": [
+        {
+          "text": "上上个月",
+          "type": "TIME",
+          "start": 

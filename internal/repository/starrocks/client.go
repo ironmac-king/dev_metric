@@ -47,8 +47,8 @@ func newConnection(cfg *config.StarRocksConfig) (*sql.DB, error) {
 	}
 
 	// 设置连接池参数
-	newDB.SetMaxOpenConns(50)
-	newDB.SetMaxIdleConns(10)
+	newDB.SetMaxOpenConns(20)
+	newDB.SetMaxIdleConns(5)
 	newDB.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := newDB.Ping(); err != nil {
@@ -376,6 +376,57 @@ func QueryRawWithRetry(sqlStr string, attempt int) ([]map[string]interface{}, er
 		results = append(results, row)
 	}
 
+	return results, nil
+}
+
+// QueryRawWithArgs - parametrized query (SQL injection safe)
+func QueryRawWithArgs(sqlStr string, args ...interface{}) ([]map[string]interface{}, error) {
+	mu.RLock()
+	if db == nil {
+		mu.RUnlock()
+		if err := reconnectIfNeeded(); err != nil {
+			return nil, fmt.Errorf("StarRocks not connected: %w", err)
+		}
+		return QueryRawWithArgs(sqlStr, args...)
+	}
+	if err := db.Ping(); err != nil {
+		mu.RUnlock()
+		if err := reconnectIfNeeded(); err != nil {
+			return nil, fmt.Errorf("StarRocks connection lost: %w", err)
+		}
+		return QueryRawWithArgs(sqlStr, args...)
+	}
+	rows, err := db.Query(sqlStr, args...)
+	mu.RUnlock()
+	if err != nil {
+		return nil, fmt.Errorf("StarRocks query failed: %w", err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("get columns failed: %w", err)
+	}
+	var results []map[string]interface{}
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		valuePtrs := make([]interface{}, len(columns))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return nil, fmt.Errorf("scan row failed: %w", err)
+		}
+		row := make(map[string]interface{})
+		for i, col := range columns {
+			val := values[i]
+			if b, ok := val.([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = val
+			}
+		}
+		results = append(results, row)
+	}
 	return results, nil
 }
 

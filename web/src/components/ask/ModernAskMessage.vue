@@ -48,6 +48,13 @@
             </span>
           </div>
 
+          <div v-if="msg.supplementary_info?.length" class="supplement-strip">
+            <div v-for="info in msg.supplementary_info" :key="info.label" class="supplement-tag">
+              <span class="supplement-label">{{ info.label }}</span>
+              <span class="supplement-value">{{ info.value }}</span>
+            </div>
+          </div>
+
           <ClarificationCard
             v-if="msg.action_type === 'clarify' && msg.clarify_options"
             :options="msg.clarify_options"
@@ -90,6 +97,9 @@
                 {{ msg.analysis.health_score }}分
               </span>
             </div>
+            <div v-if="msg.analysis.summary" class="analysis-summary-text">
+              {{ msg.analysis.summary }}
+            </div>
             <div v-if="msg.analysis.top_urgent_action" class="analysis-alert">
               {{ msg.analysis.top_urgent_action }}
             </div>
@@ -101,9 +111,36 @@
               >
                 <div class="analysis-item-title">
                   <span class="analysis-item-metric">{{ item.metric || item.title || '重点' }}</span>
+                  <span v-if="item.itemType" :class="['analysis-item-type', `type-${item.itemType}`]">{{ item.itemType === 'urgent' ? '⚠️ 紧急' : item.itemType === 'warning' ? '⚡ 注意' : item.itemType }}</span>
                   <span v-if="item.conclusion" class="analysis-item-conclusion">{{ item.conclusion }}</span>
                 </div>
-                <div v-if="item.reason" class="analysis-item-reason">{{ item.reason }}</div>
+              </div>
+            </div>
+
+            <div v-if="showAttribution && msg.analysis.breakdown" class="attribution-breakdown">
+              <div v-if="mainDragItems.length" class="breakdown-section">
+                <div class="breakdown-title main-drag">主要拖累</div>
+                <div
+                  v-for="(item, itemIdx) in mainDragItems"
+                  :key="`${idx}-drag-${itemIdx}`"
+                  class="breakdown-item drag"
+                >
+                  <span class="dim-value">{{ item.dimension }}</span>
+                  <span class="change-value red">{{ item.mom != null ? (item.mom > 0 ? '+' : '') + item.mom.toFixed(1) + '%' : '' }}</span>
+                  <span class="contribution-rate">{{ item.impact || item.conclusion }}</span>
+                </div>
+              </div>
+              <div v-if="positiveItems.length" class="breakdown-section">
+                <div class="breakdown-title positive">正向贡献</div>
+                <div
+                  v-for="(item, itemIdx) in positiveItems"
+                  :key="`${idx}-positive-${itemIdx}`"
+                  class="breakdown-item positive"
+                >
+                  <span class="dim-value">{{ item.dimension }}</span>
+                  <span class="change-value green">{{ item.mom != null ? (item.mom > 0 ? '+' : '') + item.mom.toFixed(1) + '%' : '' }}</span>
+                  <span class="contribution-rate">{{ item.impact || item.conclusion }}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -138,21 +175,24 @@
                 v-for="suggestion in msg.suggest"
                 :key="suggestion"
                 class="followup-btn"
-                @click="$emit('select-suggestion', suggestion)"
+                @click="$emit('select-suggestion', suggestion, msg)"
               >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" class="followup-icon"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
                 {{ suggestion }}
               </button>
             </div>
           </div>
 
           <div class="assistant-actions">
-            <button
-              v-if="hasThinking"
-              class="assistant-action"
-              @click="$emit('open-process', msg)"
-            >
-              分析过程
-            </button>
+            <template v-if="reasoningSteps.length || hasThinking">
+              <button
+                class="assistant-action"
+                :class="{ active: showReasoning }"
+                @click="showReasoning = !showReasoning"
+              >
+                分析过程
+              </button>
+            </template>
             <button
               v-if="msg.interpretation"
               class="assistant-action"
@@ -178,6 +218,25 @@
             </button>
           </div>
 
+          <div v-if="showReasoning && reasoningSteps.length" class="reasoning-chain">
+            <div
+              v-for="rs in reasoningSteps"
+              :key="rs.label"
+              class="chain-step"
+            >
+              <span class="chain-icon">{{ rs.icon }}</span>
+              <span class="chain-label">{{ rs.label }}</span>
+              <span class="chain-value">{{ rs.value }}</span>
+            </div>
+            <button
+              v-if="hasThinking"
+              class="chain-expand-btn"
+              @click="$emit('open-process', msg)"
+            >
+              查看完整过程
+            </button>
+          </div>
+
           <div v-if="msg.interpretation && expandedInterpretation" class="interpretation-panel">
             {{ msg.interpretation }}
           </div>
@@ -188,7 +247,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
@@ -231,6 +290,8 @@ marked.setOptions({
   gfm: true,
 })
 
+const showReasoning = ref(false)
+
 const presentation = computed(() => buildAssistantPresentation(props.msg))
 
 const metaChips = computed(() => {
@@ -269,7 +330,7 @@ const highlightItems = computed(() => {
   if (Array.isArray(analysis.action_items) && analysis.action_items.length) {
     return analysis.action_items.slice(0, 2).map(item => ({
       title: item.text || item.title || '重点',
-      reason: item.type ? `[${item.type}]` : undefined,
+      itemType: item.type,
     }))
   }
   return []
@@ -279,11 +340,82 @@ const hasThinking = computed(() => {
   return Array.isArray(props.msg.thinkingSteps) && props.msg.thinkingSteps.length > 0
 })
 
+const reasoningSteps = computed(() => {
+  if (props.msg.role !== 'assistant' || props.msg.loading) return []
+  const steps = []
+
+  // 理解问题
+  const explanation = props.msg.explanation
+  if (explanation?.metric_meaning) {
+    steps.push({ icon: '\u{1F4A1}', label: '理解问题', value: explanation.metric_meaning })
+  } else if (props.msg.metricName) {
+    steps.push({ icon: '\u{1F4A1}', label: '理解问题', value: `查询${props.msg.metricName}` })
+  }
+
+  // 识别要素
+  const entityParts = []
+  if (props.msg.metricName) entityParts.push(`指标：${props.msg.metricName}`)
+  const timeRange = props.msg.timeRange || props.msg.mql?.time
+  if (timeRange?.original) entityParts.push(`时间：${timeRange.original}`)
+  else if (timeRange?.start) {
+    const s = String(timeRange.start).slice(0, 10)
+    const e = timeRange.end ? String(timeRange.end).slice(0, 10) : ''
+    entityParts.push(`时间：${s === e ? s : s + ' ~ ' + e}`)
+  }
+  if (props.msg.dimensionFilters?.length) {
+    const dims = props.msg.dimensionFilters.map(d => d.value || d.type || '').filter(Boolean).join('、')
+    if (dims) entityParts.push(`维度：${dims}`)
+  }
+  if (entityParts.length) {
+    steps.push({ icon: '\u{1F50D}', label: '识别要素', value: entityParts.join('，') })
+  }
+
+  // 查询数据
+  if (explanation?.data_source) {
+    steps.push({ icon: '\u{1F4CA}', label: '查询数据', value: `来源：${explanation.data_source}` })
+  }
+
+  // 得出结论
+  const resultParts = []
+  if (Array.isArray(props.msg.supplementary_info)) {
+    props.msg.supplementary_info.forEach(info => {
+      if (info.label && info.value) resultParts.push(`${info.label}${info.value}`)
+    })
+  }
+  if (props.msg.momChange != null) {
+    const v = props.msg.momChange
+    resultParts.push(`环比${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`)
+  }
+  if (props.msg.yoyChange != null) {
+    const v = props.msg.yoyChange
+    resultParts.push(`同比${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`)
+  }
+  if (resultParts.length) {
+    steps.push({ icon: '✅', label: '得出结论', value: resultParts.join('，') })
+  }
+
+  return steps
+})
+
 const healthClass = computed(() => {
   const score = props.msg?.analysis?.health_score
   if (score >= 90) return 'excellent'
   if (score >= 70) return 'good'
   return 'warning'
+})
+
+const mainDragItems = computed(() => {
+  if (!props.msg.analysis?.breakdown?.items) return []
+  return props.msg.analysis.breakdown.items.filter(item => item.role === 'main_drag')
+})
+
+const positiveItems = computed(() => {
+  if (!props.msg.analysis?.breakdown?.items) return []
+  return props.msg.analysis.breakdown.items.filter(item => item.role === 'positive_contributor')
+})
+
+const showAttribution = computed(() => {
+  return mainDragItems.value.length > 0 || positiveItems.value.length > 0
 })
 
 function renderHtml(text) {
@@ -430,6 +562,34 @@ function renderHtml(text) {
   color: #64748b;
 }
 
+.supplement-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.supplement-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #f8fafc;
+  border-radius: 6px;
+  font-size: 13px;
+  border: 1px solid #e2e8f0;
+}
+
+.supplement-label {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.supplement-value {
+  color: #0f172a;
+  font-weight: 500;
+}
+
 .analysis-summary-card,
 .interpretation-panel,
 .clarification-strip {
@@ -475,6 +635,14 @@ function renderHtml(text) {
   color: #b91c1c;
 }
 
+.analysis-summary-text {
+  margin-bottom: 12px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #374151;
+  font-weight: 500;
+}
+
 .analysis-alert {
   margin-bottom: 12px;
   font-size: 13px;
@@ -504,11 +672,92 @@ function renderHtml(text) {
   font-weight: 600;
 }
 
-.analysis-item-reason {
-  margin-top: 6px;
+.analysis-item-type {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.type-urgent {
+  background: #fef2f2;
+  color: #dc2626;
+}
+.type-warning {
+  background: #fffbeb;
+  color: #d97706;
+}
+.type-normal {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.attribution-breakdown {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.breakdown-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.breakdown-title {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  display: inline-block;
+  width: fit-content;
+}
+
+.breakdown-title.main-drag {
+  color: #dc2626;
+  background: #fee2e2;
+}
+
+.breakdown-title.positive {
+  color: #16a34a;
+  background: #dcfce7;
+}
+
+.breakdown-item {
+  display: flex;
+  gap: 8px;
   font-size: 13px;
-  line-height: 1.65;
-  color: #475569;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid #e2e8f0;
+  align-items: center;
+}
+
+.breakdown-item .dim-value {
+  flex: 1;
+  color: #0f172a;
+  font-weight: 500;
+}
+
+.breakdown-item .change-value {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.breakdown-item .change-value.red {
+  color: #dc2626;
+}
+
+.breakdown-item .change-value.green {
+  color: #16a34a;
+}
+
+.breakdown-item .contribution-rate {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .clarification-title,
@@ -534,6 +783,21 @@ function renderHtml(text) {
   transition: all 0.18s ease;
 }
 
+.followup-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.followup-icon {
+  color: #c9cdd4;
+  flex-shrink: 0;
+}
+
+.followup-btn:hover .followup-icon {
+  color: #3370ff;
+}
+
 .clarification-option:hover,
 .followup-btn:hover,
 .drilldown-btn:hover,
@@ -550,6 +814,69 @@ function renderHtml(text) {
   flex-wrap: wrap;
   align-items: center;
   opacity: 0.92;
+}
+
+.assistant-action.active {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #2563eb;
+}
+
+.reasoning-chain {
+  margin-top: 4px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+  border-radius: 14px;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chain-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+
+.chain-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.chain-label {
+  color: #64748b;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chain-value {
+  color: #1e293b;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-expand-btn {
+  margin-top: 6px;
+  padding: 5px 12px;
+  background: transparent;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #2563eb;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  align-self: flex-start;
+}
+
+.chain-expand-btn:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
 }
 
 .assistant-action.icon {

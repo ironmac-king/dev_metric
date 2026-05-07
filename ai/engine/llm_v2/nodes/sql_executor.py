@@ -103,6 +103,10 @@ class SQLExecutor:
                     f"{go_api_base}/api/v1/query/execute",
                     json={"sql": sql, "timeout": self._timeout},
                 )
+                # M5 fix: 先检查 HTTP 状态码，非 200 返回错误信息
+                if response.status_code != 200:
+                    logger.error(f"[SQLExecutor] HTTP error: {response.status_code}")
+                    return {"code": response.status_code, "message": f"HTTP {response.status_code}: {response.text[:200]}"}
                 return response.json()
         except httpx.TimeoutException:
             logger.error(f"[SQLExecutor] 请求超时: {self._timeout}s")

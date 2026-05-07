@@ -140,6 +140,10 @@ class StateManager:
 
         self._session_store.set_state(state)
 
+        # 成功案例自动索引到 RAG
+        if state.mql and state.sql_result and state.sql_result.is_success() and state.question:
+            await self._index_success_case(state)
+
     async def _ensure_current_mql_in_history(self, state: V2State) -> None:
         if not state.mql:
             return
@@ -151,6 +155,17 @@ class StateManager:
             logger.debug(f"[StateManager] history size={len(state.history_stack)}")
         except Exception as e:
             logger.error(f"[StateManager] save history failed: {e}")
+
+    async def _index_success_case(self, state: V2State) -> None:
+        """将成功的问答对自动索引到 RAG"""
+        from ..rag import rag_index
+        try:
+            mql_dict = state.mql.to_dict()
+            sql = state.sql or ""
+            await rag_index(state.question, mql_dict, sql)
+            logger.info(f"[StateManager] 自动索引成功案例: {state.question[:30]}")
+        except Exception as e:
+            logger.warning(f"[StateManager] 自动索引失败: {e}")
 
     async def get_state(self, session_id: str) -> Optional[V2State]:
         return self._session_store.get_state(session_id)

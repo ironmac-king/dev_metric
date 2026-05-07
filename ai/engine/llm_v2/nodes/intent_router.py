@@ -1419,12 +1419,27 @@ class IntentRouter:
         try:
             from ai.client.metric_client import MetricClient
 
+            # 已知维度列名（不应作为指标解析）
+            _KNOWN_DIM_NAMES = {
+                "sku": "SKU", "SKU": "SKU", "商品": "SKU", "产品": "SKU",
+                "asin": "ASIN", "ASIN": "ASIN",
+                "店铺": "FSITE", "站点": "FSITE", "平台": "PLATFORM",
+                "品牌": "FBRANDS", "品类": "GROUP_3", "类目": "GROUP_3",
+                "一级品类": "GROUP_1", "二级品类": "GROUP_2",
+                "三级品类": "GROUP_3", "四级品类": "GROUP_4",
+            }
+
             client = MetricClient()
             candidates = self._extract_additional_metric_candidates(question, add_keywords)
             resolved = []
             seen_keys = set()
 
             for candidate in candidates:
+                # 跳过已知维度名
+                if candidate.lower() in _KNOWN_DIM_NAMES or candidate in _KNOWN_DIM_NAMES:
+                    logger.info(f"[IntentRouter] 追问候选 '{candidate}' 是已知维度名，跳过指标解析")
+                    continue
+
                 metric_info = client.get_metric_by_name(candidate)
                 if not metric_info:
                     search_results = client.search_metrics(candidate, limit=3)
@@ -1473,11 +1488,18 @@ class IntentRouter:
                 if not candidate:
                     continue
 
+                # 硬编码兜底：已知维度列名直接映射
+                _KNOWN_DIM_COLS = {
+                    "SKU": "SKU", "sku": "SKU", "商品": "SKU", "产品": "SKU",
+                    "ASIN": "ASIN", "asin": "ASIN",
+                }
                 dim_code = ""
                 dim_label = candidate
                 upper_candidate = candidate.upper()
 
-                if upper_candidate in dim_label_to_code:
+                if candidate in _KNOWN_DIM_COLS or candidate.lower() in _KNOWN_DIM_COLS:
+                    dim_code = _KNOWN_DIM_COLS.get(candidate) or _KNOWN_DIM_COLS.get(candidate.lower(), "")
+                elif upper_candidate in dim_label_to_code:
                     dim_code = dim_label_to_code[upper_candidate]
                 elif candidate in dim_label_to_code:
                     dim_code = dim_label_to_code[candidate]

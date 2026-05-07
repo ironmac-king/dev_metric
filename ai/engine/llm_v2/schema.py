@@ -4,10 +4,13 @@ MQL Schema - V2 的强类型中间表示
 MQL (Metric Query Language) 是连接自然语言和 SQL 的桥梁，
 提供可审计、可验证的结构化查询描述。
 """
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Any, TypedDict, Literal, Annotated
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class MQLIntent(str, Enum):
@@ -51,6 +54,11 @@ class CalculationPattern(str, Enum):
 
     # 5. 趋势/走势
     TREND = "trend"                    # 趋势
+
+    # 6. 窗口函数
+    RUNNING_SUM = "running_sum"       # 累计求和
+    PARTITION_RATIO = "partition_ratio"  # 占比/份额
+    MA7 = "ma7"                       # 7日移动平均
 
     # 6. 集中度
     CONCENTRATION = "concentration"     # 集中度
@@ -120,6 +128,7 @@ class MQLMetric:
 
     # 语义层业务口径（从 Go API /api/v1/metadata/metrics/:id 透出）
     business_summary: str = ""         # 如"含税"、"不含退"
+    business_meaning: str = ""         # 完整业务含义描述（用于可解释性）
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -135,6 +144,7 @@ class MQLMetric:
             "molecule_metric": self.molecule_metric,
             "denominator_metric": self.denominator_metric,
             "business_summary": self.business_summary,
+            "business_meaning": self.business_meaning,
         }
 
 
@@ -341,16 +351,20 @@ class MQLSchema:
     @property
     def has_mom(self) -> bool:
         """是否有环比计算"""
-        if self.comparison and self.comparison.types:
-            return "环比" in self.comparison.types
-        return any(p.value == "mom" for p in (self.calculation_patterns or []))
+        from_comparison = bool(self.comparison and self.comparison.types and "环比" in self.comparison.types)
+        from_patterns = any(p.value == "mom" for p in (self.calculation_patterns or []))
+        if from_comparison and from_patterns:
+            logger.warning("[MQLSchema] has_mom conflict: comparison.types 和 calculation_patterns 同时设置了环比")
+        return from_comparison or from_patterns  # M4 fix: 两个来源用 OR，任何一个为真都计算
 
     @property
     def has_yoy(self) -> bool:
         """是否有同比计算"""
-        if self.comparison and self.comparison.types:
-            return "同比" in self.comparison.types
-        return any(p.value == "yoy" for p in (self.calculation_patterns or []))
+        from_comparison = bool(self.comparison and self.comparison.types and "同比" in self.comparison.types)
+        from_patterns = any(p.value == "yoy" for p in (self.calculation_patterns or []))
+        if from_comparison and from_patterns:
+            logger.warning("[MQLSchema] has_yoy conflict: comparison.types 和 calculation_patterns 同时设置了同比")
+        return from_comparison or from_patterns  # M4 fix: 两个来源用 OR，任何一个为真都计算
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -674,6 +688,7 @@ class V2State:
     sql_result: Optional[SQLResult] = None  # SQL 执行结果
     answer: str = ""                   # 最终回答
     error: str = ""                    # 错误信息
+    supplementary_info: List[Dict[str, Any]] = field(default_factory=list)  # 补充信息（同比/环比等）
 
     # ===== 触发分析结果 =====
     analysis: Optional[Dict[str, Any]] = None  # 触发分析输出（AnalysisOutput.to_dict()）
@@ -705,15 +720,25 @@ class V2State:
     # ===== 语义快照缓存（router 写入，节点直接读取） =====
     _snapshot: Optional[Dict[str, Any]] = None  # SemanticSnapshotService 快照
 
+    # ===== 指标分析能力配置 =====
+    metric_capability: Dict[str, Any] = field(default_factory=dict)  # 从语义快照获取
+    one_sentence_summary: str = ""   # 一句话核心结论
+    analysis_summary: str = ""       # 详细分析摘要
+
     # ===== 状态控制 =====
     current_step: str = ""             # 当前步骤
     retry_count: int = 0              # 重试次数
     max_retries: int = 3              # 最大重试次数
     source: str = ""                  # 数据来源：followup=追问，llm=LLM生成，local_model=本地模型
 
+    # ===== 可解释性 =====
+    explanation: Optional[Dict[str, str]] = None  # 字段解释信息（指标含义、维度、时间等）
+
     # ===== 泛指维度处理 =====
     is_generic_result: bool = False   # 是否为泛指默认结果
     clarification_options: List[Dict[str, Any]] = field(default_factory=list)  # 细化选项
+    needs_clarification: bool = False  # 槽位消解引擎设置的追问标志
+    clarification_message: Optional[str] = ""  # 追问消息
 
     def add_thinking_step(self, step: str, status: str = "completed",
                           content: str = None, llm_used: bool = False,

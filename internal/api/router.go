@@ -281,6 +281,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			query.POST("/execute", handler.ExecuteQuery)
 		}
 
+			// 产品详情（供前端按需查询）
+			product := v1.Group("/product")
+			{
+				product.POST("/details", handler.GetProductDetails)
+			}
+
 		// 维度配置（改造为从 dim_value_mapping 聚合，不再操作 dimension_configs 表）
 		dimension := v1.Group("/dimension-configs")
 		{

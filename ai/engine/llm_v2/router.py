@@ -641,6 +641,7 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "category": step_state.get("category", ""),
                         "explanation": step_state.get("explanation"),
                         "kpi_tooltip": step_state.get("kpi_tooltip"),
+                        "dim_mom_data": step_state.get("dim_mom_data"),
                     }).to_sse()
 
             # 发送完成事件
@@ -837,6 +838,8 @@ async def _stream_graph(graph, state: V2State):
                     "explanation": getattr(state_update, 'explanation', None),
                     # 核心指标 tooltip（业务定义 + 对比期间）
                     "kpi_tooltip": getattr(state_update, 'kpi_tooltip', None),
+                    # 维度环比数据（供 ChartCard 注入表格）
+                    "dim_mom_data": getattr(state_update, 'dim_mom_data', None),
                     # 一句话结论和详细摘要
                     "one_sentence_summary": getattr(state_update, 'one_sentence_summary', ''),
                     "analysis_summary": getattr(state_update, 'analysis_summary', ''),

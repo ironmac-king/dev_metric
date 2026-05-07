@@ -21,7 +21,7 @@ from datetime import datetime
 
 from ai.config.logging_config import get_logger
 from ai.config.runtime import get_go_api_base
-from .schema import V2State, MQLSchema, MQLDimension, push_history
+from .schema import V2State, MQLSchema, MQLDimension, push_history, MQLIntent
 from .observability import get_tracer, create_trace_context
 from ai.client.metric_client import MetricClient
 from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
@@ -151,6 +151,10 @@ async def intent_router(state: V2State):
                 )
                 span.set_attribute("result.type", "clarification_needed")
             else:
+                # 寒暄：直接设置回答，跳过后续 SQL 链路
+                if state.mql and state.mql.intent == MQLIntent.GREETING:
+                    state.answer = '你好！我是智能问数助手，可以帮你查询业务指标数据。比如你可以问我：「近30天销售额是多少」、「各SKU利润排名」等。'
+                    logger.info("[intent_router] 寒暄意图，跳过后续节点")
                 state.add_thinking_step(
                     "intent_router",
                     status="completed",
@@ -1293,6 +1297,8 @@ async def result_analyzer(state: V2State) -> V2State:
         state.explanation = result.get("explanation")  # 可解释性信息
         if result.get("kpi_tooltip"):
             state.kpi_tooltip = result["kpi_tooltip"]
+        if result.get("dim_mom_data"):
+            state.dim_mom_data = result["dim_mom_data"]
         logger.info(f"[result_analyzer] saved supplementary_info={state.supplementary_info}, suggestions_count={len(state.context_cache.suggestions)}")
         # 保存结构化的追问选项（供前端渲染按钮）
         if result.get("clarification_options"):
@@ -1449,8 +1455,24 @@ def create_v2_graph():
     builder.set_entry_point("intent_router")
 
     # 定义边
-    # 1. intent_router → context_enhancer（正常流程）
-    builder.add_edge("intent_router", "context_enhancer")
+    # 1. intent_router → 条件边（寒暄/追问直接结束，否则继续 context_enhancer）
+    def route_after_intent_router(state: V2State) -> str:
+        # 寒暄意图：跳过后续 SQL 链路
+        if state.mql and state.mql.intent == MQLIntent.GREETING:
+            return "end"
+        # 追问/泛指维度：直接结束
+        if state.error:
+            return "end"
+        return "context_enhancer"
+
+    builder.add_conditional_edges(
+        "intent_router",
+        route_after_intent_router,
+        {
+            "context_enhancer": "context_enhancer",
+            "end": END,
+        }
+    )
 
     # 2. context_enhancer → mql_generator
     builder.add_edge("context_enhancer", "mql_generator")
@@ -1617,6 +1639,11 @@ class V2Graph:
             logger.info(f"[ainvoke] 需要追问，中断流程")
             return state
 
+        # 寒暄意图：直接返回问候，跳过后续 SQL 链路
+        if state.mql and state.mql.intent == MQLIntent.GREETING:
+            logger.info(f"[ainvoke] 寒暄意图，中断流程，返回问候")
+            return state
+
         state = await context_enhancer(state)
         state = await mql_generator(state)
 
@@ -1706,6 +1733,12 @@ class V2Graph:
             if hasattr(state.context_cache, 'clarification_message') and state.context_cache.clarification_message:
                 state.clarification_message = state.context_cache.clarification_message
             logger.info(f"[astream] 需要追问，中断流程")
+            yield state
+            return
+
+        # 寒暄意图：直接返回问候，跳过后续 SQL 链路
+        if state.mql and state.mql.intent == MQLIntent.GREETING:
+            logger.info(f"[astream] 寒暄意图，中断流程，返回问候")
             yield state
             return
 

@@ -26,6 +26,7 @@ export function buildAssistantMessage({
   finalMetricUnit,
   finalExplanation,
   finalKpiTooltip,
+  finalDimMomData,
 }) {
   let displayAnswer = finalAnswer
   if (!displayAnswer && finalResultData && finalResultData.length > 0) {
@@ -71,13 +72,31 @@ export function buildAssistantMessage({
         : '抱歉，我没有找到相关数据。')
   }
 
+  // 将环比变化注入到 resultData 行中
+  let enrichedResultData = finalResultData
+  if (finalDimMomData && finalResultData && finalResultData.length > 0) {
+    const dimKey = Object.keys(finalResultData[0]).find(k =>
+      ['SKU', 'ASIN', 'FSITE', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'PLATFORM'].includes(k)
+    )
+    if (dimKey) {
+      enrichedResultData = finalResultData.map(row => {
+        const dimVal = String(row[dimKey] || '')
+        const momInfo = finalDimMomData[dimVal]
+        if (momInfo) {
+          return { ...row, ...momInfo }
+        }
+        return row
+      })
+    }
+  }
+
   return {
     role: 'assistant',
     content: finalContent,
     sql: finalSql,
     thinkingSteps: finalSteps,
     mql: extractedMql,
-    resultData: finalResultData,
+    resultData: enrichedResultData,
     metricName: finalMetricName,
     metricNames: finalMetricNames,
     analysis: finalAnalysis,

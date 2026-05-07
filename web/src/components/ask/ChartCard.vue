@@ -89,7 +89,8 @@
         <tbody>
           <tr v-for="(row, idx) in sortedPaginatedData" :key="idx">
             <td v-for="(key, colIdx) in tableKeys" :key="key" :class="{ numeric: isNumericColumn(key, row[key]) }">
-              {{ formatTableCell(key, row[key], colIdx) }}
+              <span v-if="isSkuColumn(key)" class="sku-link" @click="openProductDetail(row[key])">{{ formatTableCell(key, row[key], colIdx) }}</span>
+              <template v-else>{{ formatTableCell(key, row[key], colIdx) }}</template>
             </td>
           </tr>
         </tbody>
@@ -139,12 +140,24 @@
         </div>
       </transition>
     </teleport>
+
+    <!-- SKU 产品详情弹窗 -->
+    <el-dialog
+      v-model="productDialogVisible"
+      title="商品详情"
+      width="400px"
+      :append-to-body="true"
+      destroy-on-close
+    >
+      <ProductCard v-if="selectedSku" :sku="selectedSku" />
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import * as echarts from 'echarts'
+import ProductCard from './ProductCard.vue'
 
 const props = defineProps({
   data: {
@@ -230,6 +243,14 @@ const pageSize = ref(10)
 // 排序
 const sortKey = ref('')
 const sortOrder = ref('') // 'asc' | 'desc' | ''
+
+const productDialogVisible = ref(false)
+const selectedSku = ref('')
+
+function openProductDetail(sku) {
+  selectedSku.value = String(sku)
+  productDialogVisible.value = true
+}
 
 // 排序后且分页的数据
 const sortedPaginatedData = computed(() => {
@@ -391,6 +412,10 @@ function isNumericColumn(key, val) {
     return false
   }
   return typeof val === 'number'
+}
+
+function isSkuColumn(key) {
+  return key === 'SKU'
 }
 
 // 已知维度列名（用于过滤 metricNames 中的维度名）
@@ -659,6 +684,11 @@ const chartType = computed(() => {
 
   // 多维度非时间数据（如一级品类+站点）不适合图表，用表格
   if (dimensionKeys.length > 1 && !hasTimeColumn && !isTimeSeries) {
+    return 'table'
+  }
+
+  // SKU 维度数据用表格（SKU 编码长，条形图可读性差，且需要点击查看产品详情）
+  if (dimensionKeys.some(k => k === 'SKU')) {
     return 'table'
   }
 
@@ -1206,6 +1236,16 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.sku-link {
+  color: #00B078;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sku-link:hover {
+  color: #00A06B;
+}
+
 .chart-card {
   background: #fff;
   border-radius: 12px;

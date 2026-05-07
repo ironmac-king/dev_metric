@@ -204,12 +204,19 @@ class SemanticSnapshotService:
         }
         if metric_entry.get("unit"):
             result["unit"] = metric_entry["unit"]
-        if metric_entry.get("table"):
+        # 优先读取 starrocks_table/starrocks_field（快照中的标准 key）
+        if metric_entry.get("starrocks_table"):
+            result["starrocks_table"] = metric_entry["starrocks_table"]
+        elif metric_entry.get("table"):
             result["starrocks_table"] = metric_entry["table"]
-        if metric_entry.get("field"):
+        if metric_entry.get("starrocks_field"):
+            result["starrocks_field"] = metric_entry["starrocks_field"]
+        elif metric_entry.get("field"):
             result["starrocks_field"] = metric_entry["field"]
         if metric_entry.get("starrocks_sql"):
             result["starrocks_sql"] = metric_entry["starrocks_sql"]
+        if metric_entry.get("agg_expression"):
+            result["agg_expression"] = metric_entry["agg_expression"]
         return result
 
     def list_dimension_options(self) -> List[Dict[str, str]]:
@@ -643,6 +650,14 @@ class SemanticSnapshotService:
         capabilities = (snapshot or {}).get("capabilities", {}) or {}
         if not metric_code:
             return {}
+        return capabilities.get(f"metric:{metric_code}", {}) or {}
+
+    def get_metric_capability(self, snapshot: dict, metric_code: str) -> Dict[str, Any]:
+        """从语义快照获取指标分析能力配置，供 graph 节点调用"""
+        if not snapshot or not metric_code:
+            return {}
+        # snapshot 已经是 payload 对象，capabilities 在 snapshot.capabilities 下
+        capabilities = snapshot.get("capabilities", {}) or {}
         return capabilities.get(f"metric:{metric_code}", {}) or {}
 
     def _get_default_comparison_type(self, scene_type: str = "comparison") -> str:

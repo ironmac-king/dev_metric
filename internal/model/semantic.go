@@ -70,6 +70,12 @@ type SemanticMetric struct {
 	UpdatedBy                 string      `json:"updated_by" gorm:"size:64"`
 	CreatedAt                 time.Time   `json:"created_at"`
 	UpdatedAt                 time.Time   `json:"updated_at"`
+	// CTE 渲染所需字段
+	AggExpression   string `json:"agg_expression" gorm:"size:500"`
+	MetricType      string `json:"metric_type" gorm:"size:20;default:atomic"`
+	StarRocksTable  string `json:"starrocks_table" gorm:"size:128"`
+	StarRocksField  string `json:"starrocks_field" gorm:"size:128"`
+	StarRocksSQL    string `json:"starrocks_sql" gorm:"type:text"`
 }
 
 func (SemanticMetric) TableName() string {

@@ -16,9 +16,10 @@ redis-server
 cd C:/Users/4014/Desktop/DEV2_METRIC/dev_metric
 go run ./cmd/server
 
-# Python AI 服务 (port 8081) - ai/main.py 是 async FastAPI 应用
+# Python AI 服务 (port 18081) - ai/main.py 是 async FastAPI 应用
+# ⚠️ 启动时必须设置 USE_SEMANTIC_LAYER=1 启用统一语义层
 cd C:/Users/4014/Desktop/DEV2_METRIC/dev_metric
-python -m uvicorn ai.main:app --port 8081
+USE_SEMANTIC_LAYER=1 python -m uvicorn ai.main:app --port 18081
 
 # 前端 (port 3001)
 cd C:/Users/4014/Desktop/DEV2_METRIC/dev_metric/web
@@ -41,13 +42,13 @@ go mod tidy
 
 ```
 ┌─────────────────────────┬────────────────────────────────────────────────┐
-│  Vue 3 前端 (port 3001) │  Python AI 服务 (port 8081)                   │
+│  Vue 3 前端 (port 3002) │  Python AI 服务 (port 18081)                  │
 │  Element Plus            │  FastAPI + async 对话引擎 │ LLM │ 规则引擎    │
 └────────────┬────────────┴──────────────────────┬─────────────────────────┘
              │ HTTP REST API                      │
              ▼                                    ▼
 ┌─────────────────────────┬──────────────────────┬─────────────────────────┐
-│  Go 后端 Gin (port 8080)│                      │  指标元数据 API          │
+│  Go 后端 Gin (port 18080)│                     │  指标元数据 API          │
 │  指标管理 │ 告警 │ Dashboard│◄─────────────────│  (语义知识库)            │
 └───────────┬─────────────┴──────────────────────┴─────────────────────────┘
             │                                        │
@@ -194,7 +195,7 @@ current_metric_code, current_metric_name, current_time_expr, current_dimensions
 | 服务 | 端口 | 入口 |
 |------|------|------|
 | Go 后端 | 18080 | `go run ./cmd/server` |
-| Python AI | 18081 | `python -m uvicorn ai.main:app --port 18081` |
+| Python AI | 18081 | `USE_SEMANTIC_LAYER=1 python -m uvicorn ai.main:app --port 18081` |
 | Vue 前端 | 3002 | `cd web && npm run dev` |
 
 ## 数据库

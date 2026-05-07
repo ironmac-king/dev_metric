@@ -243,10 +243,11 @@ class FieldExtractor:
 
         # 复合占比 SQL：提取 / 前面的表达式
         if '/' in sql_upper:
-            # 匹配 / 前面的完整聚合表达式
+            # M6 fix: 扩展正则支持嵌套括号和更多聚合函数（COUNT_DISTINCT等）
+            # 使用 \(.*?\) 非贪婪匹配来支持嵌套括号
             match = re.search(
-                r'(?:^|[+\-*\s])(\(?\s*(?:SUM|AVG|COUNT|MAX|MIN)\s*\([^)]+\))(?:\s*/|$)',
-                sql_upper, re.IGNORECASE
+                r'(?:^|[+\-*\s])(\(?\s*(?:SUM|AVG|COUNT|MAX|MIN|COUNT_DISTINCT)\s*\(.*?\))(?:\s*/|$)',
+                sql_upper, re.IGNORECASE | re.DOTALL
             )
             if match:
                 return match.group(1)
@@ -274,10 +275,10 @@ class FieldExtractor:
 
         # 复合占比 SQL：提取 / 后面的表达式
         if '/' in sql_upper:
-            # 匹配 / 后面的完整聚合表达式
+            # M6 fix: 扩展正则支持嵌套括号和更多聚合函数（COUNT_DISTINCT等）
             match = re.search(
-                r'/\s*(\(?\s*(?:SUM|AVG|COUNT|MAX|MIN)\s*\([^)]+\))',
-                sql_upper, re.IGNORECASE
+                r'/\s*(\(?\s*(?:SUM|AVG|COUNT|MAX|MIN|COUNT_DISTINCT)\s*\(.*?\))',
+                sql_upper, re.IGNORECASE | re.DOTALL
             )
             if match:
                 return match.group(1)

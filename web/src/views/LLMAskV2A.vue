@@ -23,7 +23,7 @@
                   <path d="M22 42V30M34 46V22M46 38V26" stroke="#F8FAFC" stroke-width="5" stroke-linecap="round"/>
                 </svg>
               </div>
-              <h1 class="welcome-text">{{ greetingText }}，把问题直接抛给我，我先给你结论，再补证据和下一步。</h1>
+              <h1 class="welcome-text">{{ greetingText }}，想看什么数据跟我说。</h1>
             </div>
 
             <!-- 快捷功能胶囊栏 -->
@@ -1301,7 +1301,7 @@ function selectSuggestion(s, contextMsg = null) {
         if (typeof dim === 'object' && dim !== null) {
           // 处理对象如 {value: '智能云存储', column: 'GROUP_2', ...}
           // 优先取 value 字段
-          if (dim.value !== undefined) {
+          if (dim.value !== undefined && dim.value !== null) {
             return String(dim.value)
           }
           // 否则取第一个键值对
@@ -1309,7 +1309,7 @@ function selectSuggestion(s, contextMsg = null) {
           return entries.length > 0 ? String(entries[0][1]) : ''
         }
         return String(dim)
-      }).filter(v => v) // 过滤空值
+      }).filter(v => v && v !== 'null') // 过滤空值和 "null"
     } else if (typeof dimensionFilters === 'object' && dimensionFilters !== null) {
       // 处理单个对象
       dimensionFilters = Object.entries(dimensionFilters).map(([k, v]) => String(v))

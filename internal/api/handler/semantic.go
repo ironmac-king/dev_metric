@@ -282,7 +282,7 @@ func PublishSemanticSnapshot(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&req)
 
-	snapshotID := c.Param("snapshot_id")
+	snapshotID := c.Param("id")
 	if snapshotID == "" {
 		response.Error(c, response.CodeBadRequest, "snapshot_id 不能为空")
 		return
@@ -306,7 +306,7 @@ func RollbackSemanticSnapshot(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&req)
 
-	snapshotID := c.Param("snapshot_id")
+	snapshotID := c.Param("id")
 	if snapshotID == "" {
 		response.Error(c, response.CodeBadRequest, "snapshot_id 不能为空")
 		return

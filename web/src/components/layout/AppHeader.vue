@@ -144,6 +144,7 @@ const navItems = [
       { label: 'AI 问数', path: '/ai-assistant' },
       { label: 'LLM.V1', path: '/llm-ask' },
       { label: 'LLM.V2', path: '/llm-ask-v2' },
+      { label: 'LLM.V2 豆包', path: '/llm-ask-v2b' },
       { label: '问数分析', path: '/ask-analysis' },
       { label: '决策分析', path: '/analysis' },
     ]

@@ -85,35 +85,35 @@ class DataQualityChecker:
         if not data or len(data) < 3:
             return []
 
-        # 找到数值列
-        numeric_values = []
-        numeric_key = None
-
+        # 动态检测数值列
+        numeric_cols: Dict[str, List[float]] = {}
         for row in data:
             for key, value in row.items():
-                if key.lower() in ("销售额", "订单量", "访客数", "销售额", "金额"):
+                if key not in numeric_cols:
                     try:
-                        numeric_values.append(float(str(value).replace(",", "")))
-                        numeric_key = key
-                        break
+                        numeric_cols[key] = []
+                    except Exception:
+                        pass
+                if key in numeric_cols:
+                    try:
+                        numeric_cols[key].append(float(str(value).replace(",", "")))
                     except (ValueError, TypeError):
-                        continue
+                        numeric_cols[key] = []  # 非数值列，清空标记
 
-        if not numeric_values or len(numeric_values) < 3:
-            return []
+        # 只保留纯数值列（所有值都能转为 float）
+        pure_numeric = {k: v for k, v in numeric_cols.items() if len(v) == len(data)}
 
-        # 计算均值和标准差
-        mean = sum(numeric_values) / len(numeric_values)
-        variance = sum((x - mean) ** 2 for x in numeric_values) / len(numeric_values)
-        std = variance ** 0.5
-
-        if std == 0:
-            return []
-
-        # 找出异常值
         outliers = []
-        for i, value in enumerate(numeric_values):
-            if abs(value - mean) > self.OUTLIER_THRESHOLD * std:
-                outliers.append(value)
+        for col_name, values in pure_numeric.items():
+            if len(values) < 3:
+                continue
+            mean = sum(values) / len(values)
+            variance = sum((x - mean) ** 2 for x in values) / len(values)
+            std = variance ** 0.5
+            if std == 0:
+                continue
+            for value in values:
+                if abs(value - mean) > self.OUTLIER_THRESHOLD * std:
+                    outliers.append({"column": col_name, "value": value})
 
         return outliers

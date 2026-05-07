@@ -42,6 +42,8 @@ class ContextEnhancer:
             {
                 "similar_cases": [...],  # 相似案例列表
                 "suggested_mql": MQLSchema,  # 建议的 MQL
+                "suggested_sql": str,  # 建议复用的 SQL
+                "direct_reuse": bool,  # 是否直接复用
             }
         """
         logger.info(f"[ContextEnhancer] 增强上下文: {question[:50]}...")
@@ -53,16 +55,24 @@ class ContextEnhancer:
         enhanced_context = {
             "similar_cases": similar_cases,
             "suggested_mql": None,
+            "suggested_sql": None,
+            "direct_reuse": False,
         }
 
-        # 3. 如果有高相似度案例，建议复用
+        # 3. 如果有高相似度案例，建议复用（>0.85 直接复用 MQL；>0.90 连 SQL 也复用）
         if similar_cases and similar_cases[0].get("similarity", 0) > 0.85:
             mql_data = similar_cases[0].get("metadata", {}).get("mql")
+            sql_text = similar_cases[0].get("metadata", {}).get("sql", "")
             if mql_data:
                 try:
                     suggested_mql = MQLSchema.from_dict(mql_data)
                     enhanced_context["suggested_mql"] = suggested_mql
                     logger.info(f"[ContextEnhancer] 高相似度匹配: similarity={similar_cases[0]['similarity']:.2f}")
+                    # >0.90 时连 SQL 一起复用，跳过 mql_generator + sql_generator
+                    if similar_cases[0].get("similarity", 0) > 0.90 and sql_text:
+                        enhanced_context["suggested_sql"] = sql_text
+                        enhanced_context["direct_reuse"] = True
+                        logger.info(f"[ContextEnhancer] 模板复用: similarity={similar_cases[0]['similarity']:.2f}, sql复用=True")
                 except Exception as e:
                     logger.warning(f"[ContextEnhancer] MQL 解析失败: {e}")
 

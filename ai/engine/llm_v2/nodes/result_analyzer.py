@@ -42,6 +42,8 @@ class ResultAnalyzer:
     def __init__(self):
         self._llm_engine = get_llm_engine()
         self._semantic_service = None
+        from ai.config.runtime import get_go_api_base
+        self._go_api_base = get_go_api_base()
 
     def _get_semantic_service(self):
         """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
@@ -448,18 +450,31 @@ class ResultAnalyzer:
             sections.append(f"**{_CN[_si - 1]}、数据图表**\n（前端展示）")
 
         # 维度明细（有多维度才出，先构建内容再判断是否有效）
+        dim_detail_has_contribution = False
         if has_multi_dim:
             dim_text = ""
             if analysis and analysis.get("breakdown"):
                 dim_text = self._build_dim_value_text(analysis["breakdown"])
             elif data:
-                dim_text = self._build_dim_detail_text(mql, data)
+                # 数据 >= 3 行且有维度和时间范围时，尝试异步版本（涨跌幅+贡献度）
+                if len(data) >= 3 and mql.time and mql.time.start and mql.time.end:
+                    try:
+                        dim_text, dim_mom = await self._build_dim_detail_text_async(mql, data)
+                        if dim_text:
+                            dim_detail_has_contribution = True
+                        if dim_mom:
+                            result["dim_mom_data"] = dim_mom
+                    except Exception as e:
+                        logger.warning(f"[ResultAnalyzer] 异步维度明细失败，回退: {e}")
+                        dim_text = self._build_dim_detail_text(mql, data)
+                else:
+                    dim_text = self._build_dim_detail_text(mql, data)
             if dim_text and dim_text.strip("：\n "):
                 _si += 1
                 sections.append(f"**{_CN[_si - 1]}、维度明细**\n" + dim_text)
 
-        # 归因分析（有涨跌波动才出，先构建内容再判断是否有效）
-        if has_fluctuation:
+        # 归因分析（有涨跌波动才出，但如果维度明细已含贡献度则隐藏）
+        if has_fluctuation and not dim_detail_has_contribution:
             attr_text = self._build_attribution_text(analysis["breakdown"])
             if attr_text and attr_text.strip("：\n "):
                 _si += 1
@@ -1320,27 +1335,264 @@ class ResultAnalyzer:
     def _build_dim_detail_text(self, mql: MQLSchema, data: list) -> str:
         """从 sql_result 提取维度明细文本"""
         col_map = self._build_col_map(mql)
-        metric_columns = set()
-        if mql.metric and mql.metric.name:
-            metric_columns.add(mql.metric.name)
-        if mql.metrics:
-            for m in mql.metrics:
-                if m.name:
-                    metric_columns.add(m.name)
+        # 已知维度列（不做数值格式化）
+        dim_keys = {'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4',
+                    'FSITE', 'FSITECODE', 'PLATFORM', 'BRAND', 'MONTHS', 'FDATE',
+                    'FDATE_START', 'FDATE_END', 'FCOUNTRY', 'REGION', 'FCHANNEL',
+                    '一级品类', '二级品类', '三级品类', '四级品类', '站点', '亚马逊站点',
+                    '店铺', '平台', '品牌', '日期', '月份'}
+        # 百分比类指标关键词
+        pct_keywords = ["毛利率", "净利率", "转化率", "比率", "占比", "百分比"]
 
         lines = []
         for row in data[:10]:
             parts = []
             for k, v in row.items():
                 display_k = col_map.get(k, k)
-                if k in metric_columns or self._is_metric_column(k):
-                    parts.append(f"{display_k}：{self._format_value(v)}")
-                else:
+                # 清洗列名：去掉 _raw、当前值后缀
+                display_k = re.sub(r'_raw$', '', display_k)
+                display_k = display_k.replace("当前值", "")
+                # 维度列直接显示原值
+                if k in dim_keys:
+                    parts.append(f"{display_k}：{v}")
+                    continue
+                # 数值列：格式化
+                try:
+                    num = float(str(v).replace(",", "")) if v is not None else None
+                    if num is None:
+                        parts.append(f"{display_k}：N/A")
+                        continue
+                    # 百分比指标：值 <= 1 时视为比率
+                    is_pct = any(kw in display_k or kw in k for kw in pct_keywords)
+                    if is_pct and abs(num) <= 1.0:
+                        parts.append(f"{display_k}：{num * 100:.2f}%")
+                    else:
+                        parts.append(f"{display_k}：{self._format_value(num)}")
+                except (ValueError, TypeError):
                     parts.append(f"{display_k}：{v}")
             lines.append("，".join(parts))
         if len(data) > 10:
             lines.append(f"... 还有 {len(data) - 10} 条")
         return "\n".join(lines)
+
+    async def _query_prev_period_data(
+        self,
+        table_name: str,
+        metric_field: str,
+        dim_col: str,
+        mom_start_str: str,
+        mom_end_str: str,
+    ) -> Dict[str, float]:
+        """查询上期各维度的汇总值，返回 {维度值: 数值}"""
+        sql = (
+            f"SELECT {dim_col}, SUM({metric_field}) AS val "
+            f"FROM {table_name} "
+            f"WHERE FDATE >= '{mom_start_str}' AND FDATE <= '{mom_end_str}' "
+            f"GROUP BY {dim_col}"
+        )
+        logger.info(f"[ResultAnalyzer] 查询上期数据: {sql}")
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{self._go_api_base}/api/v1/query/execute",
+                    json={"sql": sql, "timeout": 30},
+                )
+                data = resp.json()
+                rows = None
+                if data.get("code") == 0 and data.get("data"):
+                    inner = data["data"]
+                    rows = inner.get("data") if isinstance(inner, dict) else inner
+                elif "columns" in data:
+                    rows = data.get("data")
+                if not rows or not isinstance(rows, list):
+                    logger.warning(f"[ResultAnalyzer] 上期数据查询无结果: {sql[:80]}")
+                    return {}
+                result = {}
+                for row in rows:
+                    key = row.get(dim_col) or row.get(list(row.keys())[0]) if row else None
+                    val = row.get("val") or row.get(list(row.keys())[1]) if row else None
+                    if key is not None and val is not None:
+                        result[str(key)] = float(val)
+                return result
+        except Exception as e:
+            logger.warning(f"[ResultAnalyzer] 上期数据查询失败: {e}")
+            return {}
+
+    @staticmethod
+    def _get_change_label(change_pct: float) -> str:
+        """根据涨跌幅返回变化标签"""
+        if change_pct >= 30:
+            return "大幅增长"
+        elif change_pct >= 5:
+            return "小幅增长"
+        elif change_pct >= -5:
+            return "持平"
+        elif change_pct >= -30:
+            return "小幅下滑"
+        else:
+            return "大幅下滑"
+
+    async def _build_dim_detail_text_async(self, mql: MQLSchema, data: list) -> tuple:
+        """维度明细：涨跌幅表 + 贡献度 TOP3（需要查上期数据）
+
+        Returns:
+            (text, dim_mom_data) tuple:
+                text: 贡献度TOP3文本
+                dim_mom_data: {sku: {环比变化, 变化标签}} 供前端注入
+        """
+        import datetime
+        from dateutil.relativedelta import relativedelta
+
+        # 1. 识别维度列和指标列
+        dim_keys = {'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4',
+                    'FSITE', 'FSITECODE', 'PLATFORM', 'FBRANDS', 'FCOUNTRY',
+                    'FREGION', 'FCHANNEL', 'FPRODUCTLINE', 'FADTYPE'}
+
+        dim_col = None
+        metric_col = None
+        if not data:
+            return "", {}
+        first_row = data[0]
+        for k in first_row.keys():
+            upper_k = k.upper().rstrip("_RAW")
+            if upper_k in dim_keys or k in dim_keys:
+                dim_col = k
+                break
+        if not dim_col:
+            return self._build_dim_detail_text(mql, data), {}
+
+        # 找指标列（非维度列、非时间列、非 _change/_val 后缀的数值列）
+        skip_suffixes = ("_MOM_VAL", "_YOY_VAL", "_MOM_CHANGE", "_YOY_CHANGE",
+                         "MOM_VAL", "YOY_VAL", "MOM_CHANGE", "YOY_CHANGE")
+        time_cols = {"FDATE", "MONTHS", "YEARS", "WEEKS", "QUARTERS", "DT", "DATE", "STAT_DATE"}
+        for k, v in first_row.items():
+            if k == dim_col:
+                continue
+            upper_k = k.upper()
+            if upper_k in time_cols or k in time_cols:
+                continue
+            if any(upper_k.endswith(s) for s in skip_suffixes):
+                continue
+            # StarRocks 返回的数值可能是字符串，尝试转换
+            try:
+                float(str(v).replace(",", ""))
+                metric_col = k
+                break
+            except (ValueError, TypeError):
+                continue
+
+        if not metric_col:
+            return self._build_dim_detail_text(mql, data), {}
+
+        # 2. 从 MQL 提取时间范围
+        if not mql.time or not mql.time.start or not mql.time.end:
+            return self._build_dim_detail_text(mql, data), {}
+
+        try:
+            start_dt = datetime.datetime.strptime(mql.time.start[:10], "%Y-%m-%d")
+            end_dt = datetime.datetime.strptime(mql.time.end[:10], "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return self._build_dim_detail_text(mql, data), {}
+
+        # 3. 计算环比期间
+        try:
+            from .sql_generator import SQLGeneratorNode
+            mom_start, mom_end = SQLGeneratorNode.compute_mom_period(start_dt, end_dt)
+        except Exception as e:
+            logger.warning(f"[ResultAnalyzer] compute_mom_period 失败: {e}")
+            return self._build_dim_detail_text(mql, data), {}
+
+        mom_start_str = mom_start.strftime("%Y-%m-%d")
+        mom_end_str = mom_end.strftime("%Y-%m-%d")
+
+        # 4. 获取表名和指标字段
+        table_name = ""
+        metric_field = ""
+        if mql.metric:
+            table_name = mql.metric.table or ""
+            metric_field = mql.metric.field or ""
+            # 从 starrocks_sql 解析
+            if not table_name or not metric_field:
+                import re
+                sql_str = mql.metric.starrocks_sql or ""
+                if not table_name:
+                    m = re.search(r"FROM\s+([a-zA-Z0-9_\.]+)", sql_str, re.IGNORECASE)
+                    table_name = m.group(1) if m else ""
+                if not metric_field:
+                    m = re.search(r"SUM\s*\(\s*([A-Z_]+)\s*\)", sql_str, re.IGNORECASE)
+                    metric_field = m.group(1) if m else ""
+
+        if not table_name or not metric_field:
+            logger.warning(f"[ResultAnalyzer] 无法获取表名/字段: table={table_name}, field={metric_field}")
+            return self._build_dim_detail_text(mql, data), {}
+
+        # 5. 查上期数据
+        prev_data = await self._query_prev_period_data(
+            table_name, metric_field, dim_col, mom_start_str, mom_end_str
+        )
+
+        if not prev_data:
+            logger.info("[ResultAnalyzer] 上期数据为空，回退简单文本")
+            return self._build_dim_detail_text(mql, data), {}
+
+        # 6. 计算涨跌幅 + 贡献度
+        results = []
+        total_current = 0.0
+        total_prev = 0.0
+        for row in data:
+            dim_val = str(row.get(dim_col, ""))
+            try:
+                current_val = float(str(row.get(metric_col, 0)).replace(",", ""))
+            except (ValueError, TypeError):
+                continue
+            prev_val = prev_data.get(dim_val, 0)
+            total_current += current_val
+            total_prev += prev_val
+            results.append({
+                "dim": dim_val,
+                "current": current_val,
+                "prev": prev_val,
+            })
+
+        total_change = total_current - total_prev
+
+        # 为每行计算变化率和贡献度
+        for r in results:
+            prev_v = r["prev"]
+            curr_v = r["current"]
+            r["change"] = curr_v - prev_v
+            r["change_pct"] = ((curr_v - prev_v) / prev_v * 100) if prev_v != 0 else None
+            r["contribution"] = (r["change"] / total_change * 100) if total_change != 0 else 0
+
+        # 隐藏规则：所有变化率在 ±5% 以内
+        significant_changes = [r for r in results if r["change_pct"] is not None and abs(r["change_pct"]) > 5]
+        if not significant_changes:
+            logger.info("[ResultAnalyzer] 所有变化率在±5%以内，维度明细隐藏")
+            return "", {}
+
+        # 7. 构建环比注入数据（由前端 ChartCard 合并到表格）
+        dim_mom_data = {}
+        for r in results:
+            pct = r["change_pct"]
+            if pct is not None:
+                sign = "+" if pct >= 0 else ""
+                contrib = r["contribution"]
+                contrib_str = f"+{contrib:.1f}%" if contrib >= 0 else f"{contrib:.1f}%"
+                dim_mom_data[r["dim"]] = {
+                    "环比变化": f"{sign}{pct:.1f}%",
+                    "变化标签": self._get_change_label(pct),
+                    "贡献度": contrib_str,
+                }
+            else:
+                dim_mom_data[r["dim"]] = {
+                    "环比变化": "N/A",
+                    "变化标签": "新增",
+                    "贡献度": "N/A",
+                }
+
+        # 8. 第四段不输出文本，所有数据已注入表格
+        return "", dim_mom_data
 
     def _build_action_text(self, action_items: list) -> str:
         """格式化运营建议为纯文本"""

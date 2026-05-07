@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -243,6 +244,56 @@ func activateSnapshot(db *gorm.DB, snapshotID string, operator string, note stri
 	})
 }
 
+// parseAggregation 从 starrocks_sql 提取聚合表达式
+// 例如: "SELECT SUM(sales_amt) AS total FROM ..." → "SUM(sales_amt)"
+func parseAggregation(sql string) string {
+	if sql == "" {
+		return ""
+	}
+	re := regexp.MustCompile(`(?i)(SUM|AVG|COUNT|MAX|MIN|COUNT_DISTINCT)\s*\(\s*([^)]+)\s*\)`)
+	matches := re.FindStringSubmatch(sql)
+	if len(matches) >= 3 {
+		return matches[1] + "(" + matches[2] + ")"
+	}
+	return ""
+}
+
+// parseTableFromSQL 从 starrocks_sql 提取表名
+// "SELECT ... FROM ids.IDS_AMZ_COMPREHENSIVE_DI WHERE ..." → "ids.IDS_AMZ_COMPREHENSIVE_DI"
+func parseTableFromSQL(sql string) string {
+	if sql == "" {
+		return ""
+	}
+	re := regexp.MustCompile(`(?i)\bFROM\s+([a-zA-Z_][\w.]*(?:\.[a-zA-Z_][\w.]*)?)`)
+	matches := re.FindStringSubmatch(sql)
+	if len(matches) >= 2 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
+
+// parseFieldFromAggExpression 从聚合表达式提取裸字段名
+// "SUM(INCOME_NBCSS)" → "INCOME_NBCSS"
+// "COUNT(DISTINCT VISITOR_NAME)" → "VISITOR_NAME"
+func parseFieldFromAggExpression(aggExpr string) string {
+	if aggExpr == "" {
+		return ""
+	}
+	// SUM/AVG/MAX/MIN(field)
+	re := regexp.MustCompile(`(?i)(?:SUM|AVG|MAX|MIN)\s*\(\s*([A-Za-z_]\w*)\s*\)`)
+	matches := re.FindStringSubmatch(aggExpr)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	// COUNT(DISTINCT field)
+	re2 := regexp.MustCompile(`(?i)COUNT\s*\(\s*DISTINCT\s+([A-Za-z_]\w*)\s*\)`)
+	matches2 := re2.FindStringSubmatch(aggExpr)
+	if len(matches2) >= 2 {
+		return matches2[1]
+	}
+	return ""
+}
+
 func buildSemanticMetrics(metrics []model.Metric, dimensionTypes []model.DimensionTypeMapping) []model.SemanticMetric {
 	if len(metrics) == 0 {
 		return nil
@@ -261,6 +312,10 @@ func buildSemanticMetrics(metrics []model.Metric, dimensionTypes []model.Dimensi
 		if metric.MetricCode == "" || metric.Name == "" {
 			continue
 		}
+		metricType := metric.MetricType
+		if metricType == "" {
+			metricType = "atomic"
+		}
 		out = append(out, model.SemanticMetric{
 			MetricCode:                metric.MetricCode,
 			DisplayName:               metric.Name,
@@ -274,6 +329,12 @@ func buildSemanticMetrics(metrics []model.Metric, dimensionTypes []model.Dimensi
 			Status:                    normalizeStatus(metric.Status),
 			Version:                   1,
 			UpdatedBy:                 "semantic-bootstrap",
+			// CTE 渲染所需字段
+			AggExpression:   parseAggregation(metric.StarRocksSQL),
+			MetricType:      metricType,
+			StarRocksTable:  parseTableFromSQL(metric.StarRocksSQL),
+			StarRocksField:  parseFieldFromAggExpression(parseAggregation(metric.StarRocksSQL)),
+			StarRocksSQL:    metric.StarRocksSQL,
 		})
 	}
 
@@ -726,6 +787,12 @@ func buildMetricPayload(items []model.SemanticMetric) map[string]map[string]any 
 			"preferred_followups":         []string(item.PreferredFollowups),
 			"tags":                        []string(item.Tags),
 			"version":                     item.Version,
+			// CTE 渲染所需字段
+			"agg_expression":  item.AggExpression,
+			"metric_type":     item.MetricType,
+			"starrocks_table": item.StarRocksTable,
+			"starrocks_field": item.StarRocksField,
+			"starrocks_sql":   item.StarRocksSQL,
 		}
 	}
 	return result
@@ -909,7 +976,7 @@ func upsertSemanticMetrics(db *gorm.DB, items []model.SemanticMetric) error {
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "metric_code"}},
-		DoUpdates: clause.AssignmentColumns([]string{"display_name", "business_summary", "default_aggregation", "default_time_grain", "default_chart_type", "recommended_dimension_codes", "preferred_followups", "tags", "status", "version", "updated_by", "updated_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"display_name", "business_summary", "default_aggregation", "default_time_grain", "default_chart_type", "recommended_dimension_codes", "preferred_followups", "tags", "status", "version", "updated_by", "updated_at", "agg_expression", "metric_type"}),
 	}).Create(&items).Error
 }
 
