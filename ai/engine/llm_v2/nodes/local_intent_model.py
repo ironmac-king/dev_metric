@@ -525,7 +525,17 @@ class LocalJointIntentModel:
             for v in values:
                 self.rule_entities[etype].add(v)
 
-        logger.info(f"[LocalJointIntentModel] 规则词典: METRIC={len(self.rule_entities['METRIC'])}, DIM_VALUE={len(self.rule_entities['DIM_VALUE'])}, TIME={len(self.rule_entities['TIME'])}")
+        # 已知维度列名（防止被模型误判为 METRIC）
+        known_dim_keywords = [
+            'SKU', 'sku', 'ASIN', 'asin',
+            '商品', '产品', '品名',
+            '店铺', '站点', '平台', '渠道', '品牌', '国家', '地区', '区域',
+            '品类', '类目', '一级品类', '二级品类', '三级品类', '四级品类',
+        ]
+        for kw in known_dim_keywords:
+            self.rule_entities['DIM'].add(kw)
+
+        logger.info(f"[LocalJointIntentModel] 规则词典: METRIC={len(self.rule_entities['METRIC'])}, DIM={len(self.rule_entities['DIM'])}, DIM_VALUE={len(self.rule_entities['DIM_VALUE'])}, TIME={len(self.rule_entities['TIME'])}")
 
     def _rule_based_correct(self, text: str, model_entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

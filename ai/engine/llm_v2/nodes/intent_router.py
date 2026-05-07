@@ -1738,7 +1738,24 @@ class IntentRouter:
                     ))
                     logger.info(f"[IntentRouter] METRIC实体'{metric_text}'实为维度值同义词，转换: {dim_info}")
                 else:
-                    real_metric_entities.append(me)
+                    # 兜底：已知维度列名硬编码检查（防止本地模型把 sku/商品 等误判为 METRIC）
+                    _KNOWN_DIM_NAMES = {
+                        "sku": "SKU", "SKU": "SKU", "商品": "SKU", "产品": "SKU", "品名": "SKU",
+                        "asin": "ASIN", "ASIN": "ASIN",
+                        "店铺": "FSITE", "站点": "FSITE", "平台": "PLATFORM",
+                        "渠道": "FCHANNEL", "品牌": "FBRANDS", "国家": "FCOUNTRY",
+                        "品类": "GROUP_3", "类目": "GROUP_3",
+                        "一级品类": "GROUP_1", "二级品类": "GROUP_2",
+                        "三级品类": "GROUP_3", "四级品类": "GROUP_4",
+                    }
+                    dim_col = _KNOWN_DIM_NAMES.get(metric_text)
+                    if dim_col:
+                        mql.dimensions.append(MQLDimension(
+                            type=dim_col, column=dim_col, field="", value="",
+                        ))
+                        logger.info(f"[IntentRouter] METRIC实体'{metric_text}'实为已知维度列，转为 dimension: {dim_col}")
+                    else:
+                        real_metric_entities.append(me)
 
             # 用过滤后的实体来处理指标
             metric_entities = real_metric_entities
@@ -1992,6 +2009,13 @@ class IntentRouter:
                         if col:
                             target_col = col
                             break
+                # 兜底：硬编码已知列名（如 SKU、ASIN 直接是列名，不是维度类型名）
+                if not target_col:
+                    _KNOWN_DIM_COLS = {
+                        "SKU": "SKU", "sku": "SKU", "ASIN": "ASIN", "asin": "ASIN",
+                        "商品": "SKU", "产品": "SKU",
+                    }
+                    target_col = _KNOWN_DIM_COLS.get(dim_text)
                 if target_col:
                     dim_type = column_to_dim_name.get(target_col.upper(), dim_text)
                     mql.dimensions.append(MQLDimension(

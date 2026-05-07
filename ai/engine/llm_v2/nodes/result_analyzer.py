@@ -1063,7 +1063,7 @@ class ResultAnalyzer:
         # 构建 LLM 摘要用的精简数据（中文列名 + 格式化数值）
         summary_rows = []
         for i, row in enumerate(data[:10], 1):
-            parts = [f"{col_map.get(k, k)}: {self._format_value(v)}" for k, v in row.items()]
+            parts = [f"{col_map.get(k, k)}: {self._format_value(v) if self._is_metric_column(k) else v}" for k, v in row.items()]
             summary_rows.append(f"{i}. " + " | ".join(parts))
         data_text = "\n".join(summary_rows)
 
@@ -1104,7 +1104,7 @@ class ResultAnalyzer:
         # LLM 失败回退：简短摘要
         lines = ["排名结果："]
         for i, row in enumerate(data[:10], 1):
-            parts = [f"{col_map.get(k, k)}: {self._format_value(v)}" for k, v in row.items()]
+            parts = [f"{col_map.get(k, k)}: {self._format_value(v) if self._is_metric_column(k) else v}" for k, v in row.items()]
             lines.append(f"{i}. " + " | ".join(parts))
 
         current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
@@ -1236,7 +1236,7 @@ class ResultAnalyzer:
         # 单行或 LLM 失败：回退表格
         lines = ["查询结果："]
         for row in data[:5]:
-            parts = [f"{col_map.get(k, k)}: {self._format_value(v)}" for k, v in row.items()]
+            parts = [f"{col_map.get(k, k)}: {self._format_value(v) if self._is_metric_column(k) else v}" for k, v in row.items()]
             lines.append(" | ".join(parts))
 
         return {

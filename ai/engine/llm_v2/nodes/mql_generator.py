@@ -784,7 +784,9 @@ class MQLGenerator:
             mql.time = inherited_mql.time
             logger.info(f"[_fill_defaults] 继承 inherited_mql.time: {inherited_mql.time.start} ~ {inherited_mql.time.end}")
         elif mql_time_invalid:
-            mql.time = TimeRange(type=TimeType.RELATIVE, original="本月")
+            # 排名类查询默认近30天，其他默认本月
+            default_time = "近30天" if mql.intent and mql.intent.value in ("query_ranking", "query_top", "query_bottom") else "本月"
+            mql.time = TimeRange(type=TimeType.RELATIVE, original=default_time)
 
         # 如果 time.original 有值但 start/end 为空，用 TimeParser 解析
         if mql.time and mql.time.original and not (mql.time.start and mql.time.end):
