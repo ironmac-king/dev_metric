@@ -1362,11 +1362,45 @@ class ResultAnalyzer:
     def _build_kpi_tooltip(self, mql: MQLSchema, analysis: Dict = None, sql_result=None) -> Dict[str, str]:
         """构建核心指标 tooltip 信息：业务定义 + 对比期间"""
         tooltip = {}
-        # 业务定义
+        # 业务定义（收集指标定义，自动查缺失的定义）
+        definitions = []
+        seen_names = set()
+        # 收集所有需要展示的指标名（主指标 + mql.metrics 中的非子串指标）
+        metric_names_to_show = []
         if mql.metric:
-            meaning = mql.metric.business_meaning or mql.metric.business_summary or ""
+            metric_names_to_show.append(mql.metric)
+        if mql.metrics:
+            for m in mql.metrics:
+                if not m or m.name in seen_names:
+                    continue
+                # 跳过是其他更长相标名子串的拆分产物
+                skip = False
+                for other in mql.metrics:
+                    if other and other != m and other.name != m.name and m.name in other.name and len(m.name) < len(other.name):
+                        skip = True
+                        break
+                if not skip and mql.metric and m.name in mql.metric.name and len(m.name) < len(mql.metric.name):
+                    skip = True
+                if skip:
+                    continue
+                metric_names_to_show.append(m)
+                seen_names.add(m.name)
+        # 查找每个指标的定义（优先用 MQLMetric 自带的，缺失则查 metric client）
+        for m in metric_names_to_show:
+            meaning = m.business_meaning or m.business_summary or ""
+            if not meaning and m.name:
+                try:
+                    from ai.client.metric_client import MetricClient
+                    client = MetricClient()
+                    info = client.get_metric_by_name(m.name)
+                    if info:
+                        meaning = info.get("business_definition", "")
+                except Exception:
+                    pass
             if meaning:
-                tooltip["metric_definition"] = f"{mql.metric.name}：{meaning}"
+                definitions.append(f"{m.name}：{meaning}")
+        if definitions:
+            tooltip["metric_definition"] = "\n".join(definitions)
         # 当前查询期间
         if mql.time and mql.time.start:
             tooltip["current_period"] = f"{mql.time.start} ~ {mql.time.end}"

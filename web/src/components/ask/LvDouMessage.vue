@@ -230,7 +230,13 @@ const kpiTooltipLines = computed(() => {
   const tip = props.msg.kpiTooltip
   if (!tip) return []
   const lines = []
-  if (tip.metric_definition) lines.push({ label: '指标定义', value: tip.metric_definition })
+  if (tip.metric_definition) {
+    // 多指标定义用换行分隔，拆成多行
+    const defs = tip.metric_definition.split('\n')
+    defs.forEach((d, i) => {
+      lines.push({ label: i === 0 ? '指标定义' : '', value: d })
+    })
+  }
   if (tip.current_period) lines.push({ label: '查询期间', value: tip.current_period })
   if (tip.compare_period) lines.push({ label: '对比期间', value: tip.compare_period })
   if (tip.mom_period) lines.push({ label: '环比期间', value: tip.mom_period })
