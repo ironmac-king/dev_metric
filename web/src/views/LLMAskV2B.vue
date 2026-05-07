@@ -98,9 +98,14 @@
                   </svg>
                 </div>
               </div>
-              <button class="swipe-delete" @click.stop="handleDeleteSession(session)">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-              </button>
+              <div class="swipe-actions">
+                <button class="swipe-action-btn swipe-pin" :class="{ pinned: session.starred }" @click.stop="togglePinSession(session)">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2v9M5 5l3-3 3 3" :stroke="session.starred ? '#f59e0b' : 'currentColor'" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button class="swipe-action-btn swipe-trash" @click.stop="handleDeleteSession(session)">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 4h10M5 4V3h6v1M6 7v4M8 7v4M4 4l.5 8h7L11 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
             </div>
           </template>
         </div>
@@ -343,7 +348,7 @@ const swipeStartY = ref(0)
 const swipeStartTime = ref(0)
 const swipeActiveId = ref(null)
 const SWIPE_THRESHOLD = 50
-const DELETE_BTN_WIDTH = 72
+const DELETE_BTN_WIDTH = 120
 const RUBBER_BAND = 0.35 // 超出边界的阻尼系数
 
 function swipeStyle(sId) {
@@ -393,6 +398,12 @@ function onSwipeEnd(sId) {
   swipeOffset.value = { ...swipeOffset.value, [sId]: finalOffset }
   if (finalOffset === 0) swipeActiveId.value = null
   swipeStartTime.value = 0
+}
+
+async function togglePinSession(session) {
+  swipeOffset.value = { ...swipeOffset.value, [session.session_id]: 0 }
+  swipeActiveId.value = null
+  await handlePinSession(session)
 }
 
 // 工具按钮数组（可扩展）
@@ -1902,26 +1913,39 @@ if (typeof window !== 'undefined') {
     transition: none;
   }
 
-  .swipe-delete {
+  .swipe-actions {
     position: absolute;
     right: 0;
     top: 0;
     bottom: 0;
-    width: 72px;
-    background: #f5f5f7;
-    color: #8e8e93;
+    width: 120px;
+    display: flex;
+    z-index: 1;
+  }
+  .swipe-action-btn {
+    flex: 1;
     border: none;
-    font-size: 13px;
-    font-weight: 600;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 4px;
     cursor: pointer;
-    z-index: 1;
     -webkit-tap-highlight-color: transparent;
   }
-  .swipe-delete:active {
+  .swipe-pin {
+    background: #f0f0f5;
+    color: #8e8e93;
+  }
+  .swipe-pin.pinned {
+    color: #f59e0b;
+  }
+  .swipe-pin:active {
+    background: #e5e5ea;
+  }
+  .swipe-trash {
+    background: #f5f5f7;
+    color: #8e8e93;
+  }
+  .swipe-trash:active {
     color: #ff3b30;
   }
 
