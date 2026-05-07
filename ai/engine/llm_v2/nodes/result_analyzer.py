@@ -427,7 +427,7 @@ class ResultAnalyzer:
         sections.append(f"**{_CN[_si - 1]}、核心指标**\n" + "，".join(kpi_parts))
 
         # 核心指标 tooltip 信息（业务定义 + 对比期间）
-        tooltip_info = self._build_kpi_tooltip(mql, analysis)
+        tooltip_info = self._build_kpi_tooltip(mql, analysis, sql_result)
         if tooltip_info:
             result["kpi_tooltip"] = tooltip_info
 
@@ -1359,7 +1359,7 @@ class ResultAnalyzer:
         text = re.sub(r'_(?:mom|yoy)_(?:val|change)', '', text)
         return text
 
-    def _build_kpi_tooltip(self, mql: MQLSchema, analysis: Dict = None) -> Dict[str, str]:
+    def _build_kpi_tooltip(self, mql: MQLSchema, analysis: Dict = None, sql_result=None) -> Dict[str, str]:
         """构建核心指标 tooltip 信息：业务定义 + 对比期间"""
         tooltip = {}
         # 业务定义
@@ -1373,31 +1373,63 @@ class ResultAnalyzer:
         # 对比期间（环比/同比）
         if mql.comparison and mql.comparison.compare_period_start:
             tooltip["compare_period"] = f"{mql.comparison.compare_period_start} ~ {mql.comparison.compare_period_end}"
-        # 从 trigger_analyzer 的 analysis.kpi 推算环比/同比期间
-        if analysis and analysis.get("kpi") and not tooltip.get("compare_period"):
-            kpi = analysis["kpi"]
+
+        # 检测指标是否支持环比/同比（用语义层能力，不依赖当前查询是否有对比列）
+        has_mom = False
+        has_yoy = False
+        metric_code = mql.metric.code if mql.metric else ""
+        logger.info(f"[_build_kpi_tooltip] metric_code={metric_code}")
+        if metric_code:
+            try:
+                from ai.services.semantic_layer import get_semantic_layer_service, EnrichStage
+                from ai.services.semantic_layer.api import ParseResult
+                semantic_layer = get_semantic_layer_service()
+                parse_result = ParseResult(intent="", confidence=0.0, metric_code=metric_code)
+                enrich_result = semantic_layer.enrich(parse_result, stage=EnrichStage.RESULT_ANALYSIS)
+                logger.info(f"[_build_kpi_tooltip] semantic_layer enrich cap={enrich_result.metric_capability}")
+                if enrich_result.metric_capability:
+                    has_mom = bool(enrich_result.metric_capability.get("supports_mom"))
+                    has_yoy = bool(enrich_result.metric_capability.get("supports_yoy"))
+            except Exception as e:
+                logger.warning(f"[_build_kpi_tooltip] semantic_layer failed: {e}")
+        if not has_mom or not has_yoy:
+            semantic_svc = self._get_semantic_service()
+            snapshot = semantic_svc.get_active_snapshot() if semantic_svc else None
+            if snapshot:
+                capabilities = snapshot.get("capabilities", {}) or {}
+                metric_cap = capabilities.get(f"metric:{metric_code}", {}) or {}
+                logger.info(f"[_build_kpi_tooltip] snapshot cap for metric:{metric_code} = {metric_cap}")
+                if not has_mom:
+                    has_mom = bool(metric_cap.get("supports_mom"))
+                if not has_yoy:
+                    has_yoy = bool(metric_cap.get("supports_yoy"))
+        logger.info(f"[_build_kpi_tooltip] final has_mom={has_mom}, has_yoy={has_yoy}")
+
+        # 计算环比/同比期间
+        if has_mom or has_yoy:
             try:
                 import datetime
                 from dateutil.relativedelta import relativedelta
                 start = mql.time.start if mql.time else ""
+                end = mql.time.end if mql.time else ""
+                logger.info(f"[_build_kpi_tooltip] mql.time: start={start}, end={end}")
                 if start:
                     dt = datetime.datetime.strptime(start[:10], "%Y-%m-%d")
-                    end_dt = datetime.datetime.strptime((mql.time.end or start)[:10], "%Y-%m-%d")
-                    if kpi.get("mom") is not None:
-                        # 复用 SQL 生成器的环比计算逻辑
-                        from .sql_generator import SQLGenerator
-                        mom_start, mom_end = SQLGenerator.compute_mom_period(dt, end_dt)
+                    end_dt = datetime.datetime.strptime((end or start)[:10], "%Y-%m-%d")
+                    if has_mom:
+                        from .sql_generator import SQLGeneratorNode
+                        mom_start, mom_end = SQLGeneratorNode.compute_mom_period(dt, end_dt)
                         tooltip["mom_period"] = f"{mom_start.strftime('%Y-%m-%d')} ~ {mom_end.strftime('%Y-%m-%d')}"
-                    if kpi.get("yoy") is not None:
-                        # 同比：去年同期，与 SQL 生成器逻辑一致
-                        import calendar
+                    if has_yoy:
                         period_days = (end_dt - dt).days + 1
                         yoy_start = dt - relativedelta(years=1)
                         yoy_end = yoy_start + datetime.timedelta(days=period_days - 1)
                         tooltip["yoy_period"] = f"{yoy_start.strftime('%Y-%m-%d')} ~ {yoy_end.strftime('%Y-%m-%d')}"
-            except Exception:
-                pass
-        return tooltip if len(tooltip) > 1 else {}  # 至少要有2个字段才有意义
+            except Exception as e:
+                logger.warning(f"[_build_kpi_tooltip] period calc failed: {e}")
+
+        logger.info(f"[_build_kpi_tooltip] final tooltip={tooltip}")
+        return tooltip if len(tooltip) > 1 else {}
 
     def _format_value(self, value: Any) -> str:
         """格式化数值"""

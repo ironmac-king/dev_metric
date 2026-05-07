@@ -3,7 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 const routes = [
   {
     path: '/',
-    redirect: '/llm-ask-v2'
+    redirect: '/llm-ask-v2b'
   },
   {
     path: '/login',
@@ -112,7 +112,7 @@ router.beforeEach((to, from, next) => {
     next('/login')
   } else if (to.path === '/login' && token) {
     // 已登录访问登录页，跳转到首页
-    next('/dashboard')
+    next('/llm-ask-v2b')
   } else {
     next()
   }

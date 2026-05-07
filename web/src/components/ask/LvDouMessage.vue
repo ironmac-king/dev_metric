@@ -21,19 +21,21 @@
         <!-- 补充段落（识别模板占位符，插入对应组件） -->
         <template v-if="presentation.paragraphs.length">
           <template v-for="(p, i) in presentation.paragraphs" :key="i">
-            <!-- 第三段：数据图表占位 → 插入 ChartCard -->
-            <ChartCard
-              v-if="isChartPlaceholder(p) && msg.resultData && msg.resultData.length > 0"
-              :data="msg.resultData"
-              :columns="msg.columns || []"
-              :height="280"
-              :interpretation="msg.interpretation"
-              :metric-name="msg.metricName || ''"
-              :metric-names="msg.metricNames || []"
-              :time-start="msg.mql?.time?.start"
-              :time-end="msg.mql?.time?.end"
-              class="data-section"
-            />
+            <!-- 数据图表占位 → 标题 + ChartCard -->
+            <template v-if="isChartPlaceholder(p) && msg.resultData && msg.resultData.length > 0">
+              <div v-if="chartSectionTitle(p)" class="chart-section-header">{{ chartSectionTitle(p) }}</div>
+              <ChartCard
+                :data="msg.resultData"
+                :columns="msg.columns || []"
+                :height="280"
+                :interpretation="msg.interpretation"
+                :metric-name="msg.metricName || ''"
+                :metric-names="msg.metricNames || []"
+                :time-start="msg.mql?.time?.start"
+                :time-end="msg.mql?.time?.end"
+                class="data-section"
+              />
+            </template>
             <!-- 核心指标段落：加 tooltip -->
             <div v-else-if="isKpiSection(p)" class="kpi-section">
               <div class="kpi-header">
@@ -203,6 +205,11 @@ function stripKpiTitle(text) {
 function kpiSectionTitle(text) {
   const m = text.match(/^\*\*([一二三四五六]、核心指标)\*\*/)
   return m ? m[1] : '核心指标'
+}
+
+function chartSectionTitle(text) {
+  const m = text.match(/^\*\*([一二三四五六]、[^\*]+)\*\*/)
+  return m ? m[1] : ''
 }
 
 const showKpiTip = ref(false)
@@ -451,6 +458,12 @@ function renderHtml(text) {
 
 /* 数据区 */
 .data-section { margin-top: 16px; }
+.chart-section-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2329;
+  margin-top: 16px;
+}
 
 /* 归因分析 */
 .breakdown-section { margin-top: 16px; }
