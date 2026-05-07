@@ -15,8 +15,8 @@
 
       <!-- 正常回答 -->
       <template v-else>
-        <!-- 主回答 -->
-        <div class="answer-text" v-html="renderHtml(presentation.lead)"></div>
+        <!-- 主回答（追问时不渲染，由追问组件展示） -->
+        <div v-if="!(msg.needsClarification && msg.clarificationOptions?.length)" class="answer-text" v-html="renderHtml(presentation.lead)"></div>
 
         <!-- 补充段落（识别模板占位符，插入对应组件） -->
         <template v-if="presentation.paragraphs.length">

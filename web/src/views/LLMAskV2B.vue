@@ -98,7 +98,9 @@
                   </svg>
                 </div>
               </div>
-              <button class="swipe-delete" @click.stop="handleDeleteSession(session)">删除</button>
+              <button class="swipe-delete" @click.stop="handleDeleteSession(session)">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              </button>
             </div>
           </template>
         </div>
@@ -334,12 +336,15 @@ if (typeof window !== 'undefined') {
   })
 }
 
-// 左滑删除状态（仅移动端）
+// 左滑删除状态（仅移动端，iOS 风格）
 const swipeOffset = ref({})
 const swipeStartX = ref(0)
 const swipeStartY = ref(0)
-const SWIPE_THRESHOLD = 60
-const DELETE_BTN_WIDTH = 68
+const swipeStartTime = ref(0)
+const swipeActiveId = ref(null)
+const SWIPE_THRESHOLD = 50
+const DELETE_BTN_WIDTH = 72
+const RUBBER_BAND = 0.35 // 超出边界的阻尼系数
 
 function swipeStyle(sId) {
   const offset = swipeOffset.value[sId] || 0
@@ -350,26 +355,44 @@ function swipeStyle(sId) {
 function onSwipeStart(e, sId) {
   swipeStartX.value = e.touches[0].clientX
   swipeStartY.value = e.touches[0].clientY
-}
-
-function onSwipeMove(e, sId) {
-  const dx = e.touches[0].clientX - swipeStartX.value
-  const dy = e.touches[0].clientY - swipeStartY.value
-  if (Math.abs(dy) > Math.abs(dx)) return
-  const current = swipeOffset.value[sId] || 0
-  let newOffset = Math.max(-DELETE_BTN_WIDTH, Math.min(0, current + dx))
-  swipeOffset.value = { ...swipeOffset.value, [sId]: newOffset }
-}
-
-function onSwipeEnd(sId) {
-  const current = swipeOffset.value[sId] || 0
-  const finalOffset = current < -SWIPE_THRESHOLD ? -DELETE_BTN_WIDTH : 0
-  swipeOffset.value = { ...swipeOffset.value, [sId]: finalOffset }
+  swipeStartTime.value = Date.now()
+  swipeActiveId.value = sId
+  // 关闭其他已打开的项
   for (const key of Object.keys(swipeOffset.value)) {
     if (key !== sId && swipeOffset.value[key] !== 0) {
       swipeOffset.value[key] = 0
     }
   }
+}
+
+function onSwipeMove(e, sId) {
+  const dx = e.touches[0].clientX - swipeStartX.value
+  const dy = e.touches[0].clientY - swipeStartY.value
+  // 垂直滑动时不拦截
+  if (Math.abs(dy) > Math.abs(dx) && Math.abs(dx) < 10) return
+  e.preventDefault()
+
+  let target = dx
+  // 超出左边界时加阻尼（iOS rubber-band）
+  if (target < -DELETE_BTN_WIDTH) {
+    const over = target + DELETE_BTN_WIDTH
+    target = -DELETE_BTN_WIDTH + over * RUBBER_BAND
+  }
+  // 不允许右滑超过原位
+  if (target > 0) target = target * RUBBER_BAND
+  swipeOffset.value = { ...swipeOffset.value, [sId]: target }
+}
+
+function onSwipeEnd(sId) {
+  const current = swipeOffset.value[sId] || 0
+  const elapsed = Date.now() - swipeStartTime.value
+  const velocity = Math.abs(current) / Math.max(elapsed, 1) * 1000
+  // 快速滑动（速度 > 300px/s）或超过阈值 → 打开删除
+  const shouldOpen = current < -SWIPE_THRESHOLD || velocity > 300
+  const finalOffset = shouldOpen ? -DELETE_BTN_WIDTH : 0
+  swipeOffset.value = { ...swipeOffset.value, [sId]: finalOffset }
+  if (finalOffset === 0) swipeActiveId.value = null
+  swipeStartTime.value = 0
 }
 
 // 工具按钮数组（可扩展）
@@ -1860,7 +1883,7 @@ if (typeof window !== 'undefined') {
 
 /* ===== 手机端响应式 ===== */
 @media (max-width: 768px) {
-  /* 左滑删除 */
+  /* 左滑删除（iOS 风格） */
   .swipe-wrapper {
     position: relative;
     overflow: hidden;
@@ -1871,8 +1894,12 @@ if (typeof window !== 'undefined') {
     position: relative;
     z-index: 2;
     background: #fff;
-    transition: transform 0.2s ease;
+    transition: transform 0.35s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     will-change: transform;
+  }
+  /* 滑动过程中取消过渡，跟手指实时走 */
+  .swipe-content:active {
+    transition: none;
   }
 
   .swipe-delete {
@@ -1880,18 +1907,22 @@ if (typeof window !== 'undefined') {
     right: 0;
     top: 0;
     bottom: 0;
-    width: 68px;
-    background: #ef4444;
-    color: #fff;
+    width: 72px;
+    background: #f5f5f7;
+    color: #8e8e93;
     border: none;
-    border-radius: 0 8px 8px 0;
     font-size: 13px;
-    font-weight: 500;
+    font-weight: 600;
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 4px;
     cursor: pointer;
     z-index: 1;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .swipe-delete:active {
+    color: #ff3b30;
   }
 
   /* 手机端隐藏三个点菜单 */

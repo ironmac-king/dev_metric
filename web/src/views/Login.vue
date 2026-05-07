@@ -125,7 +125,7 @@ async function handleLogin() {
         localStorage.setItem('username', loginForm.value.username)
       }
       ElMessage.success('登录成功')
-      router.push('/dashboard')
+      router.push('/llm-ask-v2b')
     }
   } catch (e) {
     ElMessage.error('用户名或密码错误')

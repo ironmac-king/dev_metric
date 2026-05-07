@@ -427,9 +427,10 @@ class ResultAnalyzer:
                             except (ValueError, TypeError):
                                 pass
                     formatted = self._format_value(total)
+                    kpi_parts.append(f"{col_clean}合计：{formatted}")
                 else:
                     formatted = self._format_value(val)
-                kpi_parts.append(f"{col_clean}：{formatted}")
+                    kpi_parts.append(f"{col_clean}：{formatted}")
         # 最终兜底：至少显示指标名
         if not kpi_parts:
             kpi_parts.append(f"{metric_name}")
