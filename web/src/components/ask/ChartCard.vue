@@ -516,6 +516,9 @@ function formatTableCell(key, val, colIdx) {
     const metricNames = props.metricNames
     // 精确匹配：key === metricNames 中的某一项
     if (metricNames.includes(key)) return key.includes('率')
+    // key 可能带后缀（如"销售毛利率当前值"），检查 metricNames 是否有某项是 key 的前缀
+    const matchedMetric = metricNames.find(name => key.startsWith(name))
+    if (matchedMetric) return matchedMetric.includes('率')
     // 子串匹配：metricNames 中某一项包含 key（如 "毛利率" 包含 "毛利"）
     const foundName = metricNames.find(name => name.includes(key))
     return foundName ? foundName.includes('率') : false
@@ -616,12 +619,18 @@ const chartType = computed(() => {
     })
   })
 
-  // 查找维度列（GROUP_X, REGION, PLATFORM, FSITE 等）
+  // 查找维度列（GROUP_X, REGION, PLATFORM, FSITE 等，含中文名）
+  const dimChineseNames = new Set([
+    '一级品类', '二级品类', '三级品类', '四级品类',
+    '站点', '亚马逊站点', '店铺', '平台', '地区', '国家', '区域', '渠道',
+    '品牌', 'SKU', 'ASIN', '广告类型', '广告组', '币种', '统计周期',
+  ])
   const dimensionKeys = keys.filter(k =>
     k.startsWith('GROUP_') ||
     k === 'REGION' || k === 'PLATFORM' ||
     k === 'FSITE' || k === 'FCOUNTRY' ||
-    k === 'FBRAND' || k === 'FPRODUCTLINE'
+    k === 'FBRAND' || k === 'FPRODUCTLINE' ||
+    dimChineseNames.has(k)
   )
 
   // 查找时间列（FDATE, MONTHS 等）
@@ -647,6 +656,11 @@ const chartType = computed(() => {
   const hasTimeColumn = timeKeys.length > 0
 
   console.log('[DEBUG chartType] keys:', keys, 'numericKeys:', numericKeys, 'dimensionKeys:', dimensionKeys, 'timeKeys:', timeKeys, 'xAxisKey:', xAxisKey, 'isTimeSeries:', isTimeSeries, 'hasTimeColumn:', hasTimeColumn)
+
+  // 多维度非时间数据（如一级品类+站点）不适合图表，用表格
+  if (dimensionKeys.length > 1 && !hasTimeColumn && !isTimeSeries) {
+    return 'table'
+  }
 
   if (numericKeys.length === 1) {
     // 檢測是否是佔比/比率數據，優先顯示餅圖
@@ -878,7 +892,7 @@ const chartOptions = computed(() => {
         axisLabel: {
           color: '#6b7280',
           fontSize: 11,
-          rotate: 30,
+          rotate: 0,
           formatter: (val) => truncateLabel(val)
         },
         axisTick: { show: false }
@@ -973,7 +987,7 @@ const chartOptions = computed(() => {
         axisLabel: {
           color: '#6b7280',
           fontSize: 11,
-          rotate: 30,
+          rotate: 0,
           formatter: (val) => truncateLabel(val)
         },
         axisTick: { show: false }

@@ -397,7 +397,7 @@ class ResultAnalyzer:
             for info in result["supplementary_info"]:
                 if info.get("label") and info.get("value"):
                     kpi_parts.append(f"{info['label']} {info['value']}")
-        # 兜底：从首行数据提取指标值（排除维度列）
+        # 兜底：从数据提取指标值（排除维度列），多行时汇总求和
         if not kpi_parts and data:
             row = data[0]
             dim_cols = set()
@@ -409,16 +409,26 @@ class ResultAnalyzer:
                 upper = col.upper()
                 if upper in dim_cols or upper.startswith("GROUP_") or col in _DIM_COL_CHINESE:
                     continue
-                # 跳过环比/同比/上期等非当前值列
                 skip_kw = ("环比变化", "环比上期", "同比变化", "同比上期", "MOM_CHANGE", "YOY_CHANGE",
                            "MOM_VAL", "YOY_VAL", "FSITECODE", "FDATE", "MONTHS")
                 if any(kw in upper for kw in skip_kw):
                     continue
-                # 清洗列名：去掉 _raw 后缀、"当前值"后缀、_raw→空
                 col_clean = col.replace("_raw", "").replace("当前值", "").replace("_change", "").strip(" _")
                 if not col_clean:
                     col_clean = metric_name
-                formatted = self._format_value(val)
+                # 多行数据时汇总求和
+                if len(data) > 1:
+                    total = 0
+                    for r in data:
+                        v = r.get(col)
+                        if v is not None:
+                            try:
+                                total += float(str(v).replace(",", ""))
+                            except (ValueError, TypeError):
+                                pass
+                    formatted = self._format_value(total)
+                else:
+                    formatted = self._format_value(val)
                 kpi_parts.append(f"{col_clean}：{formatted}")
         # 最终兜底：至少显示指标名
         if not kpi_parts:
