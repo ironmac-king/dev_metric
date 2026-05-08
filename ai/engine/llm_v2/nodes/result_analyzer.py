@@ -239,6 +239,64 @@ class ResultAnalyzer:
         dim_label = label_map.get(dim_col, dim_col)
         return dim_col, dim_label
 
+    def _build_contextual_suggestions(
+        self,
+        mql: MQLSchema,
+        metric_name: str,
+        time_context: str,
+        max_count: int = 3,
+    ) -> List[str]:
+        """
+        基于 mql.dimensions 的维度值过滤生成保留上下文的建议。
+
+        当查询带有维度值过滤（如 NAS=智能云存储）时，生成保留该过滤的建议：
+        - 下钻：{dim_value}各{下钻维度}{metric_name}排名
+        - 对比：{dim_value}{metric_name}同比变化
+        - 横向：其他{dim_type}{metric_name}对比
+        无维度值过滤时返回空列表，由调用方回退到原有逻辑。
+        """
+        primary_dim = None
+        if mql.dimensions:
+            for d in mql.dimensions:
+                if d.value and d.type:
+                    primary_dim = d
+                    break
+
+        if not primary_dim:
+            return []
+
+        dim_value = primary_dim.value
+        dim_type = primary_dim.type
+        suggestions = []
+
+        # 下钻建议：维度值 + 更细粒度维度
+        drill_dims = self._get_drilldown_dimensions(dim_type)
+        if drill_dims:
+            suggestions.append(f"{dim_value}各{drill_dims[0]}{metric_name}排名")
+
+        # 对比建议
+        suggestions.append(f"{dim_value}{metric_name}同比变化")
+
+        # 横向对比：同维度类型其他值
+        suggestions.append(f"其他{dim_type}{metric_name}对比")
+
+        # 趋势建议（兜底，保证凑够 max_count）
+        if len(suggestions) < max_count:
+            suggestions.append(f"{dim_value}{metric_name}趋势")
+
+        return suggestions[:max_count]
+
+    def _get_drilldown_dimensions(self, current_dim_type: str) -> List[str]:
+        """根据当前维度类型获取下钻维度建议列表"""
+        drill_map = {
+            "三级品类": ["SKU", "ASIN", "站点"],
+            "二级品类": ["三级品类", "SKU"],
+            "一级品类": ["二级品类", "三级品类"],
+            "站点": ["三级品类", "SKU"],
+            "平台": ["站点", "三级品类"],
+        }
+        return drill_map.get(current_dim_type, ["SKU"])
+
     async def analyze(
         self,
         mql: MQLSchema,
@@ -509,7 +567,7 @@ class ResultAnalyzer:
                     if s not in seen:
                         seen.add(s)
                         current.append(s)
-                result["suggestions"] = current[:6]
+                result["suggestions"] = current[:3]
                 logger.info(f"[ResultAnalyzer] 从语义层增强 suggestions: {recommend_result.next_questions}")
         except Exception as e:
             logger.warning(f"[ResultAnalyzer] 语义层 recommend 失败: {e}")
@@ -532,7 +590,7 @@ class ResultAnalyzer:
                         if s not in seen:
                             seen.add(s)
                             current.append(s)
-                    result["suggestions"] = current[:6]
+                    result["suggestions"] = current[:3]
                     logger.info(f"[ResultAnalyzer] 从语义快照增强 suggestions: {snapshot_suggestions}")
 
         return result
@@ -656,60 +714,91 @@ class ResultAnalyzer:
                 # 单指标查询
                 value = list(row.values())[0] if row else 0
                 formatted_value = self._format_value(value)
-                _, alt_label = self._get_alternative_dimensions(None)
-                # 生成补充信息
                 supplementary_info = self._generate_supplementary_info(mql, sql_result)
-                return {
-                    "answer": f"{metric_name}为 {formatted_value}",
-                    "suggestions": [
+
+                # 优先生成带维度值上下文的建议
+                suggestions = self._build_contextual_suggestions(mql, metric_name, time_context, max_count=3)
+                if not suggestions:
+                    current_dim_type = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0].type else None
+                    _, alt_label = self._get_alternative_dimensions(current_dim_type)
+                    suggestions = [
                         f"查看{time_context}各{alt_label}{metric_name}趋势变化",
                         f"按{alt_label}维度对比上月",
-                    ],
+                    ]
+
+                return {
+                    "answer": f"{metric_name}为 {formatted_value}",
+                    "suggestions": suggestions,
                     "supplementary_info": supplementary_info,
                 }
 
-        # 多行数据
+        # 多行数据：生成有意义的摘要
         metric_name = mql.metric.name if mql.metric else "指标值"
-        # 获取指标列名（用于判断哪些列需要格式化）
-        metric_columns = set()
-        if mql.metric and mql.metric.name:
-            pass
-        if mql.metrics:
-            for m in mql.metrics:
-                if m.name:
-                    metric_columns.add(m.name)
-        if mql.metric and mql.metric.name:
-            metric_columns.add(mql.metric.name)
 
-        col_map = self._build_col_map(mql)
+        # 汇总统计
+        total_val = 0
+        valid_count = 0
+        # 找到指标列（第一个非维度列的数值列）
+        metric_col = None
+        dim_col_names = {'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4',
+                         'FSITE', 'FSITECODE', 'PLATFORM', 'FDATE', 'MONTHS', 'DT', 'DATE'}
+        for k, v in data[0].items():
+            upper_k = k.upper().rstrip("_RAW")
+            if upper_k in dim_col_names or k in dim_col_names or k == "日期":
+                continue
+            try:
+                float(str(v).replace(",", ""))
+                metric_col = k
+                break
+            except (ValueError, TypeError):
+                continue
 
-        lines = []
-        for row in data[:5]:
-            parts = []
-            for k, v in row.items():
-                display_k = col_map.get(k, k)
-                # 用原始列名判断是否需要格式化
-                if k in metric_columns or self._is_metric_column(k):
-                    parts.append(f"{display_k}: {self._format_value(v)}")
-                else:
-                    parts.append(f"{display_k}: {v}")
-            lines.append(" | ".join(parts))
+        if metric_col:
+            for row in data:
+                v = row.get(metric_col)
+                if v is not None:
+                    try:
+                        total_val += float(str(v).replace(",", ""))
+                        valid_count += 1
+                    except (ValueError, TypeError):
+                        pass
 
-        answer = "查询结果：\n" + "\n".join(lines)
-        if len(data) > 5:
-            answer += f"\n... 还有 {len(data) - 5} 条数据"
+        # 维度描述
+        dim_labels = []
+        if mql.dimensions:
+            for d in mql.dimensions:
+                if d.type:
+                    dim_labels.append(_DIM_COL_CHINESE.get(d.type, d.type))
+
+        time_desc = mql.time.original if mql.time and mql.time.original else ""
+        formatted_total = self._format_value(total_val)
+
+        parts = []
+        if time_desc:
+            parts.append(time_desc)
+        if dim_labels:
+            parts.append(f"按{'、'.join(dim_labels)}查看")
+        parts.append(f"{metric_name}合计{formatted_total}")
+        if valid_count > 0:
+            parts.append(f"共{len(data)}条数据")
+
+        answer = "，".join(parts) + "。"
 
         # 生成带维度上下文的建议（维度错开，时间一致）
         time_context = self._get_time_context(mql)
         current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
-        _, alt_label = self._get_alternative_dimensions(current_dim)
+
+        suggestions = self._build_contextual_suggestions(mql, metric_name, time_context, max_count=3)
+        if not suggestions:
+            _, alt_label = self._get_alternative_dimensions(current_dim)
+            suggestions = [
+                f"查看{time_context}各{alt_label}{metric_name}排名前10",
+                f"按{alt_label}维度分析{metric_name}",
+            ]
 
         return {
             "answer": answer,
-            "suggestions": [
-                f"查看{time_context}各{alt_label}{metric_name}排名前10",
-                f"按{alt_label}维度分析{metric_name}",
-            ],
+            "suggestions": suggestions,
         }
 
     async def _handle_trend_query(
@@ -874,13 +963,18 @@ class ResultAnalyzer:
         answer = f"趋势{trend}，变化幅度 {abs(change):.1f}%"
 
         current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
-        _, alt_label = self._get_alternative_dimensions(current_dim)
-        return {
-            "answer": answer,
-            "suggestions": [
+
+        suggestions = self._build_contextual_suggestions(mql, metric_name, "", max_count=3)
+        if not suggestions:
+            _, alt_label = self._get_alternative_dimensions(current_dim)
+            suggestions = [
                 f"查看各{alt_label}{metric_name}同比变化",
                 f"查看各{alt_label}{metric_name}环比变化",
-            ],
+            ]
+
+        return {
+            "answer": answer,
+            "suggestions": suggestions,
         }
 
     async def _handle_comparison_query(
@@ -973,6 +1067,15 @@ class ResultAnalyzer:
                 answer = f"{metric_name}{period_label}{trend_desc}{change_desc}。{current_period}为 {int(current_val):,}，{compare_period}为 {int(compare_val or 0):,}。"
 
             current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
+
+            # 优先生成带维度值上下文的建议
+            contextual = self._build_contextual_suggestions(mql, metric_name, time_context, max_count=3)
+            if contextual:
+                return {
+                    "answer": answer,
+                    "suggestions": contextual,
+                }
+
             _, alt_label = self._get_alternative_dimensions(current_dim)
 
             # 获取多个替代维度
@@ -1103,15 +1206,18 @@ class ResultAnalyzer:
             llm_summary = self._llm_engine.call(prompt, temperature=0.3, max_tokens=200)
             if llm_summary and len(llm_summary.strip()) > 10:
                 logger.info(f"[ResultAnalyzer] LLM 排名总结: {llm_summary[:80]}")
-                # 生成维度错开的建议
+                # 优先生成带维度值上下文的建议
                 current_dim = mql.dimensions[0].type if mql.dimensions and mql.dimensions[0] else None
-                _, alt_label = self._get_alternative_dimensions(current_dim)
-                return {
-                    "answer": llm_summary.strip(),
-                    "suggestions": [
+                suggestions = self._build_contextual_suggestions(mql, metric_name, time_context, max_count=3)
+                if not suggestions:
+                    _, alt_label = self._get_alternative_dimensions(current_dim)
+                    suggestions = [
                         f"查看更多{time_context}各{alt_label}{metric_name}排名",
                         f"查看{time_context}各{alt_label}{metric_name}占比分布",
-                    ],
+                    ]
+                return {
+                    "answer": llm_summary.strip(),
+                    "suggestions": suggestions,
                 }
         except Exception as e:
             logger.warning(f"[ResultAnalyzer] LLM 排名总结失败，回退纯文本: {e}")
