@@ -192,7 +192,7 @@ def _extract_result_total(sql_result) -> Optional[int]:
     return None
 
 
-def _get_metric_name_for_result(state: ConversationState, metric_client: MetricClient) -> Dict[str, str]:
+def _get_metric_name_for_result(state, metric_client: MetricClient) -> Dict[str, str]:
     """获取指标字段名到中文名称的映射，用于结果列名替换"""
     field_name_map = {}
 
