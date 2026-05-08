@@ -1,0 +1,291 @@
+[
+  {
+    "id": "A1", "category": "replace_metric",
+    "first_turn": "本月各站点销售额",
+    "followup": "换成利润",
+    "expected_followup": {
+      "metric_name_in": ["毛利润", "利润"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "A2", "category": "replace_metric",
+    "first_turn": "本月各站点销售额",
+    "followup": "改成广告花费",
+    "expected_followup": {
+      "metric_name_in": ["广告花费", "SPEND"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "A3", "category": "replace_metric",
+    "first_turn": "本月各站点销售额",
+    "followup": "换成广告点击",
+    "expected_followup": {
+      "metric_name_in": ["广告点击", "点击量", "CLICKS"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "A4", "category": "replace_metric",
+    "first_turn": "本月各站点销售额",
+    "followup": "改成客单价",
+    "expected_followup": {
+      "metric_name_in": ["客单价", "TOTALSALES"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "A5", "category": "replace_metric",
+    "first_turn": "本月各站点销售额",
+    "followup": "换成ROI",
+    "expected_followup": {
+      "metric_name_in": ["ROI"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "A6", "category": "replace_metric_short",
+    "first_turn": "本月各站点销售额",
+    "followup": "利润呢",
+    "expected_followup": {
+      "metric_name_in": ["毛利润", "利润"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "A7", "category": "replace_metric_short_synonym",
+    "first_turn": "本月各站点销售额",
+    "followup": "广告成本呢",
+    "expected_followup": {
+      "metric_name_in": ["广告花费", "SPEND"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "A8", "category": "replace_metric_short_synonym",
+    "first_turn": "本月各站点销售额",
+    "followup": "PV呢",
+    "expected_followup": {
+      "metric_name_in": ["页面访问量", "PAGEVIEWS"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "B1", "category": "add_metric",
+    "first_turn": "本月销售额",
+    "followup": "加上客单价",
+    "expected_followup": {
+      "metric_name_in": ["销售额", "INCOME_NBCSS"],
+      "metrics_count_gte": 1
+    }
+  },
+  {
+    "id": "B2", "category": "add_metric",
+    "first_turn": "本月销售额",
+    "followup": "加上广告花费",
+    "expected_followup": {
+      "metric_name_in": ["销售额", "INCOME_NBCSS"],
+      "metrics_count_gte": 1
+    }
+  },
+  {
+    "id": "B3", "category": "add_metric_synonym",
+    "first_turn": "本月销售额",
+    "followup": "再加曝光量",
+    "expected_followup": {
+      "metric_name_in": ["销售额", "INCOME_NBCSS"],
+      "metrics_count_gte": 1
+    }
+  },
+  {
+    "id": "C1", "category": "remove_metric",
+    "first_turn": "本月销售额和广告花费",
+    "followup": "去掉广告花费",
+    "expected_followup": {
+      "metric_name_in": ["销售额", "INCOME_NBCSS"],
+      "metric_name_not_in": ["广告花费", "SPEND"]
+    }
+  },
+  {
+    "id": "D1", "category": "replace_dim",
+    "first_turn": "本月各站点销售额",
+    "followup": "按平台看",
+    "expected_followup": {
+      "dimensions_in": ["PLATFORM"]
+    }
+  },
+  {
+    "id": "D2", "category": "replace_dim_generic",
+    "first_turn": "本月各站点销售额",
+    "followup": "换成按品类",
+    "expected_followup": {
+      "dimensions_in": ["GROUP_1", "GROUP"]
+    }
+  },
+  {
+    "id": "D3", "category": "replace_dim_specific",
+    "first_turn": "本月各站点销售额",
+    "followup": "按一级品类看",
+    "expected_followup": {
+      "dimensions_in": ["GROUP_1"]
+    }
+  },
+  {
+    "id": "E1", "category": "replace_comp",
+    "first_turn": "本月销售额",
+    "followup": "环比呢",
+    "expected_followup": {
+      "intent": "query_comparison",
+      "comparison_types_in": ["环比"]
+    }
+  },
+  {
+    "id": "E2", "category": "replace_comp",
+    "first_turn": "本月销售额",
+    "followup": "同比呢",
+    "expected_followup": {
+      "intent": "query_comparison",
+      "comparison_types_in": ["同比"]
+    }
+  },
+  {
+    "id": "E3", "category": "replace_comp",
+    "first_turn": "本月销售额",
+    "followup": "趋势呢",
+    "expected_followup": {
+      "intent": "query_trend"
+    }
+  },
+  {
+    "id": "F1", "category": "replace_time",
+    "first_turn": "本月销售额",
+    "followup": "上月呢",
+    "expected_followup": {
+      "time_original": "上月"
+    }
+  },
+  {
+    "id": "F2", "category": "replace_time",
+    "first_turn": "本月销售额",
+    "followup": "看看上月",
+    "expected_followup": {
+      "time_original_in": ["上月"]
+    }
+  },
+  {
+    "id": "F3", "category": "replace_time",
+    "first_turn": "本月销售额",
+    "followup": "去年呢",
+    "expected_followup": {
+      "time_original_in": ["去年"]
+    }
+  },
+  {
+    "id": "G1", "category": "new_question",
+    "first_turn": "本月销售额",
+    "followup": "利润是多少",
+    "expected_followup": {
+      "metric_name_in": ["毛利润", "利润"]
+    }
+  },
+  {
+    "id": "G2", "category": "new_question",
+    "first_turn": "本月销售额",
+    "followup": "广告花费多少",
+    "expected_followup": {
+      "metric_name_in": ["广告花费", "SPEND"]
+    }
+  },
+  {
+    "id": "G3", "category": "reset",
+    "first_turn": "本月销售额",
+    "followup": "重新来",
+    "expected_followup": {
+      "needs_clarification": true
+    }
+  },
+  {
+    "id": "H1", "category": "synonym_replace",
+    "first_turn": "本月销售额",
+    "followup": "换成营收",
+    "expected_followup": {
+      "metric_name_in": ["销售额", "INCOME_NBCSS"]
+    }
+  },
+  {
+    "id": "H2", "category": "synonym_add",
+    "first_turn": "本月销售额",
+    "followup": "加上PV",
+    "expected_followup": {
+      "metric_name_in": ["销售额", "INCOME_NBCSS"],
+      "metrics_count_gte": 1
+    }
+  },
+  {
+    "id": "H3", "category": "synonym_remove",
+    "first_turn": "本月销售额和广告花费",
+    "followup": "去掉spend",
+    "expected_followup": {
+      "metric_name_not_in": ["广告花费", "SPEND"]
+    }
+  },
+  {
+    "id": "H4", "category": "synonym_short",
+    "first_turn": "本月各站点销售额",
+    "followup": "利润呢",
+    "expected_followup": {
+      "metric_name_in": ["毛利润", "利润"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "H5", "category": "synonym_short",
+    "first_turn": "本月各站点销售额",
+    "followup": "广告支出呢",
+    "expected_followup": {
+      "metric_name_in": ["广告花费", "SPEND"],
+      "dimensions_in": ["FSITE"]
+    }
+  },
+  {
+    "id": "H6", "category": "synonym_replace",
+    "first_turn": "本月销售额",
+    "followup": "换成margin",
+    "expected_followup": {
+      "metric_name_in": ["毛利率", "毛利"]
+    }
+  },
+  {
+    "id": "J1", "category": "correction_time",
+    "first_turn": "本月销售额",
+    "followup": "不对，换上月",
+    "expected_followup": {
+      "time_original_in": ["上月"]
+    }
+  },
+  {
+    "id": "J2", "category": "correction_metric",
+    "first_turn": "本月销售额",
+    "followup": "错了，应该是利润",
+    "expected_followup": {
+      "metric_name_in": ["毛利润", "利润"]
+    }
+  },
+  {
+    "id": "J3", "category": "correction_unclear",
+    "first_turn": "本月销售额",
+    "followup": "不对不对",
+    "expected_followup": {
+      "needs_clarification": true
+    }
+  },
+  {
+    "id": "J4", "category": "correction_time_short",
+    "first_turn": "本月销售额",
+    "followup": "换上月",
+    "expected_followup": {
+      "time_original_in": ["上月"]
+    }
+  }
+]

@@ -1,0 +1,207 @@
+-- Sales
+INSERT INTO sql_templates (name, description, sql_template, intent, status, drilldown_category, metric_names, template_type, template_order, template_name)
+VALUES (
+  'Sales-Drilldown',
+  'Sales metrics with MoM/YoY',
+'WITH base_data AS (
+  SELECT
+    SUM(TOTALSALES) AS "TOTALSALES",
+    SUM(ORDERED_PRODUCTSALES) AS "ORDERED_PRODUCTSALES",
+    SUM(TOTALORDERS) AS "TOTALORDERS",
+    SUM(UNITS_ORDERED) AS "UNITS_ORDERED",
+    SUM(UNITS_ORDEREDB2B) AS "UNITS_ORDEREDB2B",
+    SUM(totalunits) AS "totalunits",
+    SUM(UNITS_REFUNDED) AS "UNITS_REFUNDED",
+    SUM(INCOME_BCSS) AS "INCOME_BCSS",
+    SUM(INCOME_BC_TK) AS "INCOME_BC_TK"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= ''{start_date}'' AND FDATE <= ''{end_date}''
+),
+mom AS (
+  SELECT
+    SUM(TOTALSALES) AS "TOTALSALES_mom",
+    SUM(UNITS_ORDERED) AS "UNITS_ORDERED_mom"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 MONTH)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 MONTH)
+),
+yoy AS (
+  SELECT
+    SUM(TOTALSALES) AS "TOTALSALES_yoy",
+    SUM(UNITS_ORDERED) AS "UNITS_ORDERED_yoy"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 YEAR)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 YEAR)
+)
+SELECT
+  b."TOTALSALES",
+  b."ORDERED_PRODUCTSALES",
+  b."TOTALORDERS",
+  b."UNITS_ORDERED",
+  b."UNITS_ORDEREDB2B",
+  b."totalunits",
+  b."UNITS_REFUNDED",
+  b."INCOME_BCSS",
+  b."INCOME_BC_TK",
+  ROUND((b."TOTALSALES" - COALESCE(m."TOTALSALES_mom", 0)) / NULLIF(COALESCE(m."TOTALSALES_mom", 0), 0) * 100, 2) AS "TOTALSALES_mom_rate",
+  ROUND((b."UNITS_ORDERED" - COALESCE(m."UNITS_ORDERED_mom", 0)) / NULLIF(COALESCE(m."UNITS_ORDERED_mom", 0), 0) * 100, 2) AS "UNITS_ORDERED_mom_rate",
+  ROUND((b."TOTALSALES" - COALESCE(y."TOTALSALES_yoy", 0)) / NULLIF(COALESCE(y."TOTALSALES_yoy", 0), 0) * 100, 2) AS "TOTALSALES_yoy_rate",
+  ROUND((b."UNITS_ORDERED" - COALESCE(y."UNITS_ORDERED_yoy", 0)) / NULLIF(COALESCE(y."UNITS_ORDERED_yoy", 0), 0) * 100, 2) AS "UNITS_ORDERED_yoy_rate"
+FROM base_data b, mom m, yoy y',
+'drilldown', 1, 'sales',
+'["TOTALSALES", "ORDERED_PRODUCTSALES", "TOTALORDERS", "UNITS_ORDERED", "UNITS_ORDEREDB2B", "totalunits", "UNITS_REFUNDED", "INCOME_BCSS", "INCOME_BC_TK", "TOTALSALES_mom_rate", "UNITS_ORDERED_mom_rate", "TOTALSALES_yoy_rate", "UNITS_ORDERED_yoy_rate"]'::jsonb,
+'drilldown', 1, 'Base Metrics'
+);
+
+-- Ad
+INSERT INTO sql_templates (name, description, sql_template, intent, status, drilldown_category, metric_names, template_type, template_order, template_name)
+VALUES (
+  'Ad-Drilldown',
+  'Ad metrics with MoM/YoY',
+'WITH base_data AS (
+  SELECT
+    SUM(SPEND) AS "SPEND",
+    SUM(IMPRESSIONS) AS "IMPRESSIONS",
+    SUM(CLICKS) AS "CLICKS",
+    SUM(TOTALORDERS) AS "TOTALORDERS",
+    SUM(ORDERED_PRODUCTSALES) AS "ORDERED_PRODUCTSALES",
+    SUM(SESSIONS_TOTAL) AS "SESSIONS_TOTAL",
+    SUM(PAGEVIEWS_TOTAL) AS "PAGEVIEWS_TOTAL"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= ''{start_date}'' AND FDATE <= ''{end_date}''
+),
+mom AS (
+  SELECT
+    SUM(SPEND) AS "SPEND_mom",
+    SUM(ORDERED_PRODUCTSALES) AS "ORDERED_PRODUCTSALES_mom"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 MONTH)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 MONTH)
+),
+yoy AS (
+  SELECT
+    SUM(SPEND) AS "SPEND_yoy",
+    SUM(ORDERED_PRODUCTSALES) AS "ORDERED_PRODUCTSALES_yoy"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 YEAR)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 YEAR)
+)
+SELECT
+  b."SPEND",
+  b."IMPRESSIONS",
+  b."CLICKS",
+  b."TOTALORDERS",
+  b."ORDERED_PRODUCTSALES",
+  b."SESSIONS_TOTAL",
+  b."PAGEVIEWS_TOTAL",
+  ROUND((b."SPEND" - COALESCE(m."SPEND_mom", 0)) / NULLIF(COALESCE(m."SPEND_mom", 0), 0) * 100, 2) AS "SPEND_mom_rate",
+  ROUND((b."ORDERED_PRODUCTSALES" - COALESCE(m."ORDERED_PRODUCTSALES_mom", 0)) / NULLIF(COALESCE(m."ORDERED_PRODUCTSALES_mom", 0), 0) * 100, 2) AS "ORDERED_PRODUCTSALES_mom_rate",
+  ROUND((b."SPEND" - COALESCE(y."SPEND_yoy", 0)) / NULLIF(COALESCE(y."SPEND_yoy", 0), 0) * 100, 2) AS "SPEND_yoy_rate",
+  ROUND((b."ORDERED_PRODUCTSALES" - COALESCE(y."ORDERED_PRODUCTSALES_yoy", 0)) / NULLIF(COALESCE(y."ORDERED_PRODUCTSALES_yoy", 0), 0) * 100, 2) AS "ORDERED_PRODUCTSALES_yoy_rate"
+FROM base_data b, mom m, yoy y',
+'drilldown', 1, 'ad',
+'["SPEND", "IMPRESSIONS", "CLICKS", "TOTALORDERS", "ORDERED_PRODUCTSALES", "SESSIONS_TOTAL", "PAGEVIEWS_TOTAL", "SPEND_mom_rate", "ORDERED_PRODUCTSALES_mom_rate", "SPEND_yoy_rate", "ORDERED_PRODUCTSALES_yoy_rate"]'::jsonb,
+'drilldown', 1, 'Base Metrics'
+);
+
+-- Cost/Profit
+INSERT INTO sql_templates (name, description, sql_template, intent, status, drilldown_category, metric_names, template_type, template_order, template_name)
+VALUES (
+  'Cost-Drilldown',
+  'Cost and profit metrics',
+'WITH base_data AS (
+  SELECT
+    SUM(TOTALSALES) AS "TOTALSALES",
+    SUM(COSTFEESS) AS "COSTFEESS",
+    SUM(PROFITBEFORETAX) AS "PROFITBEFORETAX",
+    SUM(PLATFORM_CONTRIBUTION) AS "PLATFORM_CONTRIBUTION",
+    SUM(FPLATFORMSERVICEFEE) AS "FPLATFORMSERVICEFEE",
+    SUM(FPROMOTIOFEE) AS "FPROMOTIOFEE",
+    SUM(TRANSPORTATION) AS "TRANSPORTATION",
+    SUM(TARIFFSFEE_HANDLE) AS "TARIFFSFEE_HANDLE"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= ''{start_date}'' AND FDATE <= ''{end_date}''
+),
+mom AS (
+  SELECT
+    SUM(TOTALSALES) AS "TOTALSALES_mom",
+    SUM(PROFITBEFORETAX) AS "PROFITBEFORETAX_mom"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 MONTH)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 MONTH)
+),
+yoy AS (
+  SELECT
+    SUM(TOTALSALES) AS "TOTALSALES_yoy",
+    SUM(PROFITBEFORETAX) AS "PROFITBEFORETAX_yoy"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 YEAR)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 YEAR)
+)
+SELECT
+  b."TOTALSALES",
+  b."COSTFEESS",
+  b."PROFITBEFORETAX",
+  b."PLATFORM_CONTRIBUTION",
+  b."FPLATFORMSERVICEFEE",
+  b."FPROMOTIOFEE",
+  b."TRANSPORTATION",
+  b."TARIFFSFEE_HANDLE",
+  ROUND((b."TOTALSALES" - COALESCE(m."TOTALSALES_mom", 0)) / NULLIF(COALESCE(m."TOTALSALES_mom", 0), 0) * 100, 2) AS "TOTALSALES_mom_rate",
+  ROUND((b."PROFITBEFORETAX" - COALESCE(m."PROFITBEFORETAX_mom", 0)) / NULLIF(COALESCE(m."PROFITBEFORETAX_mom", 0), 0) * 100, 2) AS "PROFITBEFORETAX_mom_rate",
+  ROUND((b."TOTALSALES" - COALESCE(y."TOTALSALES_yoy", 0)) / NULLIF(COALESCE(y."TOTALSALES_yoy", 0), 0) * 100, 2) AS "TOTALSALES_yoy_rate",
+  ROUND((b."PROFITBEFORETAX" - COALESCE(y."PROFITBEFORETAX_yoy", 0)) / NULLIF(COALESCE(y."PROFITBEFORETAX_yoy", 0), 0) * 100, 2) AS "PROFITBEFORETAX_yoy_rate"
+FROM base_data b, mom m, yoy y',
+'drilldown', 1, 'cost',
+'["TOTALSALES", "COSTFEESS", "PROFITBEFORETAX", "PLATFORM_CONTRIBUTION", "FPLATFORMSERVICEFEE", "FPROMOTIOFEE", "TRANSPORTATION", "TARIFFSFEE_HANDLE", "TOTALSALES_mom_rate", "PROFITBEFORETAX_mom_rate", "TOTALSALES_yoy_rate", "PROFITBEFORETAX_yoy_rate"]'::jsonb,
+'drilldown', 1, 'Base Metrics'
+);
+
+-- Inventory (FQTY and WHCOST from actual metrics)
+INSERT INTO sql_templates (name, description, sql_template, intent, status, drilldown_category, metric_names, template_type, template_order, template_name)
+VALUES (
+  'Inventory-Drilldown',
+  'Inventory metrics',
+'WITH base_data AS (
+  SELECT
+    SUM(FQTY) AS "FQTY",
+    SUM(FQTY_TK) AS "FQTY_TK",
+    SUM(WHCOST) AS "WHCOST",
+    SUM(TOTALSALES) AS "TOTALSALES",
+    SUM(COSTFEESS) AS "COSTFEESS",
+    SUM(UNITS_ORDERED) AS "UNITS_ORDERED",
+    SUM(UNITS_REFUNDED) AS "UNITS_REFUNDED"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= ''{start_date}'' AND FDATE <= ''{end_date}''
+),
+mom AS (
+  SELECT
+    SUM(COSTFEESS) AS "COSTFEESS_mom",
+    SUM(UNITS_ORDERED) AS "UNITS_ORDERED_mom"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 MONTH)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 MONTH)
+),
+yoy AS (
+  SELECT
+    SUM(TOTALSALES) AS "TOTALSALES_yoy",
+    SUM(COSTFEESS) AS "COSTFEESS_yoy"
+  FROM ids.IDS_AMZ_COMPREHENSIVE_DI
+  WHERE FDATE >= DATE_SUB(''{start_date}'', INTERVAL 1 YEAR)
+    AND FDATE <= DATE_SUB(''{end_date}'', INTERVAL 1 YEAR)
+)
+SELECT
+  b."FQTY",
+  b."FQTY_TK",
+  b."WHCOST",
+  b."TOTALSALES",
+  b."COSTFEESS",
+  b."UNITS_ORDERED",
+  b."UNITS_REFUNDED",
+  ROUND((b."UNITS_ORDERED" - COALESCE(m."UNITS_ORDERED_mom", 0)) / NULLIF(COALESCE(m."UNITS_ORDERED_mom", 0), 0) * 100, 2) AS "UNITS_ORDERED_mom_rate",
+  ROUND((b."TOTALSALES" - COALESCE(y."TOTALSALES_yoy", 0)) / NULLIF(COALESCE(y."TOTALSALES_yoy", 0), 0) * 100, 2) AS "TOTALSALES_yoy_rate"
+FROM base_data b, mom m, yoy y',
+'drilldown', 1, 'inventory',
+'["FQTY", "FQTY_TK", "WHCOST", "TOTALSALES", "COSTFEESS", "UNITS_ORDERED", "UNITS_REFUNDED", "UNITS_ORDERED_mom_rate", "TOTALSALES_yoy_rate"]'::jsonb,
+'drilldown', 1, 'Base Metrics'
+);

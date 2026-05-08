@@ -1,0 +1,77 @@
+{
+  "bio_tags": [
+    "O",
+    "B-METRIC",
+    "I-METRIC",
+    "B-TIME",
+    "I-TIME",
+    "B-DIM",
+    "I-DIM",
+    "B-DIM_VALUE",
+    "I-DIM_VALUE"
+  ],
+  "tag2id": {
+    "O": 0,
+    "B-METRIC": 1,
+    "I-METRIC": 2,
+    "B-TIME": 3,
+    "I-TIME": 4,
+    "B-DIM": 5,
+    "I-DIM": 6,
+    "B-DIM_VALUE": 7,
+    "I-DIM_VALUE": 8
+  },
+  "id2tag": {
+    "0": "O",
+    "1": "B-METRIC",
+    "2": "I-METRIC",
+    "3": "B-TIME",
+    "4": "I-TIME",
+    "5": "B-DIM",
+    "6": "I-DIM",
+    "7": "B-DIM_VALUE",
+    "8": "I-DIM_VALUE"
+  },
+  "intents": [
+    "query_value",
+    "query_trend",
+    "query_comparison",
+    "query_ranking",
+    "query_ratio",
+    "query_aggregate",
+    "query_filter",
+    "query_forecast",
+    "query_drilldown",
+    "query_anomaly",
+    "query_explain",
+    "query_target"
+  ],
+  "intent2id": {
+    "0": "query_value",
+    "1": "query_trend",
+    "2": "query_comparison",
+    "3": "query_ranking",
+    "4": "query_ratio",
+    "5": "query_aggregate",
+    "6": "query_filter",
+    "7": "query_forecast",
+    "8": "query_drilldown",
+    "9": "query_anomaly",
+    "10": "query_explain",
+    "11": "query_target"
+  },
+  "id2intent": {
+    "0": "query_value",
+    "1": "query_trend",
+    "2": "query_comparison",
+    "3": "query_ranking",
+    "4": "query_ratio",
+    "5": "query_aggregate",
+    "6": "query_filter",
+    "7": "query_forecast",
+    "8": "query_drilldown",
+    "9": "query_anomaly",
+    "10": "query_explain",
+    "11": "query_target"
+  }
+}

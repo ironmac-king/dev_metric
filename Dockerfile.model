@@ -1,0 +1,19 @@
+# 意图识别模型服务 Dockerfile (CPU)
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# CPU 版 PyTorch + Flask
+RUN pip install --no-cache-dir \
+    torch==2.3.0 --index-url https://download.pytorch.org/whl/cpu \
+    transformers>=4.30.0 \
+    flask>=3.0.0 \
+    psycopg2-binary>=2.9.0 \
+    numpy>=1.24.0
+
+# 复制模型和代码
+COPY intent_model/ .
+
+EXPOSE 18082
+
+CMD ["python", "api_service.py"]

@@ -1,0 +1,902 @@
+"""
+MQL Schema - V2 的强类型中间表示
+
+MQL (Metric Query Language) 是连接自然语言和 SQL 的桥梁，
+提供可审计、可验证的结构化查询描述。
+"""
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional, Any, TypedDict, Literal, Annotated
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+class MQLIntent(str, Enum):
+    """MQL 意图类型"""
+    # 查询类
+    QUERY_VALUE = "query_value"          # 查询指标数值
+    QUERY_TREND = "query_trend"         # 查询趋势变化
+    QUERY_COMPARISON = "query_comparison" # 对比分析
+    QUERY_RANKING = "query_ranking"     # 排名分析
+    QUERY_RATIO = "query_ratio"         # 占比分析
+    QUERY_RETENTION = "query_retention"  # 留存分析
+
+    # 元数据类
+    QUERY_METADATA = "query_metadata"   # 查询元数据（业务口径、技术口径）
+
+    # 会话类
+    GREETING = "greeting"               # 打招呼
+    THANKS = "thanks"                   # 感谢
+    BYE = "bye"                        # 告别
+
+    # 异常类
+    UNKNOWN = "unknown"                 # 无法识别
+
+
+class CalculationPattern(str, Enum):
+    """9 种核心计算模式"""
+    # 1. 同比/环比
+    YOY = "yoy"                        # 同比 (Year-over-Year)
+    MOM = "mom"                        # 环比 (Month-over-Month)
+    WOW = "wow"                        # 周对比 (Week-over-Week)
+
+    # 2. 占比/份额
+    PERCENTAGE = "percentage"          # 占比
+
+    # 3. 排名/排序
+    RANKING = "ranking"                # 排名
+
+    # 4. Top/Bottom N
+    TOP_N = "top_n"                    # Top N
+    BOTTOM_N = "bottom_n"              # Bottom N
+
+    # 5. 趋势/走势
+    TREND = "trend"                    # 趋势
+
+    # 6. 窗口函数
+    RUNNING_SUM = "running_sum"       # 累计求和
+    PARTITION_RATIO = "partition_ratio"  # 占比/份额
+    MA7 = "ma7"                       # 7日移动平均
+
+    # 6. 集中度
+    CONCENTRATION = "concentration"     # 集中度
+
+    # 7. 均值/统计
+    MEAN = "mean"                      # 均值
+    STATISTICS = "statistics"           # 统计
+
+    # 8. 倍数/比率
+    MULTIPLIER = "multiplier"          # 倍数
+    RATIO = "ratio"                    # 比率
+
+    # 9. 增量/增速
+    DELTA = "delta"                    # 增量
+    VELOCITY = "velocity"              # 增速
+
+
+class TimeType(str, Enum):
+    """时间类型"""
+    DATE_RANGE = "date_range"          # 日期范围
+    RELATIVE = "relative"              # 相对表达（近7天）
+    ABSOLUTE_MONTH = "absolute_month"  # 绝对月份
+    ABSOLUTE_QUARTER = "absolute_quarter"  # 绝对季度
+    ABSOLUTE_YEAR = "absolute_year"    # 绝对年度
+
+
+class AggregationType(str, Enum):
+    """聚合类型"""
+    SUM = "SUM"
+    AVG = "AVG"
+    COUNT = "COUNT"
+    MAX = "MAX"
+    MIN = "MIN"
+    COUNT_DISTINCT = "COUNT_DISTINCT"
+
+
+class OperatorType(str, Enum):
+    """比较操作符"""
+    EQ = "eq"           # 等于
+    NE = "ne"           # 不等于
+    GT = "gt"           # 大于
+    GTE = "gte"         # 大于等于
+    LT = "lt"           # 小于
+    LTE = "lte"         # 小于等于
+    IN = "in"           # 在列表中
+    NOT_IN = "not_in"   # 不在列表中
+    LIKE = "like"       # 模糊匹配
+    BETWEEN = "between"  # 范围
+
+
+@dataclass
+class MQLMetric:
+    """MQL 指标定义"""
+    code: str = ""                    # 指标编号，如 MKI-02-0011
+    name: str = ""                    # 指标名称，如 总销售额
+    table: str = ""                   # StarRocks 表名
+    field: str = ""                   # 字段名
+    aggregation: AggregationType = AggregationType.SUM  # 聚合类型
+    unit: str = ""                    # 单位
+    starrocks_sql: str = ""            # 预置 SQL 模板
+
+    # 公式类指标
+    is_formula: bool = False          # 是否公式指标
+    formula_type: str = ""             # 公式类型
+    molecule_metric: str = ""          # 分子指标
+    denominator_metric: str = ""       # 分母指标
+
+    # 语义层业务口径（从 Go API /api/v1/metadata/metrics/:id 透出）
+    business_summary: str = ""         # 如"含税"、"不含退"
+    business_meaning: str = ""         # 完整业务含义描述（用于可解释性）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "code": self.code,
+            "name": self.name,
+            "table": self.table,
+            "field": self.field,
+            "aggregation": self.aggregation.value if isinstance(self.aggregation, Enum) else self.aggregation,
+            "unit": self.unit,
+            "starrocks_sql": self.starrocks_sql,
+            "is_formula": self.is_formula,
+            "formula_type": self.formula_type,
+            "molecule_metric": self.molecule_metric,
+            "denominator_metric": self.denominator_metric,
+            "business_summary": self.business_summary,
+            "business_meaning": self.business_meaning,
+        }
+
+
+@dataclass
+class MQLDimension:
+    """MQL 维度定义"""
+    type: str = ""                    # 维度类型（中文显示名）
+    column: str = ""                  # 数据库列名
+    field: str = ""                   # 同 column
+    value: Any = None                 # 过滤值（可选）
+
+    # 层级信息
+    hierarchy: str = ""                # 层级，如 GROUP_1, GROUP_2, GROUP_3
+    level: int = 0                    # 层级深度
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "column": self.column,
+            "field": self.field,
+            "value": self.value,
+            "hierarchy": self.hierarchy,
+            "level": self.level,
+        }
+
+
+@dataclass
+class MQLFilter:
+    """MQL 筛选条件"""
+    field: str = ""                   # 字段名
+    operator: OperatorType = OperatorType.EQ  # 操作符
+    value: Any = None                 # 值
+    source: str = ""                  # 来源：user=用户明确指定, corrected=从指标名中校正得到
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "field": self.field,
+            "operator": self.operator.value if isinstance(self.operator, Enum) else self.operator,
+            "value": self.value,
+            "source": self.source,
+        }
+
+
+@dataclass
+class TimeRange:
+    """MQL 时间范围"""
+    type: TimeType = TimeType.RELATIVE
+    start: str = ""                   # 开始日期 (YYYY-MM-DD)
+    end: str = ""                     # 结束日期 (YYYY-MM-DD)
+    original: str = ""                 # 原始表达，如 近30天
+
+    # 相对时间计算
+    days: int = 0                     # 相对天数
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type.value if isinstance(self.type, Enum) else self.type,
+            "start": self.start,
+            "end": self.end,
+            "original": self.original,
+            "days": self.days,
+        }
+
+
+@dataclass
+class ComparisonSpec:
+    """对比规格（同比/环比）"""
+    enabled: bool = False
+    types: List[str] = field(default_factory=list)  # ["同比", "环比"]
+
+    # 对比周期
+    compare_period_start: str = ""
+    compare_period_end: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "types": self.types,
+            "compare_period_start": self.compare_period_start,
+            "compare_period_end": self.compare_period_end,
+        }
+
+
+@dataclass
+class CrossMetricSpec:
+    """跨指标对比规格（指标A vs 指标B）"""
+    metric_name: str = ""          # 对比的指标名称
+    operator: str = "lt"          # 比较运算符: lt(小于), gt(大于), eq(等于), lte(小于等于), gte(大于等于)
+    metric_a_alias: str = ""      # 指标A的SQL别名（用于SQL生成）
+    metric_b_alias: str = ""      # 指标B的SQL别名
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "metric_name": self.metric_name,
+            "operator": self.operator,
+            "metric_a_alias": self.metric_a_alias,
+            "metric_b_alias": self.metric_b_alias,
+        }
+
+
+@dataclass
+class PaginationSpec:
+    """分页规格"""
+    page: int = 1
+    page_size: int = 100
+    total: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "page": self.page,
+            "page_size": self.page_size,
+            "total": self.total,
+        }
+
+
+@dataclass
+class OrderBySpec:
+    """排序规格"""
+    field: str = ""
+    direction: str = "DESC"  # ASC / DESC
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "field": self.field,
+            "direction": self.direction,
+        }
+
+
+@dataclass
+class DrillDownSpec:
+    """下钻规格"""
+    add_dimensions: List[str] = field(default_factory=list)  # 要添加的维度列
+    original_group_by: List[str] = field(default_factory=list)  # 原始 GROUP BY 列
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "add_dimensions": self.add_dimensions,
+            "original_group_by": self.original_group_by,
+        }
+
+
+@dataclass
+class MQLSchema:
+    """
+    MQL (Metric Query Language) 结构化查询表示
+
+    这是 V2 的核心中间表示，连接自然语言和 SQL。
+    """
+    version: str = "1.0"
+
+    # 基础信息
+    session_id: str = ""              # 会话 ID
+    parent_state_id: str = ""          # 父状态 ID（用于多轮对话）
+
+    # 意图与置信度
+    intent: MQLIntent = MQLIntent.QUERY_VALUE
+    confidence: float = 0.7
+
+    # 指标信息
+    metric: Optional[MQLMetric] = None
+    metrics: List[MQLMetric] = field(default_factory=list)  # 多指标查询
+
+    # 时间范围
+    time: Optional[TimeRange] = None
+
+    # 维度信息
+    dimensions: List[MQLDimension] = field(default_factory=list)
+
+    # 筛选条件
+    filters: List[MQLFilter] = field(default_factory=list)
+
+    # 对比规格
+    comparison: Optional[ComparisonSpec] = None
+
+    # 跨指标对比
+    cross_metric: Optional[CrossMetricSpec] = None
+
+    # 分页
+    pagination: Optional[PaginationSpec] = None
+
+    # 排序
+    order_by: Optional[OrderBySpec] = None
+
+    # 下钻
+    drill_down: Optional[DrillDownSpec] = None
+
+    # 计算模式（9 种核心）
+    calculation_patterns: List[CalculationPattern] = field(default_factory=list)
+
+    # 计算指标（率指标时的分子分母）
+    molecule_metric: Optional[MQLMetric] = None
+    denominator_metric: Optional[MQLMetric] = None
+
+    # Top N
+    top_n: int = 0
+    bottom_n: int = 0
+
+    # 原始问题
+    original_question: str = ""
+
+    # 解析后的问题（同义词替换）
+    resolved_question: str = ""
+
+    @property
+    def has_mom(self) -> bool:
+        """是否有环比计算"""
+        from_comparison = bool(self.comparison and self.comparison.types and "环比" in self.comparison.types)
+        from_patterns = any(p.value == "mom" for p in (self.calculation_patterns or []))
+        if from_comparison and from_patterns:
+            logger.warning("[MQLSchema] has_mom conflict: comparison.types 和 calculation_patterns 同时设置了环比")
+        return from_comparison or from_patterns  # M4 fix: 两个来源用 OR，任何一个为真都计算
+
+    @property
+    def has_yoy(self) -> bool:
+        """是否有同比计算"""
+        from_comparison = bool(self.comparison and self.comparison.types and "同比" in self.comparison.types)
+        from_patterns = any(p.value == "yoy" for p in (self.calculation_patterns or []))
+        if from_comparison and from_patterns:
+            logger.warning("[MQLSchema] has_yoy conflict: comparison.types 和 calculation_patterns 同时设置了同比")
+        return from_comparison or from_patterns  # M4 fix: 两个来源用 OR，任何一个为真都计算
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "version": self.version,
+            "session_id": self.session_id,
+            "parent_state_id": self.parent_state_id,
+            "intent": self.intent.value if isinstance(self.intent, Enum) else self.intent,
+            "confidence": self.confidence,
+            "metric": self.metric.to_dict() if self.metric else None,
+            "metrics": [m.to_dict() for m in self.metrics],
+            "time": self.time.to_dict() if self.time else None,
+            "dimensions": [d.to_dict() for d in self.dimensions],
+            "filters": [f.to_dict() for f in self.filters],
+            "comparison": self.comparison.to_dict() if self.comparison else None,
+            "cross_metric": self.cross_metric.to_dict() if self.cross_metric else None,
+            "pagination": self.pagination.to_dict() if self.pagination else None,
+            "order_by": self.order_by.to_dict() if self.order_by else None,
+            "drill_down": self.drill_down.to_dict() if self.drill_down else None,
+            "calculation_patterns": [p.value if isinstance(p, Enum) else p for p in self.calculation_patterns],
+            "molecule_metric": self.molecule_metric.to_dict() if self.molecule_metric else None,
+            "denominator_metric": self.denominator_metric.to_dict() if self.denominator_metric else None,
+            "top_n": self.top_n,
+            "bottom_n": self.bottom_n,
+            "original_question": self.original_question,
+            "resolved_question": self.resolved_question,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MQLSchema":
+        """从字典创建 MQLSchema"""
+        schema = cls()
+
+        # 基本字段
+        schema.version = data.get("version", "1.0")
+        schema.session_id = data.get("session_id", "")
+        schema.parent_state_id = data.get("parent_state_id", "")
+
+        # 意图
+        intent_val = data.get("intent", "query_value")
+        try:
+            schema.intent = MQLIntent(intent_val)
+        except ValueError:
+            schema.intent = MQLIntent.UNKNOWN
+
+        schema.confidence = data.get("confidence", 0.7)
+
+        # 指标
+        metric_data = data.get("metric")
+        if metric_data:
+            schema.metric = MQLMetric(**metric_data)
+
+        # 多指标
+        for metric_item in data.get("metrics", []) or []:
+            if metric_item:
+                schema.metrics.append(MQLMetric(**metric_item))
+
+        # 时间
+        time_data = data.get("time")
+        if time_data:
+            try:
+                schema.time = TimeRange(
+                    type=TimeType(time_data.get("type", "relative")),
+                    start=time_data.get("start", ""),
+                    end=time_data.get("end", ""),
+                    original=time_data.get("original", ""),
+                )
+            except ValueError:
+                schema.time = TimeRange()
+
+        # 维度
+        for dim_data in data.get("dimensions", []):
+            schema.dimensions.append(MQLDimension(**dim_data))
+
+        # Filters
+        for filter_data in data.get("filters", []):
+            schema.filters.append(MQLFilter(**filter_data))
+
+        # comparison
+        comparison_data = data.get("comparison")
+        if comparison_data:
+            schema.comparison = ComparisonSpec(**comparison_data)
+
+        # cross metric
+        cross_metric_data = data.get("cross_metric")
+        if cross_metric_data:
+            schema.cross_metric = CrossMetricSpec(**cross_metric_data)
+
+        # pagination
+        pagination_data = data.get("pagination")
+        if pagination_data:
+            schema.pagination = PaginationSpec(**pagination_data)
+
+        # order by
+        order_by_data = data.get("order_by")
+        if order_by_data:
+            schema.order_by = OrderBySpec(**order_by_data)
+
+        # drill down
+        drill_down_data = data.get("drill_down")
+        if drill_down_data:
+            schema.drill_down = DrillDownSpec(**drill_down_data)
+
+        # calculation patterns
+        for pattern in data.get("calculation_patterns", []) or []:
+            try:
+                schema.calculation_patterns.append(CalculationPattern(pattern))
+            except ValueError:
+                pass
+
+        # molecule / denominator
+        molecule_data = data.get("molecule_metric")
+        if molecule_data:
+            schema.molecule_metric = MQLMetric(**molecule_data)
+
+        denominator_data = data.get("denominator_metric")
+        if denominator_data:
+            schema.denominator_metric = MQLMetric(**denominator_data)
+
+        schema.top_n = data.get("top_n", 0)
+        schema.bottom_n = data.get("bottom_n", 0)
+        schema.original_question = data.get("original_question", "")
+        schema.resolved_question = data.get("resolved_question", "")
+
+        return schema
+
+    def is_valid(self) -> tuple:
+        """验证 MQL 有效性，返回 (is_valid, error_message)"""
+        if not self.metric and not self.metrics:
+            return False, "缺少指标信息"
+
+        if self.intent == MQLIntent.UNKNOWN:
+            return False, "意图无法识别"
+
+        if self.intent not in [MQLIntent.GREETING, MQLIntent.THANKS, MQLIntent.BYE]:
+            if not self.time:
+                return False, "缺少时间范围"
+
+        return True, ""
+
+
+@dataclass
+class ThinkingStep:
+    """思考步骤（用于调试和追踪）"""
+    step: str                          # 步骤名称
+    status: str                        # pending / running / completed / failed
+    content: Optional[str] = None      # 内容
+    timestamp: Optional[str] = None    # 时间戳
+    llm_used: bool = False            # 是否使用 LLM
+    duration_ms: int = 0               # 耗时（毫秒）
+    source: Optional[str] = None       # 来源：local_model / llm / None
+    entities: List[Dict[str, Any]] = field(default_factory=list)  # 抽取的实体列表
+    needs_clarification: bool = False  # 是否需要追问
+    clarification_message: Optional[str] = ""  # 追问消息
+    clarification_options: List[Dict[str, str]] = field(default_factory=list)  # 追问选项
+    original_question: Optional[str] = ""  # 原始问题（用于追问改写）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step": self.step,
+            "status": self.status,
+            "content": self.content,
+            "timestamp": self.timestamp,
+            "llm_used": self.llm_used,
+            "duration_ms": self.duration_ms,
+            "source": self.source,
+            "entities": self.entities,
+            "needs_clarification": self.needs_clarification,
+            "clarification_message": self.clarification_message,
+            "clarification_options": self.clarification_options,
+            "original_question": self.original_question,
+        }
+
+
+@dataclass
+class SQLResult:
+    """SQL 执行结果"""
+    sql: str = ""                      # 生成的 SQL
+    params: Dict[str, Any] = field(default_factory=dict)  # SQL 参数
+    executed: bool = False             # 是否已执行
+    execution_time_ms: int = 0         # 执行耗时
+    data: List[Dict[str, Any]] = field(default_factory=list)  # 结果数据
+    columns: List[str] = field(default_factory=list)  # 列名数组（中文别名），顺序与SQL SELECT一致
+    total: int = 0                     # 总记录数
+    error: str = ""                    # 错误信息
+
+    def is_success(self) -> bool:
+        return self.executed and not self.error
+
+
+@dataclass
+class AnomalyAnnotation:
+    """异常标注"""
+    type: str = ""                    # 异常类型：significant_drop / significant_yoy_drop / zero_value
+    metric: str = ""                  # 指标名称
+    value: float = 0.0               # 异常值（如变化百分比）
+    threshold: float = 0.0            # 触发阈值
+    message: str = ""                 # 标注消息
+
+    # 额外上下文
+    dimension: str = ""              # 关联维度
+    dimension_value: str = ""        # 维度值
+    suggestion: str = ""             # 建议
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "metric": self.metric,
+            "value": self.value,
+            "threshold": self.threshold,
+            "message": self.message,
+            "dimension": self.dimension,
+            "dimension_value": self.dimension_value,
+            "suggestion": self.suggestion,
+        }
+
+@dataclass
+class ContextScope:
+    """Typed V2 context cache with dict-style compatibility for legacy callers."""
+
+    clarification_message: Optional[str] = None
+    clarification_options: List[Dict[str, Any]] = field(default_factory=list)
+    similar_cases: List[Dict[str, Any]] = field(default_factory=list)
+    suggestions: List[str] = field(default_factory=list)
+    drilldown_type: Optional[str] = None
+    comparison_results: Optional[Any] = None
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+    _KNOWN_KEYS = {
+        "clarification_message",
+        "clarification_options",
+        "similar_cases",
+        "suggestions",
+        "drilldown_type",
+        "comparison_results",
+    }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self._KNOWN_KEYS:
+            value = getattr(self, key)
+            return default if value is None else value
+        return self.extras.get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self._KNOWN_KEYS:
+            return getattr(self, key)
+        return self.extras[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self._KNOWN_KEYS:
+            setattr(self, key, value)
+            return
+        self.extras[key] = value
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        if key in self._KNOWN_KEYS:
+            value = getattr(self, key)
+            setattr(self, key, None)
+            return default if value is None else value
+        return self.extras.pop(key, default)
+
+    def __bool__(self) -> bool:
+        return any(
+            [
+                self.clarification_message,
+                self.clarification_options,
+                self.similar_cases,
+                self.suggestions,
+                self.drilldown_type,
+                self.comparison_results,
+                self.extras,
+            ]
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "clarification_message": self.clarification_message,
+            "clarification_options": list(self.clarification_options),
+            "similar_cases": list(self.similar_cases),
+            "suggestions": list(self.suggestions),
+            "drilldown_type": self.drilldown_type,
+            "comparison_results": self.comparison_results,
+        }
+        payload.update(self.extras)
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ContextScope":
+        if not data:
+            return cls()
+
+        extras = {key: value for key, value in data.items() if key not in cls._KNOWN_KEYS}
+        return cls(
+            clarification_message=data.get("clarification_message"),
+            clarification_options=data.get("clarification_options") or [],
+            similar_cases=data.get("similar_cases") or [],
+            suggestions=data.get("suggestions") or [],
+            drilldown_type=data.get("drilldown_type"),
+            comparison_results=data.get("comparison_results"),
+            extras=extras,
+        )
+
+
+@dataclass
+class V2State:
+    """
+    V2 LangGraph 状态定义
+
+    这是 LangGraph StateGraph 的状态容器，
+    包含全局会话状态、当前查询状态、历史状态栈、临时缓存。
+    """
+    # ===== 全局会话状态 =====
+    session_id: str = ""               # 会话 ID
+    user_id: str = "default"          # 用户 ID
+    user_permissions: Dict[str, Any] = field(default_factory=dict)  # 权限
+
+    # ===== 当前查询状态 =====
+    question: str = ""                 # 用户问题
+    mql: Optional[MQLSchema] = None   # 当前 MQL
+    sql: str = ""                      # 生成的 SQL
+    sql_result: Optional[SQLResult] = None  # SQL 执行结果
+    answer: str = ""                   # 最终回答
+    error: str = ""                    # 错误信息
+    supplementary_info: List[Dict[str, Any]] = field(default_factory=list)  # 补充信息（同比/环比等）
+
+    # ===== 触发分析结果 =====
+    analysis: Optional[Dict[str, Any]] = None  # 触发分析输出（AnalysisOutput.to_dict()）
+    multi_metric_data: List[Dict[str, Any]] = field(default_factory=list)  # 多指标下钻数据
+    category: str = ""  # 下钻类别 (sales/ad/inventory/cost)
+    mom_change: Optional[float] = None  # 环比变化率（%）
+    yoy_change: Optional[float] = None  # 同比变化率（%）
+
+    # ===== 思考过程 =====
+    thinking_steps: List[ThinkingStep] = field(default_factory=list)
+
+    # ===== 历史状态栈（支持回退） =====
+    history_stack: List[str] = field(default_factory=list)  # MQL JSON 字符串列表
+
+    # ===== 上下文继承 =====
+    inherited_mql: Optional[MQLSchema] = None  # 继承的 MQL（用于多轮对话）
+
+    # ===== 临时缓存 =====
+    context_cache: ContextScope = field(default_factory=ContextScope)  # RAG 结果等
+    session_state: Optional[Dict[str, Any]] = None
+    multi_metric_mode: bool = False
+    drilldown_category: Optional[str] = None
+    conversation_summary: Optional[Dict[str, Any]] = None
+
+    # ===== 元数据 =====
+    created_at: str = ""               # 创建时间
+    updated_at: str = ""               # 更新时间
+
+    # ===== 语义快照缓存（router 写入，节点直接读取） =====
+    _snapshot: Optional[Dict[str, Any]] = None  # SemanticSnapshotService 快照
+
+    # ===== 指标分析能力配置 =====
+    metric_capability: Dict[str, Any] = field(default_factory=dict)  # 从语义快照获取
+    one_sentence_summary: str = ""   # 一句话核心结论
+    analysis_summary: str = ""       # 详细分析摘要
+
+    # ===== 状态控制 =====
+    current_step: str = ""             # 当前步骤
+    retry_count: int = 0              # 重试次数
+    max_retries: int = 3              # 最大重试次数
+    source: str = ""                  # 数据来源：followup=追问，llm=LLM生成，local_model=本地模型
+
+    # ===== 可解释性 =====
+    explanation: Optional[Dict[str, str]] = None  # 字段解释信息（指标含义、维度、时间等）
+
+    # ===== 泛指维度处理 =====
+    is_generic_result: bool = False   # 是否为泛指默认结果
+    clarification_options: List[Dict[str, Any]] = field(default_factory=list)  # 细化选项
+    needs_clarification: bool = False  # 槽位消解引擎设置的追问标志
+    clarification_message: Optional[str] = ""  # 追问消息
+
+    def add_thinking_step(self, step: str, status: str = "completed",
+                          content: str = None, llm_used: bool = False,
+                          duration_ms: int = 0, source: str = None,
+                          entities: List[Dict[str, Any]] = None,
+                          needs_clarification: bool = False,
+                          clarification_message: str = "",
+                          clarification_options: List[Dict[str, Any]] = None,
+                          original_question: str = ""):
+        """添加思考步骤"""
+        if entities is None:
+            entities = []
+        if clarification_options is None:
+            clarification_options = []
+        self.thinking_steps.append(ThinkingStep(
+            step=step,
+            status=status,
+            content=content,
+            timestamp=datetime.now().isoformat(),
+            llm_used=llm_used,
+            duration_ms=duration_ms,
+            source=source,
+            entities=entities,
+            needs_clarification=needs_clarification,
+            clarification_message=clarification_message,
+            clarification_options=clarification_options,
+            original_question=original_question,
+        ))
+
+    def push_history(self, mql_json: str):
+        """将当前 MQL 压入历史栈（支持回退）"""
+        self.history_stack.append(mql_json)
+        # 限制历史栈大小
+        if len(self.history_stack) > 10:
+            self.history_stack = self.history_stack[-10:]
+
+    def pop_history(self) -> Optional[str]:
+        """从历史栈弹出上一个 MQL（用于回退）"""
+        if len(self.history_stack) > 1:
+            self.history_stack.pop()
+            return self.history_stack[-1] if self.history_stack else None
+        return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "question": self.question,
+            "mql": self.mql.to_dict() if self.mql else None,
+            "sql": self.sql,
+            "answer": self.answer,
+            "error": self.error,
+            "thinking_steps": [s.to_dict() for s in self.thinking_steps],
+            "history_stack": self.history_stack,
+            "context_cache": self.context_cache.to_dict(),
+            "session_state": self.session_state,
+            "multi_metric_mode": self.multi_metric_mode,
+            "drilldown_category": self.drilldown_category,
+            "conversation_summary": self.conversation_summary,
+            "current_step": self.current_step,
+            "retry_count": self.retry_count,
+        }
+
+
+# ==================== V2State 辅助函数 ====================
+
+def add_thinking_step(state: V2State, step: str, status: str = "completed",
+                       content: str = None, llm_used: bool = False,
+                       duration_ms: int = 0, source: str = None,
+                       entities: List[Dict[str, Any]] = None,
+                       needs_clarification: bool = False,
+                       clarification_message: str = "",
+                       clarification_options: List[Dict[str, Any]] = None,
+                       original_question: str = "") -> None:
+    """添加思考步骤到状态"""
+    if entities is None:
+        entities = []
+    if clarification_options is None:
+        clarification_options = []
+    state["thinking_steps"].append(ThinkingStep(
+        step=step,
+        status=status,
+        content=content,
+        timestamp=datetime.now().isoformat(),
+        llm_used=llm_used,
+        duration_ms=duration_ms,
+        source=source,
+        entities=entities,
+        needs_clarification=needs_clarification,
+        clarification_message=clarification_message,
+        clarification_options=clarification_options,
+        original_question=original_question,
+    ))
+
+
+def push_history(state: V2State, mql_json: str) -> None:
+    """将当前 MQL 压入历史栈（支持回退）"""
+    state.history_stack.append(mql_json)
+    # 限制历史栈大小
+    if len(state.history_stack) > 10:
+        state.history_stack = state.history_stack[-10:]
+
+
+def pop_history(state: V2State) -> Optional[str]:
+    """从历史栈弹出上一个 MQL（用于回退）"""
+    if len(state.history_stack) > 1:
+        state.history_stack.pop()
+        return state.history_stack[-1] if state.history_stack else None
+    return None
+
+
+def v2state_to_dict(state: V2State) -> Dict[str, Any]:
+    """将 V2State 转换为字典"""
+    return {
+        "session_id": state.session_id,
+        "user_id": state.user_id,
+        "question": state.question,
+        "mql": state.mql.to_dict() if state.mql else None,
+        "sql": state.sql,
+        "answer": state.answer,
+        "error": state.error,
+        "thinking_steps": [s.to_dict() for s in state.thinking_steps],
+        "history_stack": state.history_stack,
+        "context_cache": state.context_cache.to_dict(),
+        "session_state": state.session_state,
+        "multi_metric_mode": state.multi_metric_mode,
+        "drilldown_category": state.drilldown_category,
+        "conversation_summary": state.conversation_summary,
+        "current_step": state.current_step,
+        "retry_count": state.retry_count,
+    }
+
+
+def create_v2_state(session_id: str = "", user_id: str = "default",
+                    question: str = "", created_at: str = None) -> V2State:
+    """创建初始 V2State"""
+    return V2State(
+        session_id=session_id,
+        user_id=user_id,
+        user_permissions={},
+        question=question,
+        mql=None,
+        sql="",
+        sql_result=None,
+        answer="",
+        error="",
+        thinking_steps=[],
+        history_stack=[],
+        inherited_mql=None,
+        context_cache=ContextScope(),
+        session_state=None,
+        multi_metric_mode=False,
+        drilldown_category=None,
+        conversation_summary=None,
+        created_at=created_at or datetime.now().isoformat(),
+        updated_at=datetime.now().isoformat(),
+        current_step="",
+        retry_count=0,
+        max_retries=3,
+    )

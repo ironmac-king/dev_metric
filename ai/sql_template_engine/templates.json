@@ -1,0 +1,34 @@
+{
+  "templates": [
+    {
+      "intent": "query_value",
+      "name": "基础数值查询",
+      "sql_template": "SELECT\n    {field}\nFROM {table}\nWHERE metric_code = '{metric_code}'\n  AND {date_column} BETWEEN '{start_date}' AND '{end_date}'",
+      "description": "基础数值查询，不做任何聚合计算"
+    },
+    {
+      "intent": "query_trend",
+      "name": "环比趋势查询",
+      "sql_template": "SELECT\n    {date_column},\n    {field} AS metric_value,\n    LAG({field}, 1) OVER (ORDER BY {date_column}) AS prev_value,\n    {field} - LAG({field}, 1) OVER (ORDER BY {date_column}) AS diff,\n    ROUND(({field} - LAG({field}, 1) OVER (ORDER BY {date_column})) / NULLIF(LAG({field}, 1) OVER (ORDER BY {date_column}), 0) * 100, 2) AS mom_rate\nFROM {table}\nWHERE metric_code = '{metric_code}'\n  AND {date_column} BETWEEN '{start_date}' AND '{end_date}'\nORDER BY {date_column} DESC",
+      "description": "环比趋势查询，计算当前值与上期值的差和环比增长率"
+    },
+    {
+      "intent": "query_comparison",
+      "name": "同比查询",
+      "sql_template": "SELECT\n    t1.{date_column} AS date,\n    t1.{field} AS current_value,\n    t2.{field} AS last_year_value,\n    t1.{field} - t2.{field} AS diff_value,\n    ROUND((t1.{field} - t2.{field}) / NULLIF(t2.{field}, 0) * 100, 2) AS yoy_rate\nFROM {table} t1\nLEFT JOIN {table} t2\n    ON t1.{date_column} = DATE_SUB(t2.{date_column}, INTERVAL 1 YEAR)\n    AND t1.metric_code = t2.metric_code\nWHERE t1.metric_code = '{metric_code}'\n  AND t1.{date_column} BETWEEN '{start_date}' AND '{end_date}'\nORDER BY t1.{date_column} DESC",
+      "description": "同比对比查询，对比去年同期数据"
+    },
+    {
+      "intent": "query_ranking",
+      "name": "排名查询",
+      "sql_template": "SELECT\n    {dimension},\n    {field} AS metric_value,\n    RANK() OVER (ORDER BY {field} DESC) AS rank_num,\n    ROUND({field} / SUM({field}) OVER () * 100, 2) AS pct_of_total\nFROM {table}\nWHERE metric_code = '{metric_code}'\n  AND {date_column} BETWEEN '{start_date}' AND '{end_date}'\nGROUP BY {dimension}, {field}\nORDER BY rank_num\nLIMIT {top_n}",
+      "description": "排名查询，支持 GROUP BY 下钻维度"
+    },
+    {
+      "intent": "query_ranking",
+      "name": "分组排名查询",
+      "sql_template": "SELECT\n    {dimension},\n    {field} AS metric_value,\n    RANK() OVER (PARTITION BY {dimension} ORDER BY {field} DESC) AS rank_num,\n    ROUND({field} / SUM({field}) OVER (PARTITION BY {dimension}) * 100, 2) AS pct_of_group\nFROM {table}\nWHERE metric_code = '{metric_code}'\n  AND {date_column} BETWEEN '{start_date}' AND '{end_date}'\nGROUP BY {dimension}, {field}\nORDER BY rank_num\nLIMIT {top_n}",
+      "description": "分组内排名查询"
+    }
+  ]
+}

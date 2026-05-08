@@ -1,0 +1,28 @@
+{
+  "name": "dev-metric-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dompurify": "^3.3.3",
+    "echarts": "^5.5.0",
+    "element-plus": "^2.5.0",
+    "lottie-web": "^5.13.0",
+    "marked": "^18.0.0",
+    "pinia": "^2.1.7",
+    "sql-formatter": "^15.3.0",
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "playwright": "^1.59.1",
+    "vite": "^5.0.0"
+  }
+}

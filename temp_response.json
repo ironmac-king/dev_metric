@@ -1,0 +1,61 @@
+{
+  "session_id": "test-rec4",
+  "answer": "本月销售额为 194,480,090.48",
+  "sql": "SELECT \n\tSUM(ORDERED_PRODUCTSALES) AS `ORDERED_PRODUCTSALES`\nFROM  ids.IDS_AMZ_COMPREHENSIVE_DI\nWHERE FDATE >= '2026-04-01' AND FDATE <= '2026-04-16'",
+  "thinking_steps": [
+    {
+      "step": "查询条件",
+      "status": "completed",
+      "content": "查询条件：本月\n时间范围：2026-04-01 至 2026-04-16\n维度筛选：无（汇总统计）"
+    },
+    {
+      "step": "数据来源",
+      "status": "completed",
+      "content": "数据表：ids.IDS_AMZ_COMPREHENSIVE_DI"
+    },
+    {
+      "step": "计算方式",
+      "status": "completed",
+      "content": "对 ORDER_PRODUCTSALES 字段求和（SUM）"
+    },
+    {
+      "step": "查询结果",
+      "status": "completed",
+      "content": "本月销售额为 194,480,090.48"
+    }
+  ],
+  "chart_config": {
+    "chart_type": "table",
+    "data": [
+      {
+        "销售额": "194480090.475895"
+      }
+    ],
+    "columns": [
+      "销售额"
+    ],
+    "table": {
+      "columns": [
+        "销售额"
+      ],
+      "data": [
+        {
+          "销售额": "194480090.475895"
+        }
+      ],
+      "pagination": {
+        "page": 1,
+        "pageSize": 10
+      }
+    }
+  },
+  "suggestions": [
+    "👉 看看本月各品类卖得怎么样",
+    "💡 这个月销售额变化趋势如何",
+    "📈 和上个月/去年比比销售额变化"
+  ],
+  "anomaly_warnings": [],
+  "needs_clarification": false,
+  "clarification_type": null,
+  "clarification_message": null
+}

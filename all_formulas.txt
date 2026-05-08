@@ -1,0 +1,712 @@
+=== 30日均值 ===
+keywords: 30日均值,近30天平均,月均,最近1个月,月平均
+pattern: AVG({metric}) OVER(ORDER BY dt ROWS 29 PRECEDING)
+
+=== 30日留存 ===
+keywords: 月留,30日留存,一个月后还来
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE dt BETWEEN 'T+1' AND 'T+30') / COUNT(DISTINCT user_id)
+
+=== 7日峰值 ===
+keywords: 7日最高,近7天峰值,7天最高是多少,最近7天最高
+pattern: MAX({metric}) OVER(ORDER BY dt ROWS 6 PRECEDING)
+
+=== 7日滑动求和 ===
+keywords: 7日合计,近7天总计,7天累加,最近7天加起来
+pattern: SUM({metric}) OVER(ORDER BY dt ROWS 6 PRECEDING)
+
+=== 7日均值 ===
+keywords: 7日均值,近7天平均,周均,最近7天,7天平均,周平均,近7天均值,7天平均值,最近一周平均,这7天平均,过去7天均值,7日平均,周均值,最近一周是多少
+pattern: AVG({metric}) OVER(ORDER BY fdate ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+
+=== 7日留存 ===
+keywords: 7日留存,周留,一周后还来,7天后留存
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE dt BETWEEN 'T+1' AND 'T+7') / COUNT(DISTINCT user_id)
+
+=== 7日最低 ===
+keywords: 7日最低,近7天最低,7天最小值,最近7天最低
+pattern: MIN({metric}) OVER(ORDER BY dt ROWS 6 PRECEDING)
+
+=== RFM分析 ===
+keywords: RFM,最近一次,消费频率,消费金额,RFM评分,RFM模型,最近频率货币,客户分层
+pattern: ROW_NUMBER() OVER(PARTITION BY user_id ORDER BY recency, frequency, monetary DESC)
+
+=== 安全库存预警 ===
+keywords: 安全库存,库存预警,低于安全库存,库存不足,库存不足,缺货预警,库存告急,低于安全库存,需要补货
+pattern: CASE WHEN stock < safety_stock THEN '预警' ELSE '正常' END
+
+=== 百分位排名 ===
+keywords: 百分比排名,前20%,前10%,后10%,属于百分之多少
+pattern: PERCENT_RANK() OVER(ORDER BY {metric} DESC)
+
+=== 爆款占比 ===
+keywords: 爆款占比,热销款占比,头部产品占比
+pattern: SUM(top_product_sales) / NULLIF(SUM(total_sales), 0) * 100
+
+=== 差距分析 ===
+keywords: 差距,差多少,落后多少
+pattern: CASE WHEN {metric} > competitor THEN '领先' ELSE '落后' END
+
+=== 长尾搜索占比 ===
+keywords: 长尾词,小众搜索,长尾占比,无结果率,搜不到比例,空结果占比
+pattern: COUNT(*) FILTER(WHERE search_count < 10) / NULLIF(COUNT(*), 0) * 100
+
+=== 畅销商品 ===
+keywords: 畅销,卖得好,热销,爆款
+pattern: ORDER BY {metric} DESC LIMIT {n}
+
+=== 沉睡客户唤醒 ===
+keywords: 沉睡唤醒,唤醒,很久没来,即将流失
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE DATEDIFF(CURRENT_DATE, last_purchase_date) BETWEEN 30 AND 90)
+
+=== 沉睡用户 ===
+keywords: 沉睡,不活跃,很久没来,流失边缘
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE last_dt < DATE_SUB(dt, 30))
+
+=== 城市排名 ===
+keywords: 城市排名,哪个城市,城市统计
+pattern: ROW_NUMBER() OVER(PARTITION BY city ORDER BY {metric} DESC)
+
+=== 城市占比 ===
+keywords: 城市占比,哪个城市多,城市分布
+pattern: {metric} / SUM({metric}) OVER(PARTITION BY city)
+
+=== 成本占比 ===
+keywords: 成本率,费用率,成本占比,花了多少
+pattern: SUM(cost) / NULLIF(SUM(revenue), 0) * 100
+
+=== 次日留存 ===
+keywords: 次日留存,次留,明天还来,今天明天都来
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE dt = 'T+1') / COUNT(DISTINCT user_id) * 100
+
+=== 从低到高 ===
+keywords: 从低到高,从小到大,升序排列,最低在前,按从小到大
+pattern: ORDER BY {metric} ASC
+
+=== 从高到低 ===
+keywords: 从高到低,从大到小,降序排列,最高在前,按从大到小
+pattern: ORDER BY {metric} DESC
+
+=== 促销期对比 ===
+keywords: 促销量,平时比,活动效果,大促对比,促销期间对比,促销效果对比
+pattern: {metric} FILTER(WHERE promotion_id IS NOT NULL) / NULLIF({metric} FILTER(WHERE promotion_id IS NULL), 0)
+
+=== 促销期峰值 ===
+keywords: 大促峰值,活动高峰,秒杀高峰,活动最高,促销最高
+pattern: MAX({metric}) FILTER(WHERE is_promotion = 1)
+
+=== 等级划分 ===
+keywords: 高/中/低,ABC分类,等级划分,分成几等
+pattern: NTILE(3) OVER(ORDER BY {metric} DESC)
+
+=== 点击率 ===
+keywords: CTR,点击率,点击率多少,点开率,搜索点击率,搜后点击,点击占比
+pattern: clicks / NULLIF(impressions, 0) * 100
+
+=== 订单履约率 ===
+keywords: 履约率,按时发货,发货及时率
+pattern: SUM(fulfilled_on_time) / NULLIF(SUM(total_orders), 0) * 100
+
+=== 独立访客数 ===
+keywords: UV,独立访客,去重访客,有多少人
+pattern: COUNT(DISTINCT visitor_id)
+
+=== 独立用户数 ===
+keywords: 独立用户,去重用户,UV,有多少人,独立访客,去重访客,有多少人
+pattern: COUNT(DISTINCT user_id)
+
+=== 多条件 ===
+keywords: 且和,并且,同时满足,满足A和B
+pattern: CASE WHEN cond1 AND cond2 THEN 'A' WHEN cond1 OR cond2 THEN 'B' END
+
+=== 多字段排序 ===
+keywords: 先按X再按Y,主要按XX次要按YY,多字段排序
+pattern: ORDER BY {metric1} DESC, {metric2} ASC
+
+=== 费用率 ===
+keywords: 费用率,营销费用率,运营费用率,各项费用
+pattern: SUM(expense) / NULLIF(SUM(revenue), 0) * 100
+
+=== 分类占比 ===
+keywords: 占XX多少,XX占比,品类占比,按XX分类的占比,占分类的,各类占比,各品类占比,各渠道占比,各区域占比,占XX的比例,XX占总体的多少,按XX分类的占比
+pattern: {metric} / SUM({metric}) OVER(PARTITION BY {dimension}) * 100
+
+=== 分位数 ===
+keywords: P10,P90,P95,P75,P25,百分位数,四分位数
+pattern: PERCENTILE_CONT({metric}, 0.1) OVER()
+
+=== 分组前N ===
+keywords: 每组前3,各品类前10,分组排名,每个XX的排名,按XX分组排名
+pattern: ROW_NUMBER() OVER(PARTITION BY {dimension} ORDER BY {metric} DESC) AS rn
+
+=== 付费流量占比 ===
+keywords: 付费流量,付费占比,投流占比,付费渠道占比,投流占比
+pattern: SUM(visits) FILTER(WHERE channel = '付费') / NULLIF(SUM(visits), 0) * 100
+
+=== 复购客户数 ===
+keywords: 复购,回头客,再次购买
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE purchase_count > 1)
+
+=== 复购率 ===
+keywords: 复购率,复购,再次购买率,买多次
+pattern: reorder_users / NULLIF(total_users, 0) * 100
+
+=== 高价值会员 ===
+keywords: 高价值会员,VIP会员,核心会员,贡献最大的会员
+pattern: SUM(membership_value) FILTER(WHERE member_tier = '高价值') / NULLIF(SUM(membership_value), 0) * 100
+
+=== 高价值用户 ===
+keywords: VIP,高价值,RFM,重要用户
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE RFM_score > 100)
+
+=== 各省汇总 ===
+keywords: 各省统计,按省份,哪个省,省级别
+pattern: SUM({metric}) OVER(PARTITION BY province)
+
+=== 贡献度 ===
+keywords: 贡献度,贡献了多少,占比贡献,占总贡献的
+pattern: {metric} / SUM({metric}) OVER() * 100 AS contribution
+
+=== 滚动聚合 ===
+keywords: 滚动求和,滚动平均,滑动聚合
+pattern: SUM({metric}) OVER(ORDER BY dt ROWS N PRECEDING)
+
+=== 好评率 ===
+keywords: 好评率,好评,满意度,好评占比,满意度,服务评价
+pattern: good_reviews / NULLIF(total_reviews, 0) * 100
+
+=== 坏账率 ===
+keywords: 坏账,坏账率,收不回来
+pattern: SUM(bad_debt) / NULLIF(SUM(accounts_receivable), 0) * 100
+
+=== 环比增长率 ===
+keywords: 比上期增长率,比上期增长百分比,上期增长百分比
+pattern: ({metric} - LAG({metric}, 1) OVER(ORDER BY dt)) / NULLIF(LAG({metric}, 1) OVER(ORDER BY dt), 0) * 100
+
+=== 环比增长值 ===
+keywords: 比上期增长,跟上个周期比,和上期比,跟上个月比,跟上期比,比上个月增长,比上周增长,和上个月比怎么样,跟上个周期比增长,近期对比,比上一期增长,上期增长
+pattern: {metric} - LAG({metric}, 1) OVER(ORDER BY dt)
+
+=== 回流用户 ===
+keywords: 回流,回来,重新活跃,唤醒,流失后回来
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE gap > 7 AND return_count > 0) / COUNT(DISTINCT user_id)
+
+=== 会员活跃度 ===
+keywords: 会员活跃,会员登录,活跃度,活跃度,会员登录,活跃比例
+pattern: COUNT(DISTINCT active_member_id) / NULLIF(COUNT(DISTINCT total_member_id), 0) * 100
+
+=== 会员留存率 ===
+keywords: 会员留存,会员续费,会员留存率
+pattern: COUNT(DISTINCT renewed_member_id) / NULLIF(COUNT(DISTINCT expired_member_id), 0) * 100
+
+=== 会员续费率 ===
+keywords: 续费率,续费,会员续期
+pattern: SUM(renewed) / NULLIF(SUM(expired), 0) * 100
+
+=== 会员增长率 ===
+keywords: 会员增长,新增会员,会员增速
+pattern: COUNT(DISTINCT new_member_id) / NULLIF(COUNT(DISTINCT total_member_id), 0) * 100
+
+=== 会员占比 ===
+keywords: 会员占比,会员渗透,付费会员占比
+pattern: COUNT(DISTINCT member_id) / NULLIF(COUNT(DISTINCT total_user_id), 0) * 100
+
+=== 活动ROI ===
+keywords: 活动ROI,促销ROI,投入产出比,活动效果,投入产出,活动回报
+pattern: SUM(sales) FILTER(WHERE promotion_id IS NOT NULL) / NULLIF(SUM(cost), 0)
+
+=== 活动参与率 ===
+keywords: 参与率,活动参与,多少人参加
+pattern: SUM(participants) / NULLIF(SUM(exposed), 0) * 100
+
+=== 活动拉新 ===
+keywords: 活动拉新,活动获客,新客活动
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE first_purchase_campaign = campaign_id)
+
+=== 活动曝光 ===
+keywords: 曝光量,多少人看到,展示次数,内容曝光,看到,展示
+pattern: SUM(impressions)
+
+=== 活动效果 ===
+keywords: 活动效果,促销效果,活动贡献
+pattern: {metric} / NULLIF(SUM({metric}) OVER(), 0) * 100
+
+=== 活动转化率 ===
+keywords: 活动转化,活动购买,活动成交
+pattern: SUM(conversions) / NULLIF(SUM(participants), 0) * 100
+
+=== 活跃客户数 ===
+keywords: 活跃客户,活跃,在线
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE activity_date = dt)
+
+=== 活跃用户 ===
+keywords: 活跃用户,DAU,日活,在线用户,活跃客户,活跃
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE dt = '指定日期')
+
+=== 获客成本 ===
+keywords: CPA,获客成本,获客价格,拉新成本,每个客户成本
+pattern: SUM(cost) / NULLIF(COUNT(DISTINCT new_customer_id), 0)
+
+=== 季度初至今 ===
+keywords: QTD,季度初至今,本季度累计
+pattern: SUM({metric}) OVER(PARTITION BY YEAR(dt), QUARTER(dt) ORDER BY dt)
+
+=== 加购率 ===
+keywords: 加入购物车,加购率,加入购物车比率,加入购物车比率,加购比例,多少人加购,加购人数占比,加购转化,购物车转化,加了几件,有人加购吗,加购情况
+pattern: add_cart_users / NULLIF(visitors, 0) * 100
+
+=== 解决率 ===
+keywords: 解决率,解决了多少,解决比例,成功解决
+pattern: SUM(resolved) / NULLIF(SUM(total_tickets), 0) * 100
+
+=== 近30日合计 ===
+keywords: 近30日,最近30天,最近一个月,30日合计
+pattern: SUM({metric}) OVER(ORDER BY dt ROWS BETWEEN 29 PRECEDING AND CURRENT ROW)
+
+=== 近7日合计 ===
+keywords: 近7日,最近7天,最近一周,7日合计,7天累加,近7天总计
+pattern: SUM({metric}) OVER(ORDER BY dt ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+
+=== 近似去重 ===
+keywords: 近似去重,估算UV,HLL
+pattern: APPROX_COUNT_DISTINCT(user_id)
+
+=== 精确去重 ===
+keywords: 精确UV,精确去重,人数
+pattern: COUNT(DISTINCT user_id)
+
+=== 净利率 ===
+keywords: 净利率,净利润率,纯利率
+pattern: (revenue - cost - expense) / NULLIF(revenue, 0) * 100
+
+=== 竞品对比 ===
+keywords: 竞品对比,跟XX比,比竞品
+pattern: ROW_NUMBER() OVER(ORDER BY {metric} DESC)
+
+=== 竞争力指数 ===
+keywords: 竞争力,强弱,优劣势
+pattern: {metric} / NULLIF(competitor_metric, 0)
+
+=== 绝对值 ===
+keywords: 绝对值,正数,取绝对值,不论正负
+pattern: ABS({metric})
+
+=== 均价 ===
+keywords: 平均价格,单价,每件多少钱
+pattern: SUM(amount) / NULLIF(SUM(quantity), 0)
+
+=== 开关函数 ===
+keywords: 开关,正负,正数负数,属于哪边
+pattern: IF({metric} > 0, '正', '负')
+
+=== 客单价 ===
+keywords: 客单价,每单均价,平均订单金额,人均消费,平均每单多少钱,人均消费,单均价,客单价是多少,人均订单金额,每单平均,单均价,客单价多少,人均多少钱
+pattern: SUM(order_amount) / NULLIF(COUNT(DISTINCT order_id), 0)
+
+=== 客服处理时长 ===
+keywords: 处理时长,解决时长,花了多久
+pattern: AVG(resolution_time)
+
+=== 客服工作量 ===
+keywords: 工作量,处理量,人均处理,客服负荷
+pattern: SUM(total_tickets) / NULLIF(COUNT(DISTINCT agent_id), 0)
+
+=== 客服响应率 ===
+keywords: 响应率,回复率,客服响应
+pattern: SUM(responded_count) / NULLIF(SUM(total_inquiries), 0) * 100
+
+=== 客户等级分布 ===
+keywords: 客户等级,VIP,普通,高级会员,会员等级分布,普通会员,黄金会员,等级分布
+pattern: CASE WHEN total_amount > 10000 THEN '高' WHEN total_amount > 1000 THEN '中' ELSE '低' END
+
+=== 客户流失率 ===
+keywords: 流失率,流失了多少,走了多少客户
+pattern: COUNT(DISTINCT churned_customer_id) / NULLIF(COUNT(DISTINCT total_customer_id), 0) * 100
+
+=== 客户生命周期价值 ===
+keywords: LTV,生命周期价值,客户总价值,总贡献,客户价值
+pattern: SUM(lifetime_revenue)
+
+=== 客群占比 ===
+keywords: 客群占比,高价值占比,新客占比
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE segment = '高价值') / COUNT(DISTINCT user_id) OVER() * 100
+
+=== 空值判断 ===
+keywords: 是否为空,有没有值,NULL判断
+pattern: CASE WHEN {metric} IS NULL THEN '无' ELSE '有' END
+
+=== 库存满足率 ===
+keywords: 满足率,现货率,有货率
+pattern: SUM(in_stock_orders) / NULLIF(SUM(total_orders), 0) * 100
+
+=== 库存周转率 ===
+keywords: 周转率,周转速度,几次,周转几次,周转次数,库存周转
+pattern: SUM(out_stock) / NULLIF(AVG(stock), 0)
+
+=== 库龄分层 ===
+keywords: 库龄等级,积压等级,呆滞等级,库龄分析,积压多久
+pattern: CASE WHEN days_on_hand > 90 THEN '呆滞' WHEN days_on_hand > 30 THEN '一般' ELSE '正常' END
+
+=== 库销比 ===
+keywords: 库销比,库存销售比,库存周转
+pattern: SUM({metric}) / NULLIF(SUM(sales), 0)
+
+=== 老客占比 ===
+keywords: 老客占比,复购客户比例,忠诚客户占比
+pattern: COUNT(DISTINCT returning_customer_id) / NULLIF(COUNT(DISTINCT customer_id), 0) * 100
+
+=== 累计占比 ===
+keywords: 累计占比,加到多少,加起来占多少,累计百分比
+pattern: SUM({metric}) OVER(ORDER BY {metric} DESC) / SUM({metric}) OVER() * 100
+
+=== 临期库存 ===
+keywords: 临期,快过期,即将过期,效期预警,多久到期
+pattern: CASE WHEN expiration_date < DATE_ADD(CURRENT_DATE, INTERVAL 30 DAY) THEN '临期' ELSE '正常' END
+
+=== 流失客户数 ===
+keywords: 流失客户,流失,流失率,离开的客户
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE last_purchase_date < DATE_SUB(CURRENT_DATE, 90))
+
+=== 流失用户 ===
+keywords: 流失,没回来,流失率,离开,不再来,流失了多少,走了多少客户
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE return_count = 0) / COUNT(DISTINCT user_id)
+
+=== 满减门槛 ===
+keywords: 满减,凑单,满多少,门槛,满减分析,凑单,满多少减,满额优惠
+pattern: CASE WHEN order_amount >= threshold THEN '满减' ELSE '不满' END
+
+=== 满意度 ===
+keywords: 满意度,好评率,服务评价
+pattern: SUM(satisfied_count) / NULLIF(SUM(total_ratings), 0) * 100
+
+=== 毛利率 ===
+keywords: 毛利,利润率,毛利率,赚了多少,毛利率分析,毛利占比,利润空间,赚了多少比例
+pattern: (revenue - cost) / NULLIF(revenue, 0) * 100
+
+=== 每日累计 ===
+keywords: 每日累计,日累计,累计,累加,加起来,总和
+pattern: SUM({metric}) OVER(ORDER BY dt ROWS UNBOUNDED PRECEDING) AS cum_value
+
+=== 目标完成率 ===
+keywords: 完成率,达标,目标完成,预算完成
+pattern: {actual} / NULLIF({target}, 0) * 100
+
+=== 内容点击 ===
+keywords: 点击,点开,浏览,内容点击
+pattern: SUM(clicks)
+
+=== 内容互动率 ===
+keywords: 互动率,评论,收藏,分享,内容互动率
+pattern: (SUM(comments) + SUM(favorites) + SUM(shares)) / NULLIF(SUM(impressions), 0) * 100
+
+=== 年环比增长 ===
+keywords: 年环比,年际增长,年度增长
+pattern: {metric} / LAG({metric}, 4) OVER(PARTITION BY WEEK(dt)) - 1
+
+=== 年同比增长 ===
+keywords: 年同比增长,比去年同期,跟去年比,年际增长,同比增长了多少,去年增长
+pattern: {metric} / LAG({metric}, 1) OVER(PARTITION BY YEAR(dt)) - 1
+
+=== 帕累托 ===
+keywords: 帕累托,二八法则,头部占比,尾部占比
+pattern: SUM({metric}) OVER(ORDER BY {metric} DESC) / SUM({metric}) OVER() * 100
+
+=== 排名后N ===
+keywords: 排名后,最低,倒数,最后几名,最少的,排名最后的,排名最低,倒数第一,倒数第二,倒数10名,最后一名,最差,最垫底,排名最差,销量最低,销售最低,表现最差,谁最差
+pattern: ORDER BY {metric} ASC LIMIT {n}
+
+=== 排名前N ===
+keywords: 排名前,前几名,Top,按XX排序,取前N个,第几名,前N名,前N个,排名前十,排第几,排名前十,前10名,前5名,前3名,第1名,第2名,第3名,Top10,Top5,Top3,top10,top5,top3,销量前10,销售前10,排名最前,最靠前,第一名,第二名,第三名,前几名是,谁是第一,谁是冠军,最高,最高的,最高是,最高有多少,销量最高,销售额最高
+pattern: ORDER BY {metric} DESC LIMIT {n}
+
+=== 排名前N ===
+keywords: 排名前,前几名,Top,按XX排序,取前N个,第几名,前N名,前N个,排名前十,排第几
+pattern: ORDER BY {metric} DESC LIMIT {n}
+
+=== 排名占比 ===
+keywords: 排名在前百分之,排在前%,第N名占
+pattern: ROW_NUMBER() OVER(ORDER BY {metric} DESC) / COUNT(*) OVER() * 100
+
+=== 偏差 ===
+keywords: 实际减预期,差异,超出多少
+pattern: {actual} - {expected}
+
+=== 拼接 ===
+keywords: 拼接,连接,加一起,合并
+pattern: CONCAT({metric}, '-', other_col)
+
+=== 平均配送时长 ===
+keywords: 配送时长,多久到,配送时间
+pattern: AVG(delivery_time)
+
+=== 平均响应时长 ===
+keywords: 响应时长,回复速度,多久回复,首次响应时长,多久回复,响应速度,首响时长
+pattern: AVG(first_response_time)
+
+=== 区间划分 ===
+keywords: 0-50,50-100,分段,分档,划分区间
+pattern: CASE WHEN {metric} < 50 THEN '低' WHEN {metric} < 100 THEN '中' ELSE '高' END
+
+=== 区域汇总 ===
+keywords: 华东华南,按区域,区域统计,大区
+pattern: SUM({metric}) OVER(PARTITION BY region)
+
+=== 渠道ROI ===
+keywords: 渠道ROI,投入产出,渠道效果,ROI,投入产出,投资回报,产出比,回报率
+pattern: SUM(revenue) FILTER(WHERE channel = '付费') / NULLIF(SUM(cost) FILTER(WHERE channel = '付费'), 0)
+
+=== 渠道对比 ===
+keywords: 渠道对比,哪个渠道好,渠道排名
+pattern: ROW_NUMBER() OVER(PARTITION BY channel ORDER BY {metric} DESC)
+
+=== 渠道贡献占比 ===
+keywords: 渠道贡献,各渠道占比,渠道占比,渠道价值,渠道贡献度
+pattern: {metric} / SUM({metric}) OVER(PARTITION BY channel) * 100
+
+=== 渠道转化率 ===
+keywords: 渠道转化,各渠道转化率,渠道效果,流量转化,流量价值,流量效率,来多少人买
+pattern: SUM(conversions) FILTER(WHERE channel = '{channel}') / NULLIF(SUM(visits) FILTER(WHERE channel = '{channel}'), 0) * 100
+
+=== 去除空格 ===
+keywords: 去掉空格,去空格,空格去掉
+pattern: TRIM({metric})
+
+=== 缺货率 ===
+keywords: 缺货,缺货率,无货,卖断
+pattern: SUM(stockout_count) / NULLIF(SUM(demand_count), 0) * 100
+
+=== 热门搜索词 ===
+keywords: 热搜,搜得最多,搜索热词,热搜排行,最热搜索
+pattern: ORDER BY search_count DESC LIMIT {n}
+
+=== 人均产出 ===
+keywords: 人均产能,人均产值,人均效益,人均销售,每人产出
+pattern: SUM(sales) / NULLIF(COUNT(staff), 0)
+
+=== 人均浏览页数 ===
+keywords: 人均页数,平均浏览,人均PV,访问深度,看了几页,人均页数,浏览深度
+pattern: SUM(page_views) / NULLIF(COUNT(DISTINCT visitor_id), 0)
+
+=== 上月同日 ===
+keywords: 上月同天,上月同期,上月同日,去年同期同天
+pattern: LAG({metric}, 1) OVER(PARTITION BY DAY(dt))
+
+=== 升级率 ===
+keywords: 升级,升级率,升级投诉,升级投诉,升级率,升级多少,被升级
+pattern: SUM(escalated_count) / NULLIF(SUM(total_inquiries), 0) * 100
+
+=== 市场份额 ===
+keywords: 市场份额,占比,市场地位
+pattern: {metric} / SUM({metric}) OVER(PARTITION BY market) * 100
+
+=== 首单时间 ===
+keywords: 首单时间,首次购买,第一次买,客户首购,什么时候首购
+pattern: MIN(first_purchase_date)
+
+=== 四舍五入 ===
+keywords: 四舍五入,保留几位,保留两位,保留整数
+pattern: ROUND({metric}, 2)
+
+=== 搜索关键词排名 ===
+keywords: 热搜词,搜索排名,搜什么,热搜,热搜词,搜得最多,搜索热词
+pattern: ROW_NUMBER() OVER(ORDER BY search_count DESC)
+
+=== 搜索人均次数 ===
+keywords: 搜索次数,人均搜索
+pattern: SUM(search_count) / NULLIF(COUNT(DISTINCT user_id), 0)
+
+=== 搜索转化率 ===
+keywords: 搜后购买,搜索转化,搜了买,搜索成交率,搜后购买
+pattern: SUM(conversion) FILTER(WHERE from_search = 1) / NULLIF(SUM(search_count), 0) * 100
+
+=== 填充零 ===
+keywords: 填补NULL,填充0,空值填充,没有的填0
+pattern: COALESCE({metric}, 0)
+
+=== 条件赋值 ===
+keywords: 如果大于,当大于,大于则,超过
+pattern: CASE WHEN {metric} > 100 THEN '高' ELSE '低' END
+
+=== 跳出率 ===
+keywords: 跳出率,跳走,跳出的比率,浏览一页就走,退出率,页面退出,多少人在这里走,跳出
+pattern: single_page_sessions / NULLIF(total_sessions, 0) * 100
+
+=== 同比差异 ===
+keywords: 同比差异,比去年多,同比变化,差异多少
+pattern: {metric} - LAG({metric}, 1) OVER(PARTITION BY YEAR(dt))
+
+=== 同比增长率 ===
+keywords: 同比增长率,比去年同期增长,同比增长百分比
+pattern: ({metric} - LAG({metric}, 1) OVER(PARTITION BY YEAR(dt), QUARTER(dt))) / NULLIF(LAG({metric}, 1) OVER(PARTITION BY YEAR(dt), QUARTER(dt)), 0) * 100
+
+=== 同比增长值 ===
+keywords: 同比增长,比去年同期,跟去年同期比,去年同期的增长,比去年增长,和去年比,跟去年同期比增长,同比增长了多少,去年增长,年际增长
+pattern: {metric} - LAG({metric}, 1) OVER(PARTITION BY QUARTER(dt))
+
+=== 退出率 ===
+keywords: 退出率,退出,离开页面
+pattern: SUM(exit_count) / NULLIF(SUM(page_views), 0) * 100
+
+=== 退货率 ===
+keywords: 退货率,退货,退款率
+pattern: returned_orders / NULLIF(total_orders, 0) * 100
+
+=== 唯一计数 ===
+keywords: 唯一计数,不重复的,有几种
+pattern: COUNT(DISTINCT {metric})
+
+=== 无结果搜索 ===
+keywords: 无结果,搜不到,空结果
+pattern: COUNT(*) FILTER(WHERE result_count = 0)
+
+=== 现金流 ===
+keywords: 现金流,现金流入流出,现金结余
+pattern: SUM(cash_inflow) - SUM(cash_outflow)
+
+=== 向上取整 ===
+keywords: 向上取,至少,取上线,进一
+pattern: CEIL({metric})
+
+=== 向下取整 ===
+keywords: 向下取,最多,取下线,舍去
+pattern: FLOOR({metric})
+
+=== 销售垫底 ===
+keywords: 卖得最差,最滞销,滞销王,销售倒数第一,谁卖得最少
+pattern: ORDER BY sales ASC LIMIT 1
+
+=== 销售冠军 ===
+keywords: 销冠,卖得最好,最爆款,销量冠军,谁是销冠,销售第一名
+pattern: ORDER BY sales DESC LIMIT 1
+
+=== 销售环比 ===
+keywords: 上期对比,上期增长,和上期比
+pattern: SUM(sales) / LAG(SUM(sales), 1) OVER(ORDER BY dt) - 1
+
+=== 销售同比 ===
+keywords: 销售同比,销售额同比增长,比去年销售
+pattern: SUM(sales) / LAG(SUM(sales), 1) OVER(PARTITION BY YEAR(dt)) - 1
+
+=== 销售完成率 ===
+keywords: 完成率,达标率,目标完成,完成进度,完成了多少,预算执行率,花了多少预算,预算消耗,执行率
+pattern: SUM(achieved) / NULLIF(SUM(target), 0) * 100
+
+=== 新客占比 ===
+keywords: 新客占比,新客户比例,首购占比,新用户占比
+pattern: COUNT(DISTINCT new_customer_id) / NULLIF(COUNT(DISTINCT customer_id), 0) * 100
+
+=== 新品占比 ===
+keywords: 新品占比,新品销售占比,新产品比例
+pattern: SUM(new_product_sales) / NULLIF(SUM(total_sales), 0) * 100
+
+=== 新增客户数 ===
+keywords: 新增客户,新客户,新注册,获客
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE first_purchase_date = dt)
+
+=== 新增用户 ===
+keywords: 今日新增,新用户,新注册,新来的,新增客户,新客户,新注册,获客
+pattern: COUNT(DISTINCT user_id) FILTER(WHERE first_dt = dt)
+
+=== 页面浏览量 ===
+keywords: PV,浏览量,页面浏览,看了多少次
+pattern: SUM(page_views)
+
+=== 页面停留时长 ===
+keywords: 停留时长,看了多久,页面时长,访问时长,看了多久,访问时长,呆了多久
+pattern: AVG(stay_time)
+
+=== 移动平均 ===
+keywords: 滑动平均,移动均值,窗口平均
+pattern: AVG({metric}) OVER(ORDER BY dt ROWS 6 PRECEDING)
+
+=== 用户等级 ===
+keywords: 普通,高级,会员,等级,用户分层
+pattern: CASE WHEN order_count >= 10 THEN '高' WHEN order_count >= 3 THEN '中' ELSE '低' END
+
+=== 优惠券核销率 ===
+keywords: 优惠券核销,领券率,用券率,优惠券使用率,领券用券,优惠券使用
+pattern: SUM(used) FILTER(WHERE coupon_id IS NOT NULL) / NULLIF(SUM(issued), 0) * 100
+
+=== 预计库存可用天数 ===
+keywords: 可用天数,还能卖多久,库存能撑几天,预计库存天数
+pattern: stock / NULLIF(AVG(daily_sales), 0)
+
+=== 预算剩余 ===
+keywords: 还剩多少,预算剩余,还差多少
+pattern: {budget} - SUM({metric}) OVER()
+
+=== 预算消耗 ===
+keywords: 消耗率,花了多少,消耗进度
+pattern: SUM({metric}) / NULLIF({total_budget}, 0) * 100
+
+=== 月初至今累计 ===
+keywords: 月初至今,MTD,月初到现在,本月累计
+pattern: SUM({metric}) OVER(PARTITION BY YEAR(dt), MONTH(dt) ORDER BY dt)
+
+=== 在途库存 ===
+keywords: 在途,在途库存,运输中
+pattern: SUM(in_transit_quantity)
+
+=== 账期分析 ===
+keywords: 账期,回款周期,应收账款,多久回款,账龄
+pattern: AVG(collection_period_days)
+
+=== 折扣价 ===
+keywords: 打几折,折后价,折扣价
+pattern: {metric} * discount / 10
+
+=== 折扣率 ===
+keywords: 折扣率,打折,折扣力度,让利,促销力度,优惠程度,让利幅度,打了几折,优惠多少
+pattern: AVG(discount_rate) FILTER(WHERE promotion_id IS NOT NULL)
+
+=== 整体占比 ===
+keywords: 占整体多少,占比,占总体的,占全部的,占比多少,百分比,占总金额的多少,占总额比例,占总量多少,占总盘子多少,整体占比多少,总体占比,全部占比,所有占比
+pattern: {metric} / SUM({metric}) OVER() * 100 AS pct
+
+=== 支付率 ===
+keywords: 支付率,付款率,支付转化,成交率
+pattern: paying_users / NULLIF(order_users, 0) * 100
+
+=== 滞销商品 ===
+keywords: 滞销,卖不动,积压商品,滞销品,滞销金额,积压金额,呆滞库存值,卖不动金额
+pattern: ORDER BY {metric} ASC LIMIT {n}
+
+=== 转化率 ===
+keywords: 转化率,转化,到达率,浏览到购买的转化,浏览到购买的比率,有多少人买了,转化效果,成交转化,进店转化,点击转化,广告转化,转化了多少,转化效果如何,成交率
+pattern: visitors / NULLIF(page_views, 0) * 100
+
+=== 转化周期 ===
+keywords: 多久转化,购买周期,决策周期,从访问到购买,转化时长
+pattern: AVG(days_to_convert)
+
+=== 准时交货率 ===
+keywords: 准时交货,按时到达,交货及时
+pattern: SUM(delivered_on_time) / NULLIF(SUM(delivered_total), 0) * 100
+
+=== 资产周转率 ===
+keywords: 资产周转,周转效率
+pattern: SUM(revenue) / NULLIF(AVG(total_assets), 0)
+
+=== 字符长度 ===
+keywords: 多长,字数,长度,字符数
+pattern: LENGTH({metric})
+
+=== 字符截取 ===
+keywords: 截取前N位,中间,前几个字符,后几位
+pattern: SUBSTRING({metric}, 1, N)
+
+=== 字符替换 ===
+keywords: 替换成,改成,替换,把XX换成
+pattern: REPLACE({metric}, 'old', 'new')
+
+=== 自定义排序 ===
+keywords: 指定排序,按XX排,按YYY排,想要排序
+pattern: ORDER BY {metric} {sort_order}
+
+=== 自然流量占比 ===
+keywords: 自然流量,免费流量,Organic占比,自然搜索占比,organic占比,免费流量占比
+pattern: SUM(visits) FILTER(WHERE channel = '自然') / NULLIF(SUM(visits), 0) * 100
+
+=== 总价 ===
+keywords: 总价,汇总,一共多少钱,总额
+pattern: SUM({metric} * quantity)
+

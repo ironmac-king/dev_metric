@@ -1,0 +1,73 @@
+{%- macro render_date_meta(end_date, time_params) %}
+date_meta AS (
+    SELECT
+        DATE_TRUNC('month', '{{ end_date }}') AS cur_month_start,
+        LAST_DAY('{{ end_date }}') AS cur_month_end,
+        '{{ end_date }}' AS cur_date,
+        CASE
+            WHEN '{{ end_date }}' = LAST_DAY('{{ end_date }}')
+            THEN 1 ELSE 0
+        END AS is_month_full,
+        DATE_ADD(DATE_TRUNC('month', '{{ end_date }}'), INTERVAL -12 MONTH) AS last_year_month_start,
+        DATE_ADD('{{ end_date }}', INTERVAL -12 MONTH) AS last_year_date,
+        DATE_ADD(DATE_TRUNC('month', '{{ end_date }}'), INTERVAL -1 MONTH) AS last_month_start,
+        DATE_ADD('{{ end_date }}', INTERVAL -1 MONTH) AS last_month_date
+),
+{%- endmacro %}
+
+{%- macro render_base_agg(tables, dimensions, metrics, filters, joins, time_params) %}
+base_agg AS (
+    SELECT
+        {% if dimensions %}{% for dim in dimensions %}{{ dim }}{% if not loop.last %},{% endif %}{% endfor %}{% if metrics %},{% endif %}{% endif %}
+        {% for m in metrics %}{{ m.agg_expression }} AS {{ m.name }}_raw{% if not loop.last %},{% endif %}
+{% endfor %}
+    FROM {{ tables[0] }}
+    {% if joins %}
+    {% for join in joins %}
+    {{ join.type.upper().replace('OUTER ', '') }} JOIN {{ join.table }} ON {{ tables[0] }}.{{ join.left_key }} = {{ join.table }}.{{ join.right_key }}
+    {% endfor %}
+    {% endif %}
+    WHERE 1=1
+        {%- for f in filters %}
+        AND {{ f.field }} {{ f.op }} {% if f.op|upper == 'IN' or f.op|upper == 'NOT IN' %}({{ f.value }}){% elif f.op|upper == 'BETWEEN' %}{{ f.value }}{% else %}'{{ f.value }}'{% endif %}
+        {%- endfor %}
+    {% if dimensions %}GROUP BY {% for dim in dimensions %}{{ dim }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+),
+{%- endmacro %}
+
+{%- macro render_calc_layer(calculated_metrics, metrics, dimensions, dt_column, time_params, needs_date_meta) %}
+calc_layer AS (
+    SELECT
+        {% for dim in dimensions %}base.{{ dim }}{% if not loop.last %},{% elif metrics or calculated_metrics %},{% endif %}{% endfor %}
+        {% for m in metrics %}base.{{ m.name }}_raw{% if not loop.last %},{% elif calculated_metrics %},{% endif %}{% endfor %}
+        {% for cm in calculated_metrics %}{% if cm.op == 'yoy' %}base.{{ cm.args[0] }}_raw / NULLIF(LAG(base.{{ cm.args[0] }}_raw, 12) OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %} ORDER BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}base.{{ dt_column }}{% endif %}), 0) - 1 AS {{ cm.name }}{% elif cm.op == 'mom' %}base.{{ cm.args[0] }}_raw / NULLIF(LAG(base.{{ cm.args[0] }}_raw, 1) OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %} ORDER BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}base.{{ dt_column }}{% endif %}), 0) - 1 AS {{ cm.name }}{% elif cm.op == 'running_sum' %}SUM(base.{{ cm.args[0] }}_raw) OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %} ORDER BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}base.{{ dt_column }}{% endif %} ROWS UNBOUNDED PRECEDING) AS {{ cm.name }}{% elif cm.op == 'partition_ratio' %}CAST(base.{{ cm.args[0] }}_raw AS DOUBLE) / NULLIF(SUM(base.{{ cm.args[0] }}_raw) OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %}), 0) AS {{ cm.name }}{% elif cm.op == 'ma7' %}AVG(base.{{ cm.args[0] }}_raw) OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %} ORDER BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}base.{{ dt_column }}{% endif %} ROWS 6 PRECEDING) AS {{ cm.name }}{% elif cm.op == 'wow' %}base.{{ cm.args[0] }}_raw / NULLIF(LAG(base.{{ cm.args[0] }}_raw, 7) OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %} ORDER BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}base.{{ dt_column }}{% endif %}), 0) - 1 AS {{ cm.name }}{% elif cm.op == 'percentage' %}CAST(base.{{ cm.args[0] }}_raw AS DOUBLE) / NULLIF(SUM(base.{{ cm.args[0] }}_raw) OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %}), 0) * 100 AS {{ cm.name }}{% elif cm.op == 'rank' %}RANK() OVER (PARTITION BY {% if dimensions %}{{ dimensions | join(', ') }}{% else %}1{% endif %} ORDER BY base.{{ cm.args[0] }}_raw DESC) AS {{ cm.name }}{% endif %}{% if not loop.last %},{% endif %}{% endfor %}
+    FROM base_agg base
+    {% if needs_date_meta %}CROSS JOIN date_meta dm{% endif %}
+)
+{%- endmacro %}
+
+{%- macro render_final_select(dimensions, metrics, calculated_metrics) %}
+SELECT
+{%- if dimensions %}
+{%- for dim in dimensions %}
+        {{ dim }}{% if not loop.last %},{% else %}{% if metrics or calculated_metrics %},{% endif %}{% endif %}
+{%- endfor %}
+{%- endif %}
+{%- for m in metrics %}
+        {{ m.name }}_raw{% if not loop.last %},{% else %}{% if calculated_metrics %},{% endif %}{% endif %}
+{%- endfor %}
+{%- for cm in calculated_metrics %}
+        {{ cm.name }}{% if not loop.last %},{% endif %}
+{%- endfor %}
+FROM calc_layer
+{%- endmacro %}
+
+WITH
+{%- if calculated_metrics and calculated_metrics | selectattr('op', 'equalto', 'yoy') | list | length > 0 %}
+{{ render_date_meta(end_date, time_params) }}
+{%- endif %}
+{{ render_base_agg(tables, dimensions, metrics, filters, joins, time_params) }}
+{{ render_calc_layer(calculated_metrics, metrics, dimensions, dt_column, time_params, (calculated_metrics and calculated_metrics | selectattr('op', 'equalto', 'yoy') | list | length > 0)) }}
+{{ render_final_select(dimensions, metrics, calculated_metrics) }}
+{% if order_by %}ORDER BY {{ order_by | join(', ') }}{% endif %}
+{% if limit %}LIMIT {{ limit }}{% endif %}
