@@ -36,3 +36,6 @@ Thumbs.db
 # 编译产物
 dist/
 build/
+
+# 模型大文件（部署时单独传输）
+intent_model/best_model/joint_v2/pytorch_model.bin

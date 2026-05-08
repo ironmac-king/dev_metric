@@ -1,20 +1,79 @@
 version: '3.8'
+
 services:
-  neo4j:
-    image: neo4j:5.15-community
-    container_name: dev-metric-neo4j
+  # Go 后端
+  go-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.go
+    container_name: dev-metric-backend
     ports:
-      - "7474:7474"  # HTTP (Browser)
-      - "7687:7687"  # Bolt (Protocol)
+      - "18080:18080"
     environment:
-      - NEO4J_AUTH=neo4j/dev_metric123
-      - NEO4J_PLUGINS=["apoc"]
-    volumes:
-      - ./neo4j/data:/data
-      - ./neo4j/logs:/logs
-      - ./neo4j/import:/import
-    healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p dev_metric123 'RETURN 1' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - DB_HOST=${DB_HOST:-192.168.1.225}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-admin123}
+      - DB_NAME=${DB_NAME:-dev_metric}
+      - STARROCKS_HOST=${STARROCKS_HOST:-192.168.1.177}
+      - STARROCKS_PORT=${STARROCKS_PORT:-6033}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # Python AI 服务
+  python-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile.ai
+    container_name: dev-metric-ai
+    ports:
+      - "18081:18081"
+    environment:
+      - USE_SEMANTIC_LAYER=1
+      - GO_API_BASE=http://go-backend:18080
+      - TENCENT_API_KEY=${TENCENT_API_KEY}
+      - TENCENT_API_URL=${TENCENT_API_URL}
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+    depends_on:
+      - go-backend
+    restart: unless-stopped
+
+  # 意图识别模型服务
+  intent-model:
+    build:
+      context: .
+      dockerfile: Dockerfile.model
+    container_name: dev-metric-intent
+    ports:
+      - "18082:18082"
+    environment:
+      - DB_HOST=${DB_HOST:-192.168.1.225}
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-admin123}
+      - DB_NAME=${DB_NAME:-dev_metric}
+    restart: unless-stopped
+
+  # Vue 前端
+  web-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: dev-metric-web
+    ports:
+      - "3002:3002"
+    depends_on:
+      - go-backend
+      - python-ai
+    restart: unless-stopped
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: dev-metric-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
