@@ -109,7 +109,9 @@ class LocalJointIntentModel:
     # 之前 0.85 过高，导致几乎所有 query 都走 LLM fallback，而 LLM fallback 经常失败
     CONFIDENCE_THRESHOLD = 0.5
 
-    def __init__(self, model_path: str = "D:/py/test/intent_trainer/best_model/joint_v2"):
+    def __init__(self, model_path: str = None):
+        if model_path is None:
+            model_path = os.getenv("INTENT_MODEL_PATH", "D:/py/test/intent_trainer/best_model/joint_v2")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"[LocalJointIntentModel] 使用设备: {self.device}")
 
@@ -633,17 +635,74 @@ class LocalJointIntentModel:
 
 # ============== 单例模式 ==============
 
-_instance: Optional[LocalJointIntentModel] = None
+_instance = None
+_http_instance = None
 
 
-def get_local_intent_model(model_path: str = None) -> LocalJointIntentModel:
-    """获取本地意图识别模型单例"""
-    global _instance
+class RemoteIntentModel:
+    """通过 HTTP 调用远程意图模型服务（Docker 部署用）"""
 
-    if _instance is None:
+    CONFIDENCE_THRESHOLD = 0.5
+
+    def __init__(self, url: str):
+        self.url = url.rstrip("/")
+        import httpx
+        self._client = httpx.Client(timeout=5.0)
+        self.model_path = f"remote:{url}"
+
+    def predict(self, question: str) -> Dict[str, Any]:
+        try:
+            resp = self._client.post(
+                f"{self.url}/recognize",
+                json={"text": question, "top_k": 3, "include_entities": True},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+
+            entities = []
+            for ent in data.get("entities", []):
+                entities.append({
+                    "text": ent.get("text", ""),
+                    "type": ent.get("type", ""),
+                    "start": ent.get("start", 0),
+                    "end": ent.get("end", 0),
+                })
+
+            has_metric = any(e["type"] == "METRIC" for e in entities)
+            confidence = data.get("confidence", 0.0)
+            match_success = confidence >= self.CONFIDENCE_THRESHOLD and has_metric
+
+            return {
+                "intent": data.get("intent", "unknown"),
+                "confidence": confidence,
+                "entities": entities,
+                "match_success": match_success,
+            }
+        except Exception as e:
+            logger.warning(f"[RemoteIntentModel] 调用失败: {e}")
+            return {
+                "intent": "unknown",
+                "confidence": 0.0,
+                "entities": [],
+                "match_success": False,
+            }
+
+
+def get_local_intent_model(model_path: str = None):
+    """获取本地意图识别模型单例（支持远程 HTTP 模式）"""
+    global _instance, _http_instance
+
+    remote_url = os.getenv("INTENT_MODEL_URL", "")
+    if remote_url and _http_instance is None:
+        logger.info(f"[get_local_intent_model] 使用远程意图模型服务: {remote_url}")
+        _http_instance = RemoteIntentModel(remote_url)
+        return _http_instance
+
+    if not remote_url and _instance is None:
         if model_path is None:
-            # 从配置读取
-            model_path = "D:/py/test/intent_trainer/best_model/joint_v2"
+            model_path = os.getenv("INTENT_MODEL_PATH", "D:/py/test/intent_trainer/best_model/joint_v2")
         _instance = LocalJointIntentModel(model_path=model_path)
 
+    if remote_url:
+        return _http_instance
     return _instance

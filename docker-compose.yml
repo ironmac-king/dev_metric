@@ -39,6 +39,7 @@ services:
       - TENCENT_API_KEY=${TENCENT_API_KEY}
       - TENCENT_API_URL=${TENCENT_API_URL}
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - INTENT_MODEL_URL=http://intent-model:18082
     depends_on:
       - go-backend
     restart: unless-stopped
