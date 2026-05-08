@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -787,6 +788,7 @@ func buildMetricPayload(items []model.SemanticMetric) map[string]map[string]any 
 			"preferred_followups":         []string(item.PreferredFollowups),
 			"tags":                        []string(item.Tags),
 			"version":                     item.Version,
+			"status":                      item.Status,
 			// CTE 渲染所需字段
 			"agg_expression":  item.AggExpression,
 			"metric_type":     item.MetricType,
@@ -934,18 +936,41 @@ func buildMetricAliases(metrics []model.Metric, terms []model.BusinessTerm) map[
 
 	for _, term := range terms {
 		codes := uniqueMetricCodes(term.MetricIDs, metricCodeByID)
+		// metric_ids 为空时，用 term 名称匹配 metric name 自动建立关联
+		if len(codes) != 1 {
+			termLower := strings.ToLower(strings.TrimSpace(term.Term))
+			for i := range metrics {
+				if strings.ToLower(strings.TrimSpace(metrics[i].Name)) == termLower && metrics[i].MetricCode != "" {
+					codes = []string{metrics[i].MetricCode}
+					break
+				}
+			}
+		}
 		if len(codes) != 1 {
 			continue
 		}
 		code := codes[0]
+		aliasAdded := 0
 		if term.Term != "" {
 			result[strings.ToLower(strings.TrimSpace(term.Term))] = code
+			aliasAdded++
 		}
 		for _, synonym := range term.Synonyms {
 			synonym = strings.TrimSpace(synonym)
 			if synonym != "" {
 				result[strings.ToLower(synonym)] = code
+				aliasAdded++
 			}
+		}
+		if aliasAdded > 0 {
+			log.Printf("[buildMetricAliases] term='%s' matched code=%s, added %d aliases (first 3: %v)",
+				term.Term, code, aliasAdded, func() []string {
+					syns := term.Synonyms
+					if len(syns) > 3 {
+						syns = syns[:3]
+					}
+					return syns
+				}())
 		}
 	}
 
@@ -1128,6 +1153,8 @@ func normalizeStatus(status string) int16 {
 	switch strings.TrimSpace(status) {
 	case "", "启用", "在用", "active":
 		return 1
+	case "停用", "disabled", "inactive":
+		return 0
 	default:
 		return 1
 	}

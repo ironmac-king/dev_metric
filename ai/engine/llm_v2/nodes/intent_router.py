@@ -336,6 +336,28 @@ class IntentRouter:
             # 复用 _build_mql_from_local 的全部逻辑（维度解析、过滤器、多指标、聚合检测等）
             mql = self._build_mql_from_local(local_result, question)
 
+            # ===== 语义层路径：检测同比/环比关键词（与本地模型路径一致） =====
+            # "对比上月/上期" → 环比；"对比去年/同比" → 同比
+            comparison_types = []
+            if "环比" in question or "对比上月" in question or "对比上期" in question or "环比上月" in question or "环比上期" in question:
+                comparison_types.append("环比")
+            if "同比" in question or "对比去年" in question or "同比去年" in question or "同比上期" in question:
+                comparison_types.append("同比")
+            # "对比" 单独出现时默认环比
+            if not comparison_types and ("对比" in question or "比较" in question):
+                comparison_types.append("环比")
+            if comparison_types:
+                from ..schema import ComparisonSpec
+                mql.comparison = ComparisonSpec(
+                    enabled=True,
+                    types=comparison_types,
+                    compare_period_start="",
+                    compare_period_end="",
+                )
+                if mql.intent.value not in ("query_comparison", "query_trend"):
+                    mql.intent = MQLIntent.QUERY_COMPARISON
+                logger.info(f"[IntentRouter] 语义层检测到对比关键词: {comparison_types}")
+
             # 泛指维度校验
             mql = self._validate_generic_dimensions(mql, question)
             clarification = self._check_generic_dimensions(mql, question)
@@ -438,6 +460,10 @@ class IntentRouter:
             if kw in question:
                 return FollowupAction.REPLACE_METRIC
 
+        # 9.5 短文本指标名：追问选项点击场景（如"访客数"、"销售额"）
+        if len(question) <= 10 and self._resolve_metric_name(question):
+            return FollowupAction.REPLACE_METRIC
+
         # 10. 默认 INHERIT
         return FollowupAction.INHERIT
 
@@ -514,6 +540,12 @@ class IntentRouter:
             if len(question) > 15 and action in (FollowupAction.REPLACE_COMP, FollowupAction.REPLACE_TIME):
                 logger.info(f"[_is_short_followup] 问题较长({len(question)}字)且含{action.value}动作词，视为新问题")
                 return False
+            # 含时间表达式 + 可解析指标名的较长文本，视为完整独立查询
+            if len(question) > 8:
+                has_time = any(t in question for t in ["上月", "本月", "上月", "近7天", "近30天", "去年", "本周", "上周", "本季度", "上季度", "今年", "前年"])
+                if has_time and self._resolve_metric_name(question):
+                    logger.info(f"[_is_short_followup] 完整查询（含时间+指标），不走追问: {question[:30]}")
+                    return False
             return True
 
         # 3. 维度代码选择（前端追问选项回调）
@@ -911,7 +943,17 @@ class IntentRouter:
                     }
                 return dim_result
             # "按XX看" 未匹配到维度代码，回退到 REPLACE_METRIC
-            return self._handle_replace_metric_followup(question, mql)
+            swap_result = self._handle_replace_metric_followup(question, mql)
+            if swap_result:
+                return swap_result
+            # 维度和指标都未匹配 → 尝试从问题中提取维度并走语义层
+            logger.info(f"[IntentRouter] REPLACE_DIM 回退失败，尝试从问题中提取维度: {question}")
+            extracted_dim = self._try_extract_dim_from_middle(question, mql)
+            if extracted_dim:
+                return extracted_dim
+            # 最终兜底：继承上轮意图
+            mql.intent = inherited_mql.intent
+            return {"mql": mql, "needs_clarification": False, "source": "followup"}
 
         if action == FollowupAction.REMOVE_DIM:
             removal_result = self._handle_removal_followup(question, mql, inherited_mql, ["不看"])
@@ -1228,6 +1270,55 @@ class IntentRouter:
 
         return None
 
+    def _try_extract_dim_from_middle(self, question: str, mql: MQLSchema) -> Optional[Dict[str, Any]]:
+        """从问题中间提取'按XX维度'或'按XX'模式（不以'按'开头的场景）。
+
+        例如 '扩展坞的按站点维度对比上月' → 提取 '站点' → FSITECODE
+        """
+        # 匹配 "按XX看/对比/分析" 或 "按XX维度" 模式
+        match = re.search(r'按(.{1,6}?)(?:维度|看|对比|分析)', question)
+        if not match:
+            match = re.search(r'按(.{1,6}?)(?:\s|$)', question)
+        if not match:
+            return None
+
+        dim_label = match.group(1).strip()
+        if not dim_label or len(dim_label) < 2:
+            return None
+
+        if self._dimension_type_mappings is None:
+            self._load_dimension_mappings()
+
+        dim_label_to_code = self._build_dimension_label_to_code_map()
+
+        # 精确匹配
+        if dim_label in dim_label_to_code:
+            dim_code = dim_label_to_code[dim_label]
+            mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+            logger.info(f"[IntentRouter] 从中间提取维度: '{dim_label}' -> {dim_code}")
+            return {"mql": mql, "needs_clarification": False, "source": "followup"}
+
+        # 模糊匹配
+        for dim_type, dim_code in dim_label_to_code.items():
+            if dim_label in dim_type or dim_type in dim_label:
+                mql.dimensions = [MQLDimension(type=dim_code, value=None)]
+                logger.info(f"[IntentRouter] 从中间提取维度(模糊): '{dim_label}' -> {dim_code}")
+                return {"mql": mql, "needs_clarification": False, "source": "followup"}
+
+        # 语义快照解析
+        semantic_svc = self._get_semantic_service()
+        if semantic_svc:
+            resolved = semantic_svc.resolve_dimension(dim_label)
+            if resolved:
+                col = resolved.get("column_name", "")
+                dtype = resolved.get("dimension_type", dim_label)
+                if col:
+                    mql.dimensions = [MQLDimension(type=dtype or col, column=col, value=None)]
+                    logger.info(f"[IntentRouter] 从中间提取维度(快照): '{dim_label}' -> {dtype}/{col}")
+                    return {"mql": mql, "needs_clarification": False, "source": "followup"}
+
+        return None
+
     def _handle_addition_followup(
         self,
         question: str,
@@ -1440,8 +1531,13 @@ class IntentRouter:
                     logger.info(f"[IntentRouter] 追问候选 '{candidate}' 是已知维度名，跳过指标解析")
                     continue
 
-                metric_info = client.get_metric_by_name(candidate)
+                # 优先用 _resolve_metric_name（语义快照 + 同义词 + MetricClient）
+                metric_info = self._resolve_metric_name(candidate)
                 if not metric_info:
+                    # 兜底：MetricClient 直接查询
+                    metric_info = client.get_metric_by_name(candidate)
+                if not metric_info:
+                    # 兜底：MetricClient 模糊搜索
                     search_results = client.search_metrics(candidate, limit=3)
                     if search_results:
                         first = search_results[0]
@@ -1627,13 +1723,17 @@ class IntentRouter:
 
                 # ===== 本地模型匹配成功后：检测同比/环比关键词 =====
                 # 注意：这些关键词在实体中被识别为 TIME，需要在这里补充检测并设置 comparison
-                if "环比" in question or "同比" in question:
+                # "对比上月/上期" → 环比；"对比去年/同比" → 同比
+                comparison_types = []
+                if "环比" in question or "对比上月" in question or "对比上期" in question or "环比上月" in question or "环比上期" in question:
+                    comparison_types.append("环比")
+                if "同比" in question or "对比去年" in question or "同比去年" in question or "同比上期" in question:
+                    comparison_types.append("同比")
+                # "对比" 单独出现时默认环比（用户说"对比"一般指环比）
+                if not comparison_types and ("对比" in question or "比较" in question):
+                    comparison_types.append("环比")
+                if comparison_types:
                     from ..schema import ComparisonSpec
-                    comparison_types = []
-                    if "环比" in question:
-                        comparison_types.append("环比")
-                    if "同比" in question:
-                        comparison_types.append("同比")
                     mql.comparison = ComparisonSpec(
                         enabled=True,
                         types=comparison_types,

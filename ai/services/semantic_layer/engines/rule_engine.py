@@ -259,9 +259,30 @@ class RuleEngine(BaseEngine):
 
     def _extract_metric(self, query: str) -> Optional[str]:
         """提取指标"""
+        # 1. 硬编码关键词（快速匹配）
         for metric in self._metric_keywords:
             if metric in query:
                 return metric
+
+        # 2. 语义快照 metric_aliases 查找（业务术语同义词）
+        try:
+            from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
+            snap_svc = get_semantic_snapshot_service()
+            snapshot = snap_svc.get_active_snapshot()
+            if snapshot:
+                aliases = snapshot.get("metric_aliases", {})
+                query_lower = query.lower()
+                # 按长度降序匹配（优先匹配更长的别名）
+                for alias in sorted(aliases.keys(), key=len, reverse=True):
+                    if alias in query_lower and len(alias) >= 2:
+                        code = aliases[alias]
+                        metrics = snapshot.get("metrics", {})
+                        if code in metrics:
+                            return metrics[code].get("display_name", alias)
+                        return alias
+        except Exception as e:
+            logger.debug(f"[RuleEngine] metric_aliases fallback error: {e}")
+
         return None
 
     def _extract_dimensions(self, query: str) -> List[Dict[str, Any]]:
