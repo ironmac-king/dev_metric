@@ -133,8 +133,21 @@ class JointDataset(Dataset):
 class JointBERTModel(nn.Module):
     def __init__(self, model_name, num_intents, num_ner_tags, dropout=0.1, state_dict_path=None):
         super().__init__()
-        # Load BERT from the original pretrained model
-        self.bert = AutoModel.from_pretrained(model_name, local_files_only=True)
+        # Load BERT: 优先从本地 model_path 加载，离线环境不需要 HuggingFace
+        if state_dict_path and os.path.isdir(model_name):
+            self.bert = AutoModel.from_pretrained(model_name, local_files_only=True)
+        elif state_dict_path:
+            # 容器离线环境：先加载本地 config 创建空模型，再由 state_dict 覆盖
+            from transformers import BertConfig, BertModel
+            import os
+            local_config = os.path.join(os.path.dirname(state_dict_path), "config.json")
+            if os.path.exists(local_config):
+                config = BertConfig.from_pretrained(os.path.dirname(state_dict_path))
+                self.bert = BertModel(config)
+            else:
+                self.bert = AutoModel.from_pretrained(model_name, local_files_only=True)
+        else:
+            self.bert = AutoModel.from_pretrained(model_name)
         self.hidden_size = self.bert.config.hidden_size
 
         self.intent_dropout = nn.Dropout(dropout)
