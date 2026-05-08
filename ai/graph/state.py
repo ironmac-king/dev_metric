@@ -32,6 +32,33 @@ class ThinkingStep(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class ConversationContext(BaseModel):
+    """多轮对话上下文 - 用于继承上轮对话的关键信息"""
+    current_metric_code: Optional[str] = None
+    current_metric_name: Optional[str] = None
+    current_time_expr: Optional[str] = None
+    current_dimensions: Dict[str, str] = {}
+    current_metrics: list = []  # 多指标列表，用于多指标查询的上下文继承
+    time_inherited: bool = False
+    dimensions_inherited: bool = False
+    just_executed_query: bool = False  # 标记上轮是否刚执行了查询，用于猜你想问场景判断
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "current_metric_code": self.current_metric_code,
+            "current_metric_name": self.current_metric_name,
+            "current_time_expr": self.current_time_expr,
+            "current_dimensions": self.current_dimensions,
+            "current_metrics": self.current_metrics,
+            "time_inherited": self.time_inherited,
+            "dimensions_inherited": self.dimensions_inherited,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ConversationContext":
+        return cls(**data) if data else cls()
+
+
 class ConversationState(BaseModel):
     """LangGraph 对话状态"""
     session_id: str = ""                          # 会话 ID
@@ -98,33 +125,6 @@ class IntentResult(BaseModel):
     intent: str
     confidence: float
     entities: Dict[str, Any] = {}
-
-
-class ConversationContext(BaseModel):
-    """多轮对话上下文 - 用于继承上轮对话的关键信息"""
-    current_metric_code: Optional[str] = None
-    current_metric_name: Optional[str] = None
-    current_time_expr: Optional[str] = None
-    current_dimensions: Dict[str, str] = {}
-    current_metrics: list = []  # 多指标列表，用于多指标查询的上下文继承
-    time_inherited: bool = False
-    dimensions_inherited: bool = False
-    just_executed_query: bool = False  # 标记上轮是否刚执行了查询，用于猜你想问场景判断
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "current_metric_code": self.current_metric_code,
-            "current_metric_name": self.current_metric_name,
-            "current_time_expr": self.current_time_expr,
-            "current_dimensions": self.current_dimensions,
-            "current_metrics": self.current_metrics,
-            "time_inherited": self.time_inherited,
-            "dimensions_inherited": self.dimensions_inherited,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ConversationContext":
-        return cls(**data) if data else cls()
 
 
 class SQLGenerationResult(BaseModel):
