@@ -294,14 +294,31 @@ class SnapshotEngine(BaseEngine):
 
     def _extract_time_expr(self, query: str) -> Optional[str]:
         """提取时间表达式"""
+        import re
+
+        # 优先匹配 年+月 组合（如 "今年3月"、"去年12月"、"2025年7月"）
+        year_month = re.search(r'(今年|去年|明年|\d{4}年)\s*(\d{1,2})月', query)
+        if year_month:
+            return year_month.group(0).replace(" ", "")
+
+        # 匹配 单独N月（无年份前缀）
+        standalone_month = re.search(r'(?<![今去明去\d年])\s*(\d{1,2})月', query)
+        if standalone_month and not year_month:
+            return standalone_month.group(0).strip()
+
+        # 匹配季度组合（如 "今年一季度"、"去年Q3"）
+        quarter = re.search(r'(今年|去年|明年|\d{4}年)\s*(一季度|二季度|三季度|四季度|[Qq]\d)', query)
+        if quarter:
+            return quarter.group(0).replace(" ", "")
+
+        # 单独时间词
         time_patterns = [
+            "近7天", "近30天", "最近7天", "最近30天", "近3个月",
             "本月", "上月", "下月",
-            "近7天", "近30天", "最近7天", "最近30天",
             "今年", "去年", "明年",
             "一季度", "二季度", "三季度", "四季度",
             "今天", "昨天", "明天",
-            "上周", "下周",
-            "2026年", "2025年",
+            "上周", "本周", "下周",
         ]
 
         for pattern in time_patterns:

@@ -225,6 +225,16 @@ class RuleEngine(BaseEngine):
 
     def _extract_time(self, query: str) -> Optional[str]:
         """提取时间表达式"""
+        # 优先匹配 年+月 组合（如 "今年3月"、"去年12月"、"2025年7月"）
+        year_month = re.search(r'(今年|去年|明年|\d{4}年)\s*(\d{1,2})月', query)
+        if year_month:
+            return year_month.group(0).replace(" ", "")
+
+        # 优先匹配 年+季度 组合
+        year_quarter = re.search(r'(今年|去年|明年|\d{4}年)\s*(一季度|二季度|三季度|四季度|[Qq]\d)', query)
+        if year_quarter:
+            return year_quarter.group(0).replace(" ", "")
+
         for pattern, replacement in self._time_patterns:
             if replacement:
                 if re.search(pattern, query):

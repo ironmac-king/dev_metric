@@ -191,12 +191,8 @@ class TimeParser:
 
         for q, (start_month, end_month, q_num) in quarter_map.items():
             if q in text:
+                # _infer_year 已经处理了"去年"/"今年"/"明年"的年份推断，无需重复调整
                 year = self._infer_year(text)
-                # 检查是否有"去年"、"今年"等修饰
-                if "去年" in text or "上年" in text:
-                    year -= 1
-                elif "明年" in text:
-                    year += 1
 
                 start_date = f"{year}-{start_month:02d}-01"
                 # 计算季度最后一天

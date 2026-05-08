@@ -1932,6 +1932,20 @@ class IntentRouter:
         if time_entities:
             time_text = time_entities[0]['text']
             time_original = TIME_EXPRESSION_MAP.get(time_text, time_text)
+
+            # 修复：当 TIME 实体是 "今年/去年/明年" 时，检查原始问题中是否有紧随其后的 "X月" 或 季度
+            # 合并为完整时间表达式（如 "今年3月"、"去年12月"、"今年一季度"、"去年Q3"）
+            if time_text in ('今年', '去年', '明年', '本年'):
+                import re
+                year_month_match = re.search(rf'{time_text}\s*(\d{{1,2}})月', question)
+                year_quarter_match = re.search(rf'{time_text}\s*(一季度|二季度|三季度|四季度|[Qq][1-4])', question)
+                if year_month_match:
+                    time_original = year_month_match.group(0).replace(" ", "")
+                    logger.info(f"[IntentRouter] 时间表达式扩展: {time_text} -> {time_original}")
+                elif year_quarter_match:
+                    time_original = year_quarter_match.group(0).replace(" ", "")
+                    logger.info(f"[IntentRouter] 时间表达式扩展: {time_text} -> {time_original}")
+
             mql.time = TimeRange(
                 type=TimeType.RELATIVE,
                 start="",
