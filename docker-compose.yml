@@ -3,12 +3,13 @@ version: '3.8'
 services:
   # Go 后端
   go-backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.go
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.go
+    image: 192.168.1.207:803/ugreen-metric/go-backend:v1
     container_name: dev-metric-backend
     ports:
-      - "18080:18080"
+      - "18086:18080"
     environment:
       - DB_HOST=${DB_HOST:-192.168.1.225}
       - DB_PORT=${DB_PORT:-5432}
@@ -25,9 +26,10 @@ services:
 
   # Python AI 服务
   python-ai:
-    build:
-      context: .
-      dockerfile: Dockerfile.ai
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.ai
+    image: 192.168.1.207:803/ugreen-metric/ai-backend:v1
     container_name: dev-metric-ai
     ports:
       - "18081:18081"
@@ -43,9 +45,10 @@ services:
 
   # 意图识别模型服务
   intent-model:
-    build:
-      context: .
-      dockerfile: Dockerfile.model
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.model
+    image: 192.168.1.207:803/ugreen-metric/intent:v1
     container_name: dev-metric-intent
     ports:
       - "18082:18082"
@@ -59,9 +62,10 @@ services:
 
   # Vue 前端
   web-frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.web
+    image: 192.168.1.207:803/ugreen-metric/web:v1
     container_name: dev-metric-web
     ports:
       - "3002:3002"

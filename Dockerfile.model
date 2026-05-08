@@ -5,11 +5,14 @@ WORKDIR /app
 
 # CPU 版 PyTorch + Flask
 RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir \
     torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu \
-    transformers>=4.45.0 \
-    flask>=3.0.0 \
-    psycopg2-binary>=2.9.0 \
-    numpy>=1.24.0
+    --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    "transformers>=4.45.0" \
+    "flask>=3.0.0" \
+    "psycopg2-binary>=2.9.0" \
+    "numpy>=1.24.0" \
+    "PyMySQL==1.1.1"
 
 # 复制模型和代码
 COPY intent_model/ .
