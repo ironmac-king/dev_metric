@@ -234,7 +234,7 @@ class DimensionService:
                 if isinstance(synonyms, str):
                     synonyms = [s.strip().strip('"') for s in synonyms.strip("{}").split(",") if s.strip()]
                 dim_field = t.get("dimension_field", "")
-                canonical = t.get("dimension_value", "")
+                canonical = t.get("dimension_value", "") or t.get("term", "")
                 if not canonical or not synonyms:
                     continue
                 # 检查传入的值是否匹配同义词

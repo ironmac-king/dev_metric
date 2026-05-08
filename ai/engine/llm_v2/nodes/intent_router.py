@@ -320,6 +320,7 @@ class IntentRouter:
                 "entities": entities,
                 "match_success": True,
                 "local_only": True,
+                "metric_code": parse_result.metric_code or "",
             }
 
             # 意图纠正：含"环比/同比+变化"关键词时应为 comparison 而非 trend
@@ -1886,7 +1887,7 @@ class IntentRouter:
                 # 主指标：取第一个 METRIC 实体
                 metric_text = metric_entities[0]['text']
                 mql.metric = MQLMetric(
-                    code="",  # 本地模型不返回 code，让后续节点通过 metric_client 查询
+                    code=local_result.get("metric_code", ""),  # 语义层可能已解析 metric_code
                     name=metric_text,
                     table="",
                     field="",
@@ -2019,8 +2020,10 @@ class IntentRouter:
                 else:
                     column_name = dim_info["column_name"]
                     dim_type = column_to_dim_name.get(column_name.upper(), dim_info["dimension_type"])
-                    # 如果维度值等于维度类型名（如"店铺"=="店铺"），说明是泛指维度，触发追问
-                    if dim_value == dim_type:
+                    # 使用标准值（同义词映射后的值），如 "NAS" → "智能云存储"
+                    canonical_value = dim_info.get("dimension_value") or dim_value
+                    # 如果标准值等于维度类型名（如"店铺"=="店铺"），说明是泛指维度，触发追问
+                    if canonical_value == dim_type:
                         mql.dimensions.append(MQLDimension(
                             type=dim_type,
                             column=column_name,
@@ -2029,16 +2032,16 @@ class IntentRouter:
                         ))
                         logger.info(f"[IntentRouter] 泛指维度(值=类型): {dim_type}({column_name})")
                     # 去重：检查是否已存在相同的 type+value
-                    elif any(d.type == dim_type and d.value == dim_value for d in mql.dimensions):
-                        logger.info(f"[IntentRouter] 维度值已存在，跳过: {dim_type}={dim_value}")
+                    elif any(d.type == dim_type and d.value == canonical_value for d in mql.dimensions):
+                        logger.info(f"[IntentRouter] 维度值已存在，跳过: {dim_type}={canonical_value}")
                     else:
                         mql.dimensions.append(MQLDimension(
                             type=dim_type,
                             column=column_name,
                             field="",
-                            value=dim_value,
+                            value=canonical_value,
                         ))
-                        logger.info(f"[IntentRouter] 本地模型提取维度值: {dim_type}({column_name}) = {dim_value}")
+                        logger.info(f"[IntentRouter] 本地模型提取维度值: {dim_type}({column_name}) = {canonical_value}")
 
         # 单独 DIM_VALUE（无对应 DIM 类型）：通过 dimension_service 反查 column_name
         if dim_value_entities and not dim_entities:
@@ -2084,8 +2087,10 @@ class IntentRouter:
                     # 具体值 → 正常处理
                     column_name = dim_info["column_name"]
                     dim_type = column_to_dim_name.get(column_name.upper(), dim_info["dimension_type"])
-                    # 如果维度值等于维度类型名（如"店铺"=="店铺"），说明是泛指维度，触发追问
-                    if dim_value == dim_type:
+                    # 使用标准值（同义词映射后的值），如 "NAS" → "智能云存储"
+                    canonical_value = dim_info.get("dimension_value") or dim_value
+                    # 如果标准值等于维度类型名（如"店铺"=="店铺"），说明是泛指维度，触发追问
+                    if canonical_value == dim_type:
                         mql.dimensions.append(MQLDimension(
                             type=dim_type,
                             column=column_name,
@@ -2094,16 +2099,16 @@ class IntentRouter:
                         ))
                         logger.info(f"[IntentRouter] 泛指维度(值=类型): {dim_type}({column_name})")
                     # 去重：检查是否已存在相同的 type+value
-                    elif any(d.type == dim_type and d.value == dim_value for d in mql.dimensions):
-                        logger.info(f"[IntentRouter] 维度值已存在，跳过(DIM_VALUE反查): {dim_type}={dim_value}")
+                    elif any(d.type == dim_type and d.value == canonical_value for d in mql.dimensions):
+                        logger.info(f"[IntentRouter] 维度值已存在，跳过(DIM_VALUE反查): {dim_type}={canonical_value}")
                     else:
                         mql.dimensions.append(MQLDimension(
                             type=dim_type,
                             column=column_name,
                             field="",
-                            value=dim_value,
+                            value=canonical_value,
                         ))
-                        logger.info(f"[IntentRouter] 本地模型提取维度值(DIM_VALUE 反查): {dim_type}({column_name}) = {dim_value}")
+                        logger.info(f"[IntentRouter] 本地模型提取维度值(DIM_VALUE 反查): {dim_type}({column_name}) = {canonical_value}")
 
         # 单独 DIM 实体（无对应 DIM_VALUE）：查找 column_name 并加入 dimensions
         # 例如：用户问"销售额排名前三的站点" → BERT 识别到 DIM='站点' 但没有 DIM_VALUE

@@ -55,6 +55,7 @@ class LocalModelEngine(BaseEngine):
         self._ensure_init()
 
         if not self._model:
+            logger.warning(f"[LocalModelEngine] 模型未加载，跳过查询: {query[:30]}")
             return ParseResult(
                 intent="unknown",
                 confidence=0.0,
@@ -64,6 +65,9 @@ class LocalModelEngine(BaseEngine):
 
         try:
             result = self._model.predict(query)
+            logger.info(f"[LocalModelEngine] predict完成: query='{query[:30]}', "
+                       f"intent={result.get('intent')}, confidence={result.get('confidence', 0):.4f}, "
+                       f"entities={[f\"{e.get('type')}:{e.get('text')}\" for e in result.get('entities', [])]}")
 
             # 提取实体
             entities = result.get('entities', [])
