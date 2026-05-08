@@ -11,10 +11,7 @@
 import os
 import json
 import re
-import torch
-import numpy as np
 from typing import Dict, Any, Optional, List
-from transformers import AutoTokenizer, AutoModel
 
 from ai.config.logging_config import get_logger
 from ai.config.runtime import get_go_api_base
@@ -68,35 +65,6 @@ SKU_PATTERN = re.compile(r'\w+-\d+')
 ASIN_PATTERN = re.compile(r'(?<![A-Z0-9])[A-Z0-9]{10}(?![A-Z0-9])', re.IGNORECASE)
 
 
-class JointBERTModel(torch.nn.Module):
-    """Joint BERT 模型定义"""
-
-    def __init__(self, model_name: str, num_intents: int, num_ner_tags: int, dropout: float = 0.1):
-        super().__init__()
-        self.bert = AutoModel.from_pretrained(model_name, local_files_only=True)
-        self.hidden_size = self.bert.config.hidden_size
-
-        self.intent_dropout = torch.nn.Dropout(dropout)
-        self.intent_classifier = torch.nn.Linear(self.hidden_size, num_intents)
-
-        self.ner_dropout = torch.nn.Dropout(dropout)
-        self.ner_classifier = torch.nn.Linear(self.hidden_size, num_ner_tags)
-
-    def forward(self, input_ids, attention_mask, token_type_ids=None):
-        # token_type_ids 可能为 None，忽略它
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        sequence_output = outputs.last_hidden_state
-        pooled_output = outputs.pooler_output
-
-        intent_logits = self.intent_classifier(self.intent_dropout(pooled_output))
-        ner_logits = self.ner_classifier(self.ner_dropout(sequence_output))
-
-        return {
-            'intent_logits': intent_logits,
-            'ner_logits': ner_logits
-        }
-
-
 class LocalJointIntentModel:
     """
     本地 Joint BERT 意图识别模型封装
@@ -110,6 +78,7 @@ class LocalJointIntentModel:
     CONFIDENCE_THRESHOLD = 0.5
 
     def __init__(self, model_path: str = None):
+        import torch
         if model_path is None:
             model_path = os.getenv("INTENT_MODEL_PATH", "D:/py/test/intent_trainer/best_model/joint_v2")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -121,6 +90,35 @@ class LocalJointIntentModel:
 
     def _load_model(self):
         """加载模型、tokenizer、标签映射"""
+        import torch
+        from transformers import AutoTokenizer, AutoModel
+
+        # JointBERTModel 定义为局部类（延迟加载，仅 torch 可用时才定义）
+        class JointBERTModel(torch.nn.Module):
+            def __init__(self, model_name, num_intents, num_ner_tags, dropout=0.1):
+                super().__init__()
+                self.bert = AutoModel.from_pretrained(model_name, local_files_only=True)
+                self.hidden_size = self.bert.config.hidden_size
+
+                self.intent_dropout = torch.nn.Dropout(dropout)
+                self.intent_classifier = torch.nn.Linear(self.hidden_size, num_intents)
+
+                self.ner_dropout = torch.nn.Dropout(dropout)
+                self.ner_classifier = torch.nn.Linear(self.hidden_size, num_ner_tags)
+
+            def forward(self, input_ids, attention_mask, token_type_ids=None):
+                outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+                sequence_output = outputs.last_hidden_state
+                pooled_output = outputs.pooler_output
+
+                intent_logits = self.intent_classifier(self.intent_dropout(pooled_output))
+                ner_logits = self.ner_classifier(self.ner_dropout(sequence_output))
+
+                return {
+                    'intent_logits': intent_logits,
+                    'ner_logits': ner_logits
+                }
+
         try:
             # 加载标签映射
             tag_mapping_path = os.path.join(self.model_path, "tag_mapping.json")
@@ -198,6 +196,8 @@ class LocalJointIntentModel:
             }
 
         try:
+            import torch
+
             # Tokenize
             inputs = self.tokenizer(
                 question,
