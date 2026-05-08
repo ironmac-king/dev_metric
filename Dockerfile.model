@@ -10,7 +10,8 @@ RUN pip install --no-cache-dir \
     "transformers>=4.30.0" \
     "flask>=3.0.0" \
     "psycopg2-binary>=2.9.0" \
-    "numpy>=1.24.0"
+    "numpy>=1.24.0" \
+    "PyMySQL==1.1.1"
 
 # 复制模型和代码
 COPY intent_model/ .
