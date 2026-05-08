@@ -139,7 +139,6 @@ class JointBERTModel(nn.Module):
         elif state_dict_path:
             # 容器离线环境：先加载本地 config 创建空模型，再由 state_dict 覆盖
             from transformers import BertConfig, BertModel
-            import os
             local_config = os.path.join(os.path.dirname(state_dict_path), "config.json")
             if os.path.exists(local_config):
                 config = BertConfig.from_pretrained(os.path.dirname(state_dict_path))
