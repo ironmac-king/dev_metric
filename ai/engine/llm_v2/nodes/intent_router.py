@@ -748,10 +748,24 @@ class IntentRouter:
         specific_levels = ["一级品类", "二级品类", "三级品类", "四级品类", "一级类目", "二级类目", "三级类目"]
         has_specific_level = any(level in question for level in specific_levels)
 
+        # 时间粒度词：不应作为维度候选（如 "年"/"月"/"日" 在 "2026年4月" 中被误提取）
+        _TIME_GRAIN_WORDS = {'年', '月', '日', '号', '季度', '周', '天'}
+        _TIME_EXPRS_IN_QUESTION = []
+        import re as _re_tg
+        for _m in _re_tg.finditer(r'\d{4}年\s*\d{1,2}月|\d{1,2}月\d{1,2}[日号]|今年|去年|本月|上月|近\d+天', question):
+            _TIME_EXPRS_IN_QUESTION.append(_m.group())
+
         for candidate in candidates:
             # 跳过泛指关键词（除非问题中包含具体级别）
             if candidate in generic_keywords and not has_specific_level:
                 logger.info(f"[_validate_generic_dimensions] 跳过泛指候选 '{candidate}'，交给追问引擎处理")
+                continue
+
+            # 跳过时间粒度词（"年"/"月"/"日" 不应作为维度）
+            if candidate in _TIME_GRAIN_WORDS:
+                continue
+            # 跳过时间表达式的子串
+            if any(candidate in te for te in _TIME_EXPRS_IN_QUESTION):
                 continue
 
             # ========== 优先用语义快照服务解析维度类型 ==========
@@ -2002,7 +2016,15 @@ class IntentRouter:
             logger.info(f"[IntentRouter] 本地模型提取时间: {time_text} -> {time_original}, start={mql.time.start}, end={mql.time.end}, days={mql.time.days}")
 
         # 维度实体（类型 + 值）
-        dim_entities = [e for e in entities if e['type'] == 'DIM']
+        # 过滤掉时间表达式子串（如 "年"、"月"、"日" 被误识别为 DIMENSION）
+        time_texts = [e['text'] for e in entities if e['type'] == 'TIME']
+        _TIME_PARTICLES = {'年', '月', '日', '号', '季度', '周', '天'}
+
+        dim_entities = [
+            e for e in entities if e['type'] == 'DIM'
+            and e['text'] not in _TIME_PARTICLES
+            and not any(e['text'] in tt for tt in time_texts)
+        ]
         dim_value_entities = [e for e in entities if e['type'] == 'DIM_VALUE']
 
         # 通过 dimension_service 反查 column_name（复用 853-898 行的逻辑）
