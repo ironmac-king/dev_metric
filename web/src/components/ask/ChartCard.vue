@@ -693,8 +693,8 @@ const chartType = computed(() => {
 
   console.log('[DEBUG chartType] keys:', keys, 'numericKeys:', numericKeys, 'dimensionKeys:', dimensionKeys, 'timeKeys:', timeKeys, 'xAxisKey:', xAxisKey, 'isTimeSeries:', isTimeSeries, 'hasTimeColumn:', hasTimeColumn)
 
-  // 多维度非时间数据（如一级品类+站点）不适合图表，用表格
-  if (dimensionKeys.length > 1 && !hasTimeColumn && !isTimeSeries) {
+  // 多维度数据不适合图表，用表格（维度过多时图表可读性差）
+  if (dimensionKeys.length > 1) {
     return 'table'
   }
 
