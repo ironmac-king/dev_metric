@@ -581,6 +581,7 @@ class LocalJointIntentModel:
 
         # 正则匹配：补充识别动态时间表达式（近N天、近N月、最近N天等）
         # 这些不在固定词典 TIME_EXPRESSIONS 中，但需要正则主动识别
+        # 注意：范围模式必须放在单月模式前面，优先匹配更长的表达式
         dynamic_time_patterns = [
             (r'近(\d+)个?天', 'TIME'),      # 近15天, 近7天, 近30天, 近100天
             (r'近(\d+)个?日', 'TIME'),      # 近15日, 近7日
@@ -593,6 +594,12 @@ class LocalJointIntentModel:
             (r'过去(\d+)个?天', 'TIME'),    # 过去15天
             (r'过去(\d+)个?月', 'TIME'),    # 过去3月, 过去3个月
             (r'过去(\d+)个?年', 'TIME'),    # 过去1年
+            # 时间范围模式（必须在单月/单年模式之前）
+            (r'\d{4}年\s*\d{1,2}月\s*[到至\-]\s*\d{4}年\s*\d{1,2}月', 'TIME'),  # 2026年3月到2026年4月
+            (r'\d{4}年\s*\d{1,2}月\s*[到至\-]\s*\d{1,2}月', 'TIME'),              # 2026年3月到4月
+            (r'\d{4}年\s*\d{1,2}\s*[-~]\s*\d{1,2}月', 'TIME'),                    # 2026年3-4月
+            (r'\d{1,2}月\s*[到至]\s*\d{1,2}月', 'TIME'),                           # 3月到4月
+            # 单月/单年模式
             (r'(\d{4})年(\d{1,2})月', 'TIME'),  # 2024年7月
             (r'(\d{4})年', 'TIME'),              # 2025年
         ]
@@ -610,10 +617,16 @@ class LocalJointIntentModel:
         all_entities = []
         covered_ranges = []
 
-        # 先加入词典匹配（更长更准确）
+        # 先加入词典匹配（更长更准确），同时去除重叠：长匹配覆盖短匹配
         for rm in sorted(rule_matches, key=lambda x: -len(x['text'])):
-            all_entities.append(rm)
-            covered_ranges.append((rm['start'], rm['end']))
+            overlaps = False
+            for c_start, c_end in covered_ranges:
+                if rm['start'] < c_end and rm['end'] > c_start:
+                    overlaps = True
+                    break
+            if not overlaps:
+                all_entities.append(rm)
+                covered_ranges.append((rm['start'], rm['end']))
 
         # 补充模型预测中与词典不重叠的实体
         for e in model_entities:

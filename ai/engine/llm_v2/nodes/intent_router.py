@@ -1974,6 +1974,18 @@ class IntentRouter:
             time_text = time_entities[0]['text']
             time_original = TIME_EXPRESSION_MAP.get(time_text, time_text)
 
+            # 修复：多个相邻 TIME 实体用"到/至"连接时，合并为完整范围表达式
+            # 例：["2026年3月", "2026年4月"] 且原文中间有"到" → "2026年3月到2026年4月"
+            if len(time_entities) >= 2:
+                first = time_entities[0]
+                last = time_entities[-1]
+                gap_text = question[first['end']:last['start']]
+                if re.search(r'[到至\-]', gap_text):
+                    merged = question[first['start']:last['end']]
+                    time_text = merged
+                    time_original = merged
+                    logger.info(f"[IntentRouter] 多个TIME实体合并为范围: {merged}")
+
             # 修复：当 TIME 实体是 "今年/去年/明年" 时，检查原始问题中是否有紧随其后的 "X月" 或 季度
             # 合并为完整时间表达式（如 "今年3月"、"去年12月"、"今年一季度"、"去年Q3"）
             if time_text in ('今年', '去年', '明年', '本年'):
