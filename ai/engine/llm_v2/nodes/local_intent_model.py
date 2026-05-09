@@ -9,6 +9,7 @@
 """
 
 import os
+import sys
 import json
 import re
 from typing import Dict, Any, Optional, List
@@ -97,7 +98,14 @@ class LocalJointIntentModel:
         class JointBERTModel(torch.nn.Module):
             def __init__(self, model_name, num_intents, num_ner_tags, dropout=0.1):
                 super().__init__()
-                self.bert = AutoModel.from_pretrained(model_name, local_files_only=True)
+                # uvicorn 后台进程中 tqdm 写 stdout/stderr 会报 [Errno 22]，临时替换
+                import io
+                _real_stdout, _real_stderr = sys.stdout, sys.stderr
+                sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+                try:
+                    self.bert = AutoModel.from_pretrained(model_name, local_files_only=True)
+                finally:
+                    sys.stdout, sys.stderr = _real_stdout, _real_stderr
                 self.hidden_size = self.bert.config.hidden_size
 
                 self.intent_dropout = torch.nn.Dropout(dropout)
@@ -133,9 +141,12 @@ class LocalJointIntentModel:
                 raise FileNotFoundError(f"tag_mapping.json 不存在于 {self.model_path}")
 
             # 加载 tokenizer
+            logger.info(f"[LocalJointIntentModel] 正在加载 tokenizer from {self.model_path}")
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            logger.info(f"[LocalJointIntentModel] tokenizer 加载成功")
 
             # 创建模型
+            logger.info(f"[LocalJointIntentModel] 正在创建 JointBERTModel")
             self.model = JointBERTModel(
                 model_name=self.model_path,
                 num_intents=len(self.intents),
@@ -145,6 +156,7 @@ class LocalJointIntentModel:
             # 加载模型权重
             pytorch_bin_path = os.path.join(self.model_path, "pytorch_model.bin")
             if os.path.exists(pytorch_bin_path):
+                logger.info(f"[LocalJointIntentModel] 正在加载权重: {pytorch_bin_path}")
                 state_dict = torch.load(pytorch_bin_path, map_location=self.device, weights_only=True)
                 self.model.load_state_dict(state_dict)
                 logger.info(f"[LocalJointIntentModel] 加载 pytorch_model.bin 成功")
@@ -169,7 +181,8 @@ class LocalJointIntentModel:
             logger.info(f"[LocalJointIntentModel] 模型加载成功")
 
         except Exception as e:
-            logger.error(f"[LocalJointIntentModel] 模型加载失败: {e}")
+            import traceback
+            logger.error(f"[LocalJointIntentModel] 模型加载失败: {e}\n{traceback.format_exc()}")
             raise
 
     def predict(self, question: str) -> Dict[str, Any]:
