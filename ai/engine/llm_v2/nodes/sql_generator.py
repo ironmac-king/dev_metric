@@ -762,23 +762,28 @@ FROM (
             if self.COL_DATE not in dimensions:
                 dimensions.append(self.COL_DATE)
         elif time_dim_col not in dimensions:
-            # query_trend intent 自动添加时间维度（趋势查询必然需要时间序列）
-            # 但如果已有非时间维度（如"各站点趋势"），不自动加时间列，避免 FSITE×FDATE 交叉网格
             intent_val = mql.intent.value if hasattr(mql.intent, 'value') else str(mql.intent)
             _non_time_dims = [d for d in dimensions if d not in _TIME_DIM_COLS]
-            if intent_val == "query_trend" and not _non_time_dims:
+
+            # 检查用户是否明确说了时间粒度
+            time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度",
+                                          "按月", "按照月份", "每月", "每个月", "月度", "月均", "各月", "各个月", "分月",
+                                          "按季", "按照季度", "每季度", "季度", "各季度", "分季度",
+                                          "按年", "每年", "年度",
+                                          "按周", "每周", "周度"]
+            user_wants_time_grain = any(kw in question for kw in time_granularity_keywords)
+
+            if user_wants_time_grain:
+                # 用户明确说了时间粒度，无条件加时间列
+                dimensions.append(time_dim_col)
+                logger.info(f"[SQLGenerator] 用户明确要求时间粒度,添加 {time_dim_col} 到 GROUP BY")
+            elif intent_val == "query_trend" and not _non_time_dims:
                 dimensions.append(time_dim_col)
                 logger.info(f"[SQLGenerator] query_trend intent,自动添加 {time_dim_col} 到 GROUP BY")
             elif intent_val == "query_trend" and _non_time_dims:
-                # 有非时间维度时，用户说"趋势"通常是想看各维度对比，不加时间列
                 logger.info(f"[SQLGenerator] query_trend intent 但有非时间维度{_non_time_dims},不加时间列到 GROUP BY")
             else:
-                # 只有当用户明确提到时间粒度(如"按天"、"每日"、"按月")时,才将时间列加入 GROUP BY
-                time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度", "按月", "每月", "月度", "月均",
-                                              "按周", "每周", "周度", "按季", "季度", "按年", "每年", "年度"]
-                if any(kw in question for kw in time_granularity_keywords):
-                    dimensions.append(time_dim_col)
-                    logger.info(f"[SQLGenerator] 用户问题包含时间粒度关键词,添加 {time_dim_col} 到 GROUP BY")
+                pass
 
         logger.info(f"[_mql_to_semantic] 最终 dimensions={dimensions}, question='{question}'")
 
