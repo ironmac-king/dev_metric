@@ -56,6 +56,11 @@ class TimeParser:
         if result:
             return result
 
+        # 0.6 年+月范围: "2026年3月到2026年4月", "2026年3-4月"
+        result = self._parse_year_month_range(text)
+        if result:
+            return result
+
         # 1. 带年份的绝对月份: "2024年7月" 或 "23年7月"
         result = self._parse_year_month(text)
         if result:
@@ -218,6 +223,57 @@ class TimeParser:
                 }
         return None
 
+    def _parse_year_month_range(self, text: str) -> Optional[Dict[str, Any]]:
+        """解析年+月范围: 2026年3月到2026年4月, 2026年3-4月, 2026年3月到4月"""
+        from calendar import monthrange
+
+        # "2026年3月到2026年4月"
+        match = re.search(r'(\d{4})年\s*(\d{1,2})月\s*[到至]\s*(\d{4})年\s*(\d{1,2})月', text)
+        if match:
+            y1, m1, y2, m2 = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
+            if 1 <= m1 <= 12 and 1 <= m2 <= 12:
+                _, end_last = monthrange(y2, m2)
+                return {
+                    "type": "date_range",
+                    "start": f"{y1}-{m1:02d}-01",
+                    "end": f"{y2}-{m2:02d}-{end_last}",
+                    "original": match.group(0),
+                    "has_explicit_year": True,
+                    "time_key": f"{y1}-{m1:02d}_{y2}-{m2:02d}"
+                }
+
+        # "2026年3月到4月"
+        match = re.search(r'(\d{4})年\s*(\d{1,2})月\s*[到至]\s*(\d{1,2})月', text)
+        if match:
+            y, m1, m2 = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            if 1 <= m1 <= 12 and 1 <= m2 <= 12:
+                _, end_last = monthrange(y, m2)
+                return {
+                    "type": "date_range",
+                    "start": f"{y}-{m1:02d}-01",
+                    "end": f"{y}-{m2:02d}-{end_last}",
+                    "original": match.group(0),
+                    "has_explicit_year": True,
+                    "time_key": f"{y}-{m1:02d}_{y}-{m2:02d}"
+                }
+
+        # "2026年3-4月"
+        match = re.search(r'(\d{4})年\s*(\d{1,2})\s*[-~]\s*(\d{1,2})月', text)
+        if match:
+            y, m1, m2 = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            if 1 <= m1 <= 12 and 1 <= m2 <= 12:
+                _, end_last = monthrange(y, m2)
+                return {
+                    "type": "date_range",
+                    "start": f"{y}-{m1:02d}-01",
+                    "end": f"{y}-{m2:02d}-{end_last}",
+                    "original": match.group(0),
+                    "has_explicit_year": True,
+                    "time_key": f"{y}-{m1:02d}_{y}-{m2:02d}"
+                }
+
+        return None
+
     def _parse_month_only(self, text: str) -> Optional[Dict[str, Any]]:
         """解析绝对月份: 7月"""
         # 如果文本包含相对时间前缀，不应该匹配绝对月份
@@ -337,7 +393,7 @@ class TimeParser:
             }
 
         # 匹配月份范围: "7月至9月" 或 "7月到9月"
-        match = re.search(r"(\d{1,2})月[-到](\d{1,2})月", text)
+        match = re.search(r"(\d{1,2})月[-到至](\d{1,2})月", text)
         if match:
             start_month, end_month = int(match.group(1)), int(match.group(2))
             if 1 <= start_month <= 12 and 1 <= end_month <= 12:

@@ -314,6 +314,27 @@ class SnapshotEngine(BaseEngine):
         if year_month_day:
             return year_month_day.group(0).replace(" ", "")
 
+        # 年+月范围（完整）: "2026年3月到2026年4月", "2026年3月至2026年4月"
+        ym_range_full = re.search(
+            r'(\d{4})年\s*(\d{1,2})月\s*[到至]\s*(\d{4})年\s*(\d{1,2})月', query
+        )
+        if ym_range_full:
+            return ym_range_full.group(0).replace(" ", "")
+
+        # 年+月范围（简写）: "2026年3月到4月", "2026年3月至4月"
+        ym_range_to = re.search(
+            r'(\d{4})年\s*(\d{1,2})月\s*[到至]\s*(\d{1,2})月', query
+        )
+        if ym_range_to:
+            return ym_range_to.group(0).replace(" ", "")
+
+        # 年+月范围（连字符）: "2026年3-4月"
+        ym_range_dash = re.search(
+            r'(\d{4})年\s*(\d{1,2})\s*[-~]\s*(\d{1,2})月', query
+        )
+        if ym_range_dash:
+            return ym_range_dash.group(0).replace(" ", "")
+
         # 年+月（如 "今年3月"、"2025年7月"）
         year_month = re.search(r'(今年|去年|明年|\d{4}年)\s*(\d{1,2})月', query)
         if year_month:
@@ -323,6 +344,13 @@ class SnapshotEngine(BaseEngine):
         standalone_month_day = re.search(r'(?<![今去明\d年])\s*(\d{1,2})月(\d{1,2})[日号]', query)
         if standalone_month_day:
             return standalone_month_day.group(0).strip()
+
+        # 独立月范围: "3月到4月", "3月至4月"
+        month_range = re.search(
+            r'(?<![今去明\d年])\s*(\d{1,2})月\s*[到至]\s*(\d{1,2})月', query
+        )
+        if month_range:
+            return month_range.group(0).strip()
 
         # 单独N月（如 "7月"）
         standalone_month = re.search(r'(?<![今去明\d年])\s*(\d{1,2})月', query)
