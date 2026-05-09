@@ -103,7 +103,7 @@
           :total="props.data.length"
           layout="total, sizes, prev, pager, next"
           @current-change="handlePageChange"
-          @size-change="handlePageChange"
+          @size-change="handleSizeChange"
         />
       </div>
     </div>
@@ -302,6 +302,10 @@ function handlePageChange(page) {
   currentPage.value = page
 }
 
+function handleSizeChange() {
+  currentPage.value = 1
+}
+
 // 时间范围标签（统一格式：YYYY-MM-DD ~ YYYY-MM-DD）
 const timeRangeLabel = computed(() => {
   // 优先使用 props.timeStart 和 props.timeEnd（从 MQL 传递的日期范围）
@@ -339,14 +343,14 @@ const timeRangeLabel = computed(() => {
 const tableKeys = computed(() => {
   // 优先使用后端返回的 columns 元数据
   if (props.columns && props.columns.length > 0) {
-    // 过滤掉时间维度列
-    return props.columns.filter(k => k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
+    // 过滤掉日期维度列（保留 MONTHS，月份是用户可读的维度列）
+    return props.columns.filter(k => k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
   }
   // Fallback: 从数据对象提取 keys（不保证顺序）
   if (!props.data || props.data.length === 0) return []
   const keys = Object.keys(props.data[0])
-  // 过滤掉时间维度列（MONTHS/FDATE/FDATE_START/FDATE_END）
-  const filteredKeys = keys.filter(k => k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
+  // 过滤掉日期维度列（保留 MONTHS，月份是用户可读的维度列）
+  const filteredKeys = keys.filter(k => k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
   return filteredKeys
 })
 
@@ -452,8 +456,8 @@ const tableHeaders = computed(() => {
   const keys = Object.keys(props.data[0])
   // 过滤出数值列（metric 对应的列，排除 MONTHS/FDATE）
   const numericKeys = keys.filter(k => isNumericColumn(k, props.data[0][k]))
-  // 过滤掉时间维度列（保持原始 key 顺序）
-  const filteredKeys = keys.filter(k => k !== 'MONTHS' && k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
+  // 过滤掉时间维度列（保持原始 key 顺序，保留 MONTHS）
+  const filteredKeys = keys.filter(k => k !== 'FDATE' && k !== 'FDATE_START' && k !== 'FDATE_END')
 
   // 构建 key → header 映射（与 tableKeys 顺序完全一致）
   // metricNames 负责映射数值列的中文名，其他列直接用 key 或中文映射
