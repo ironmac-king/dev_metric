@@ -760,10 +760,15 @@ FROM (
                 dimensions.append(self.COL_DATE)
         elif time_dim_col not in dimensions:
             # query_trend intent 自动添加时间维度（趋势查询必然需要时间序列）
+            # 但如果已有非时间维度（如"各站点趋势"），不自动加时间列，避免 FSITE×FDATE 交叉网格
             intent_val = mql.intent.value if hasattr(mql.intent, 'value') else str(mql.intent)
-            if intent_val == "query_trend":
+            _non_time_dims = [d for d in dimensions if d not in _TIME_DIM_COLS]
+            if intent_val == "query_trend" and not _non_time_dims:
                 dimensions.append(time_dim_col)
                 logger.info(f"[SQLGenerator] query_trend intent,自动添加 {time_dim_col} 到 GROUP BY")
+            elif intent_val == "query_trend" and _non_time_dims:
+                # 有非时间维度时，用户说"趋势"通常是想看各维度对比，不加时间列
+                logger.info(f"[SQLGenerator] query_trend intent 但有非时间维度{_non_time_dims},不加时间列到 GROUP BY")
             else:
                 # 只有当用户明确提到时间粒度(如"按天"、"每日"、"按月")时,才将时间列加入 GROUP BY
                 time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度", "按月", "每月", "月度", "月均",
