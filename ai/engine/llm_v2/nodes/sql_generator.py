@@ -680,6 +680,9 @@ FROM (
         # - 有具体值的维度 → 只当 filter,不进 GROUP BY
         # - 无具体值的维度 → 进 GROUP BY
         # - 时间维度 → 根据范围跨度决定粒度后加入
+        # - 时间粒度列(YEARS/MONTHS/FDATE)在有其他非时间维度时,不进 GROUP BY
+        #   (WHERE 已限定时间范围,除非用户明确说"按月/按天"才需要 GROUP BY 时间)
+        _TIME_DIM_COLS = {self.COL_YEARS, self.COL_MONTHS, self.COL_DATE, "DT", "DATE", "STAT_DATE"}
         dimensions: List[str] = []
         date_col_candidates = {self.COL_DATE, "DT", "DATE", "STAT_DATE"}
         dt_column = self.COL_DATE
@@ -692,6 +695,20 @@ FROM (
                 continue
             if col and col not in dimensions:
                 dimensions.append(col)
+
+        # 当存在非时间维度时,移除时间粒度列(YEARS/MONTHS/FDATE)
+        # 除非用户明确要求按时间粒度查看(如"按月看业绩")
+        non_time_dims = [d for d in dimensions if d not in _TIME_DIM_COLS]
+        if non_time_dims:
+            time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度", "按月", "每月", "月度", "月均",
+                                          "按周", "每周", "周度", "按季", "季度", "按年", "每年", "年度"]
+            question = getattr(mql, 'original_question', '') or ''
+            user_wants_time_grain = any(kw in question for kw in time_granularity_keywords)
+            if not user_wants_time_grain:
+                removed = [d for d in dimensions if d in _TIME_DIM_COLS]
+                dimensions = non_time_dims
+                if removed:
+                    logger.info(f"[SQLGenerator] 有非时间维度{non_time_dims},移除时间粒度列{removed}(WHERE已限定时间范围)")
 
         # 时间粒度判断:跨月范围用 MONTHS,否则用 FDATE
         time_dim_col = self.COL_DATE
