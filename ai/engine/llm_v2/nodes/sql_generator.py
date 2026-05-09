@@ -683,6 +683,11 @@ FROM (
         # - 时间粒度列(YEARS/MONTHS/FDATE)在有其他非时间维度时,不进 GROUP BY
         #   (WHERE 已限定时间范围,除非用户明确说"按月/按天"才需要 GROUP BY 时间)
         _TIME_DIM_COLS = {self.COL_YEARS, self.COL_MONTHS, self.COL_DATE, "DT", "DATE", "STAT_DATE"}
+        _TIME_GRAIN_KEYWORDS = ["按天", "每日", "按日", "每天", "日度",
+                                 "按月", "按照月份", "每月", "每个月", "月度", "月均", "各月", "各个月", "分月",
+                                 "按季", "按照季度", "每季度", "季度", "各季度", "分季度",
+                                 "按年", "每年", "年度",
+                                 "按周", "每周", "周度"]
         dimensions: List[str] = []
         date_col_candidates = {self.COL_DATE, "DT", "DATE", "STAT_DATE"}
         dt_column = self.COL_DATE
@@ -700,13 +705,8 @@ FROM (
         # 除非用户明确要求按时间粒度查看(如"按月看业绩")
         non_time_dims = [d for d in dimensions if d not in _TIME_DIM_COLS]
         if non_time_dims:
-            time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度",
-                                          "按月", "按照月份", "每月", "每个月", "月度", "月均", "各月", "各个月", "分月",
-                                          "按季", "按照季度", "每季度", "季度", "各季度", "分季度",
-                                          "按年", "每年", "年度",
-                                          "按周", "每周", "周度"]
             question = getattr(mql, 'original_question', '') or ''
-            user_wants_time_grain = any(kw in question for kw in time_granularity_keywords)
+            user_wants_time_grain = any(kw in question for kw in _TIME_GRAIN_KEYWORDS)
             if not user_wants_time_grain:
                 removed = [d for d in dimensions if d in _TIME_DIM_COLS]
                 dimensions = non_time_dims
@@ -766,12 +766,7 @@ FROM (
             _non_time_dims = [d for d in dimensions if d not in _TIME_DIM_COLS]
 
             # 检查用户是否明确说了时间粒度
-            time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度",
-                                          "按月", "按照月份", "每月", "每个月", "月度", "月均", "各月", "各个月", "分月",
-                                          "按季", "按照季度", "每季度", "季度", "各季度", "分季度",
-                                          "按年", "每年", "年度",
-                                          "按周", "每周", "周度"]
-            user_wants_time_grain = any(kw in question for kw in time_granularity_keywords)
+            user_wants_time_grain = any(kw in question for kw in _TIME_GRAIN_KEYWORDS)
 
             if user_wants_time_grain:
                 # 用户明确说了时间粒度，无条件加时间列
