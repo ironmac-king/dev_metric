@@ -51,6 +51,11 @@ class TimeParser:
         if result:
             return result
 
+        # 0.5 绝对数字日期: 2026-05-01, 2026/05/01, 2026.05.01
+        result = self._parse_absolute_date(text)
+        if result:
+            return result
+
         # 1. 带年份的绝对月份: "2024年7月" 或 "23年7月"
         result = self._parse_year_month(text)
         if result:
@@ -130,9 +135,58 @@ class TimeParser:
 
         return None
 
+    def _parse_absolute_date(self, text: str) -> Optional[Dict[str, Any]]:
+        """解析绝对数字日期: 2026-05-01, 2026/05/01, 2026.05.01（含范围）"""
+        # 范围: 2026-05-01~2026-05-31
+        match = re.search(
+            r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s*[~到至\-]\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})',
+            text
+        )
+        if match:
+            return {
+                "type": "date_range",
+                "start": f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}",
+                "end": f"{match.group(4)}-{match.group(5).zfill(2)}-{match.group(6).zfill(2)}",
+                "original": match.group(0),
+                "has_explicit_year": True,
+                "time_key": f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}_{match.group(4)}-{match.group(5).zfill(2)}-{match.group(6).zfill(2)}"
+            }
+        # 单日: 2026-05-01
+        match = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', text)
+        if match:
+            y, m, d = match.group(1), match.group(2).zfill(2), match.group(3).zfill(2)
+            return {
+                "type": "date_range",
+                "start": f"{y}-{m}-{d}",
+                "end": f"{y}-{m}-{d}",
+                "original": match.group(0),
+                "has_explicit_year": True,
+                "time_key": f"{y}-{m}-{d}"
+            }
+        return None
+
     def _parse_year_month(self, text: str) -> Optional[Dict[str, Any]]:
         """解析带年份的月份: 2024年7月、23年7月"""
-        # 四位数年份: 2024年7月
+        # 四位数年份+月+日: 2024年7月15日
+        match = re.search(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})[日号]", text)
+        if match:
+            year = int(match.group(1))
+            month = int(match.group(2))
+            day = int(match.group(3))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                from calendar import monthrange
+                _, last_day = monthrange(year, month)
+                day = min(day, last_day)
+                return {
+                    "type": "date_range",
+                    "start": f"{year}-{month:02d}-{day:02d}",
+                    "end": f"{year}-{month:02d}-{day:02d}",
+                    "original": match.group(0),
+                    "has_explicit_year": True,
+                    "time_key": f"{year}-{month:02d}-{day:02d}"
+                }
+
+        # 四位数年份+月: 2024年7月
         match = re.search(r"(\d{4})年(\d{1,2})月", text)
         if match:
             year = int(match.group(1))
@@ -303,10 +357,9 @@ class TimeParser:
         return None
 
     def _parse_specific_date(self, text: str) -> Optional[Dict[str, Any]]:
-        """解析具体日期: 4月2日、7月15日（不是日期范围）"""
-        # 匹配 "4月2日" 格式，但不匹配范围（如 "7月1日-7月15日"）
-        # 负向前瞻：确保后面没有 "日-" 或 "日到"
-        match = re.search(r"(\d{1,2})月(\d{1,2})日(?![-到])", text)
+        """解析具体日期: 4月2日、7月15日、5月1号（不是日期范围）"""
+        # 匹配 "4月2日" 或 "4月2号" 格式，但不匹配范围
+        match = re.search(r"(\d{1,2})月(\d{1,2})[日号](?![-到])", text)
         if match:
             month = int(match.group(1))
             day = int(match.group(2))
@@ -314,9 +367,9 @@ class TimeParser:
                 year = self._infer_year(text)
                 from calendar import monthrange
                 _, last_day = monthrange(year, month)
-                day = min(day, last_day)  # 避免 2 月 30 号等问题
+                day = min(day, last_day)
                 return {
-                    "type": "date_range",  # 用 date_range 类型表示具体日期
+                    "type": "date_range",
                     "start": f"{year}-{month:02d}-{day:02d}",
                     "end": f"{year}-{month:02d}-{day:02d}",
                     "original": match.group(0),

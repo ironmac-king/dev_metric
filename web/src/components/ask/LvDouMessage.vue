@@ -63,6 +63,22 @@
               </div>
               <div class="kpi-values" v-html="renderHtml(stripKpiTitle(p))"></div>
             </div>
+            <!-- 归因分析段落：标题 + 问号tooltip + 内容 -->
+            <div v-else-if="isAttributionSection(p)" class="attribution-section">
+              <div class="chart-section-header">
+                <strong>{{ attributionSectionTitle(p) }}</strong>
+                <span class="chart-tip-icon" @mouseenter="showAttributionTip = true" @mouseleave="showAttributionTip = false">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                </span>
+                <div v-if="showAttributionTip" class="chart-popover">
+                  <div class="chart-popover-row"><span class="chart-popover-label">贡献度</span><span class="chart-popover-value">维度变化量 ÷ 整体变化量 × 100%</span></div>
+                  <div class="chart-popover-row"><span class="chart-popover-label">负面贡献</span><span class="chart-popover-value">该维度本期 &lt; 上期，拉低整体表现</span></div>
+                  <div class="chart-popover-row"><span class="chart-popover-label">正向贡献</span><span class="chart-popover-value">该维度本期 &gt; 上期，提升整体表现</span></div>
+                  <div class="chart-popover-row"><span class="chart-popover-label">优先级</span><span class="chart-popover-value">P0 需立即关注 / P1 建议分析 / P2 可选复盘</span></div>
+                </div>
+              </div>
+              <div class="detail-line" v-html="renderHtml(stripAttributionTitle(p))"></div>
+            </div>
             <!-- 其他段落正常渲染 -->
             <p v-else-if="!isChartPlaceholder(p)" class="detail-line" v-html="renderHtml(p)"></p>
           </template>
@@ -89,9 +105,12 @@
         <div v-if="msg.needsClarification && msg.clarificationOptions?.length" class="clarify-section">
           <div class="clarify-msg">{{ msg.clarificationMessage || '请先确认你的意思' }}</div>
           <div class="clarify-options">
-            <button v-for="opt in msg.clarificationOptions" :key="opt.value || opt.label" class="clarify-btn"
+            <button v-for="opt in pagedClarificationOptions" :key="opt.value || opt.label" class="clarify-btn"
               @click="$emit('legacy-clarification', opt, msg.originalQuestion)">
               {{ opt.label }}
+            </button>
+            <button v-if="hasMoreBatches" class="clarify-btn refresh-btn" @click="refreshMetricBatch">
+              换一批
             </button>
           </div>
         </div>
@@ -193,6 +212,30 @@ defineEmits([
 marked.setOptions({ breaks: true, gfm: true })
 
 const showReasoning = ref(false)
+
+const METRICS_PER_BATCH = 6
+const metricBatchIdx = ref(0)
+
+const pagedClarificationOptions = computed(() => {
+  const opts = props.msg.clarificationOptions
+  if (!opts || opts.length <= METRICS_PER_BATCH) return opts || []
+  const totalBatches = Math.ceil(opts.length / METRICS_PER_BATCH)
+  const safeIdx = metricBatchIdx.value % totalBatches
+  const start = safeIdx * METRICS_PER_BATCH
+  return opts.slice(start, start + METRICS_PER_BATCH)
+})
+
+const hasMoreBatches = computed(() => {
+  const opts = props.msg.clarificationOptions
+  return opts && opts.length > METRICS_PER_BATCH
+})
+
+function refreshMetricBatch() {
+  const opts = props.msg.clarificationOptions
+  if (!opts) return
+  const totalBatches = Math.ceil(opts.length / METRICS_PER_BATCH)
+  metricBatchIdx.value = (metricBatchIdx.value + 1) % totalBatches
+}
 const presentation = computed(() => buildAssistantPresentation(props.msg))
 
 const CHART_PLACEHOLDER_RE = /数据图表|前端展示|维度对比图|贡献占比图/
@@ -207,6 +250,19 @@ function isChartPlaceholder(text) {
 
 function isKpiSection(text) {
   return /^\*\*[一二三四五六]、核心指标\*\*/.test(text)
+}
+
+function isAttributionSection(text) {
+  return /^\*\*[一二三四五六]、归因分析\*\*/.test(text)
+}
+
+function attributionSectionTitle(text) {
+  const m = text.match(/^\*\*([一二三四五六]、归因分析)\*\*/)
+  return m ? m[1] : '归因分析'
+}
+
+function stripAttributionTitle(text) {
+  return text.replace(/^\*\*[一二三四五六]、归因分析\*\*\n?/, '').replace(/^（[^）]+）\n?/, '')
 }
 
 function stripKpiTitle(text) {
@@ -225,6 +281,7 @@ function chartSectionTitle(text) {
 
 const showKpiTip = ref(false)
 const showChartTip = ref(false)
+const showAttributionTip = ref(false)
 
 const kpiTooltipText = computed(() => {
   const tip = props.msg.kpiTooltip
@@ -529,6 +586,8 @@ function renderHtml(text) {
   font-size: 13px; color: #4e5969; cursor: pointer; transition: all 0.15s;
 }
 .clarify-btn:hover { border-color: #3370ff; color: #3370ff; }
+.clarify-btn.refresh-btn { border-style: dashed; color: #9ca3af; }
+.clarify-btn.refresh-btn:hover { border-style: solid; color: #6b7280; border-color: #9ca3af; }
 
 /* 数据区 */
 .data-section { margin-top: 16px; }
@@ -598,6 +657,9 @@ function renderHtml(text) {
 }
 
 /* 归因分析 */
+.attribution-section { margin: 8px 0; }
+.attribution-section .chart-section-header strong { font-size: 13px; color: #1f2329; }
+.attribution-section .detail-line { padding: 0; }
 .breakdown-section { margin-top: 16px; }
 .breakdown-title {
   display: flex; align-items: center; gap: 6px;

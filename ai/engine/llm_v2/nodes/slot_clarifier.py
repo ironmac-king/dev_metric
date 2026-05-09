@@ -125,7 +125,7 @@ class SlotClarifier:
         return False
 
     def _get_metric_options(self) -> List[Dict[str, str]]:
-        """从快照获取常用指标列表"""
+        """从快照获取在用指标列表（前端分批展示 + 换一批）"""
         options = []
         try:
             from ai.services.semantic_snapshot_service import get_semantic_snapshot_service
@@ -134,17 +134,15 @@ class SlotClarifier:
             if snapshot:
                 payload = snapshot.get("payload", snapshot)
                 metrics = payload.get("metrics", {})
-                # 取前 6 个 MKI 指标作为选项
-                count = 0
                 for code, m in metrics.items():
                     if code.startswith("MKI") and m.get("display_name"):
+                        # 过滤停用指标：status=0 或 原始 status="停用"
+                        if m.get("status") == 0 or m.get("status") == "停用":
+                            continue
                         options.append({
                             "label": m["display_name"],
                             "value": m["display_name"],
                         })
-                        count += 1
-                        if count >= 6:
-                            break
         except Exception as e:
             logger.warning(f"[SlotClarifier] 获取指标选项失败: {e}")
         return options

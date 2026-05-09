@@ -340,7 +340,7 @@ class VolatilityTrigger(BaseTrigger):
                         "dimension": dim.get('name', ''),
                         "raw_value": dim.get('name', ''),
                         "value": f"{dim.get('change', 0):.1f}",
-                        "impact": f"拖累{abs(dim.get('contribution', 0)):.1f}%",
+                        "impact": f"负面贡献{abs(dim.get('contribution', 0)):.1f}%",
                         "priority": "P0",
                         "reason": "需关注",
                         "dimension_type": dimension_key
@@ -1195,8 +1195,8 @@ class TriggerAnalyzer:
 
         规则：
         - 按 contribution_rate 降序排序
-        - 分离「拖累项」（change_value < 0）和「贡献项」（change_value > 0）
-        - 主要拖累：Top 2（贡献率最大的负向变化）
+        - 分离「负向项」（change_value < 0）和「正向贡献项」（change_value > 0）
+        - 主要负向：Top 2（贡献率最大的负向变化）
         - 正向贡献：Top 1（贡献率最大的正向变化）
         """
         if not attribution_data:
@@ -1230,7 +1230,7 @@ class TriggerAnalyzer:
         if not items:
             return None
 
-        # 分离拖累项和贡献项
+        # 分离负向项和正向贡献项
         drag_items = [item for item in items if item["change_value"] < 0]
         positive_items = [item for item in items if item["change_value"] > 0]
 
@@ -1242,11 +1242,11 @@ class TriggerAnalyzer:
         final_items = []
         for item in drag_items_sorted[:2]:
             item["role"] = "main_drag"
-            item["conclusion"] = f"拖累{item['contribution_rate']}%"
+            item["conclusion"] = f"负面贡献{item['contribution_rate']}%"
             final_items.append(item)
         for item in positive_items_sorted[:1]:
             item["role"] = "positive_contributor"
-            item["conclusion"] = f"贡献{item['contribution_rate']}%"
+            item["conclusion"] = f"正向贡献{item['contribution_rate']}%"
             final_items.append(item)
 
         if not final_items:
@@ -1778,7 +1778,7 @@ class TriggerAnalyzer:
                             time_desc = f"{getattr(time_obj, 'original', '') or ''}（{getattr(time_obj, 'start', '')} ~ {getattr(time_obj, 'end', '')}）"
 
                         user_prompt = f"""指标：{metric_name}，时间：{time_desc if time_desc else '未指定'}，环比：{kpi.get('mom')}% ，同比：{kpi.get('yoy')}%
-主要拖累：{breakdown_desc if breakdown_desc else '无明显维度波动'}
+主要波动项：{breakdown_desc if breakdown_desc else '无明显维度波动'}
 业务口径：{business_summary if business_summary else '无'}"""
 
                         system_prompt = prompt_config["prompt_text"]

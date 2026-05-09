@@ -595,7 +595,7 @@ WHERE {filter_sql}
                     change_cols.append(
                         f"CASE WHEN t.{ma}_mom_val != 0 "
                         f"THEN CONCAT(IF(t.{ma}_raw - t.{ma}_mom_val >= 0, '+', ''), "
-                        f"CAST((t.{ma}_raw - t.{ma}_mom_val) / t.{ma}_mom_val * 100 AS VARCHAR), '%') "
+                        f"CAST(ROUND((t.{ma}_raw - t.{ma}_mom_val) / t.{ma}_mom_val * 100, 1) AS VARCHAR), '%') "
                         f"ELSE NULL END AS {ma}_mom_change"
                     )
                 if supports_yoy:
@@ -603,7 +603,7 @@ WHERE {filter_sql}
                     change_cols.append(
                         f"CASE WHEN t.{ma}_yoy_val != 0 "
                         f"THEN CONCAT(IF(t.{ma}_raw - t.{ma}_yoy_val >= 0, '+', ''), "
-                        f"CAST((t.{ma}_raw - t.{ma}_yoy_val) / t.{ma}_yoy_val * 100 AS VARCHAR), '%') "
+                        f"CAST(ROUND((t.{ma}_raw - t.{ma}_yoy_val) / t.{ma}_yoy_val * 100, 1) AS VARCHAR), '%') "
                         f"ELSE NULL END AS {ma}_yoy_change"
                     )
 

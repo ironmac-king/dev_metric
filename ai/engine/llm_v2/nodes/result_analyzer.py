@@ -540,7 +540,7 @@ class ResultAnalyzer:
             attr_text = self._build_attribution_text(analysis["breakdown"])
             if attr_text and attr_text.strip("：\n "):
                 _si += 1
-                sections.append(f"**{_CN[_si - 1]}、归因分析**\n" + attr_text)
+                sections.append(f"**{_CN[_si - 1]}、归因分析**\n（贡献度 = 维度变化量 ÷ 整体变化量 × 100%，衡量各维度对整体波动的影响程度）\n" + attr_text)
 
         # 建议结论（有分析就给，先构建内容再判断是否有效）
         if has_actionable:
@@ -848,7 +848,8 @@ class ResultAnalyzer:
             if is_yoy and yoy_val is not None and yoy_val != 0:
                 # 同比数据
                 if yoy_change:
-                    change_desc = f"同比{'上升' if float(str(yoy_change).replace('%','')) > 0 else '下降'}了 {abs(float(str(yoy_change).replace('%','')))}%"
+                    _pct = abs(float(str(yoy_change).replace('%','')))
+                    change_desc = f"同比{'上升' if float(str(yoy_change).replace('%','')) > 0 else '下降'}了 {_pct:.1f}%"
                 else:
                     change_desc = ""
                 if unit:
@@ -859,7 +860,8 @@ class ResultAnalyzer:
             elif is_mom and mom_val is not None and mom_val != 0:
                 # 环比数据
                 if mom_change:
-                    change_desc = f"环比{'上升' if float(str(mom_change).replace('%','')) > 0 else '下降'}了 {abs(float(str(mom_change).replace('%','')))}%"
+                    _pct = abs(float(str(mom_change).replace('%','')))
+                    change_desc = f"环比{'上升' if float(str(mom_change).replace('%','')) > 0 else '下降'}了 {_pct:.1f}%"
                 else:
                     change_desc = ""
                 if unit:
@@ -1063,18 +1065,26 @@ class ResultAnalyzer:
                 # 同比数据
                 compare_period = format_period(mql.comparison.compare_period_start) if mql.comparison and mql.comparison.compare_period_start else "去年同期"
                 if yoy_change:
-                    change_desc = f"{yoy_change}%"
+                    try:
+                        change_pct = float(str(yoy_change).replace('%', '').replace('+', ''))
+                        change_desc = f"{change_pct:+.1f}%"
+                    except (ValueError, TypeError):
+                        change_desc = f"{yoy_change}%"
                 else:
                     change_desc = ""
-                answer = f"{metric_name}同比{'上升' if float(str(yoy_change).replace('%','')) > 0 else '下降' if yoy_change else '持平'}{change_desc}。{current_period}为 {int(current_val):,}，{compare_period}为 {int(yoy_val):,}。"
+                answer = f"{metric_name}同比{'上升' if float(str(yoy_change).replace('%','').replace('+','')) > 0 else '下降' if yoy_change else '持平'}{change_desc}。{current_period}为 {int(current_val):,}，{compare_period}为 {int(yoy_val):,}。"
             elif is_mom and mom_val is not None and mom_val != 0:
                 # 环比数据
                 compare_period = format_period(mql.comparison.compare_period_start) if mql.comparison and mql.comparison.compare_period_start else "上期"
                 if mom_change:
-                    change_desc = f"{mom_change}%"
+                    try:
+                        change_pct = float(str(mom_change).replace('%', '').replace('+', ''))
+                        change_desc = f"{change_pct:+.1f}%"
+                    except (ValueError, TypeError):
+                        change_desc = f"{mom_change}%"
                 else:
                     change_desc = ""
-                answer = f"{metric_name}环比{'上升' if float(str(mom_change).replace('%','')) > 0 else '下降' if mom_change else '持平'}{change_desc}。{current_period}为 {int(current_val):,}，{compare_period}为 {int(mom_val):,}。"
+                answer = f"{metric_name}环比{'上升' if float(str(mom_change).replace('%','').replace('+','')) > 0 else '下降' if mom_change else '持平'}{change_desc}。{current_period}为 {int(current_val):,}，{compare_period}为 {int(mom_val):,}。"
             else:
                 # 旧格式 fallback
                 if trend == '增长':
@@ -1448,7 +1458,7 @@ class ResultAnalyzer:
             impact = item.get("impact", "")
             priority = item.get("priority", "")
             role = item.get("role", "")
-            role_label = "拖累" if "drag" in role else ("贡献" if "boost" in role or "positive" in role else "")
+            role_label = "负面贡献" if "drag" in role else ("正向贡献" if "boost" in role or "positive" in role else "")
             parts = [f"{dim}："]
             if impact:
                 parts.append(f"{impact}")

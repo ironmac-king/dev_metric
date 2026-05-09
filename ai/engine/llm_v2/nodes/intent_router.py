@@ -176,6 +176,16 @@ class IntentRouter:
             self._semantic_service = get_semantic_snapshot_service()
         return self._semantic_service
 
+    def _extract_time_from_snapshot(self, question: str) -> Optional[str]:
+        """用快照引擎的 _extract_time_expr 从问题中提取时间表达式"""
+        try:
+            from ai.services.semantic_layer.engines.snapshot_engine import SnapshotEngine
+            engine = SnapshotEngine()
+            return engine._extract_time_expr(question)
+        except Exception:
+            pass
+        return None
+
     def _get_dimension_service(self):
         """延迟加载维度服务"""
         if self._dimension_service is None:
@@ -309,8 +319,17 @@ class IntentRouter:
                 entities.append({"text": parse_result.metric_name, "type": "METRIC", "start": 0, "end": 0})
 
             # 如果语义层没有提取到 TIME 实体但有 time_expr，手动添加
-            if parse_result.time_expr and not any(e['type'] == 'TIME' for e in entities):
+            # 或者本地模型提取的 TIME 实体不完整，用快照引擎的 _extract_time_expr 补全
+            existing_time = next((e for e in entities if e['type'] == 'TIME'), None)
+            snapshot_time = self._extract_time_from_snapshot(question)
+            if not existing_time and parse_result.time_expr:
                 entities.append({"text": parse_result.time_expr, "type": "TIME", "start": 0, "end": 0})
+            elif existing_time and snapshot_time and len(snapshot_time) > len(existing_time['text']):
+                # 快照引擎提取的时间表达式更长/更完整，覆盖本地模型的
+                existing_time['text'] = snapshot_time
+                logger.info(f"[IntentRouter] 快照时间覆盖: '{existing_time['text']}' → '{snapshot_time}'")
+            elif not existing_time and snapshot_time:
+                entities.append({"text": snapshot_time, "type": "TIME", "start": 0, "end": 0})
 
             # 如果维度列表有值但 entities 中没有 DIM/DIM_VALUE，补充
             for dim in (parse_result.dimensions or []):

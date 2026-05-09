@@ -566,13 +566,26 @@ class LocalJointIntentModel:
                     })
                     start = pos + 1
 
-        # 正则匹配：补充识别 \d{4}年 系列（本地模型未训练的时间表达式）
-        year_patterns = [
+        # 正则匹配：补充识别动态时间表达式（近N天、近N月、最近N天等）
+        # 这些不在固定词典 TIME_EXPRESSIONS 中，但需要正则主动识别
+        dynamic_time_patterns = [
+            (r'近(\d+)个?天', 'TIME'),      # 近15天, 近7天, 近30天, 近100天
+            (r'近(\d+)个?日', 'TIME'),      # 近15日, 近7日
+            (r'近(\d+)个?月', 'TIME'),      # 近3月, 近6月, 近3个月
+            (r'近(\d+)个?年', 'TIME'),      # 近2年, 近1年
+            (r'最近(\d+)个?天', 'TIME'),    # 最近15天, 最近7天
+            (r'最近(\d+)个?日', 'TIME'),    # 最近15日
+            (r'最近(\d+)个?月', 'TIME'),    # 最近3月, 最近3个月
+            (r'最近(\d+)个?年', 'TIME'),    # 最近1年
+            (r'过去(\d+)个?天', 'TIME'),    # 过去15天
+            (r'过去(\d+)个?月', 'TIME'),    # 过去3月, 过去3个月
+            (r'过去(\d+)个?年', 'TIME'),    # 过去1年
             (r'(\d{4})年(\d{1,2})月', 'TIME'),  # 2024年7月
             (r'(\d{4})年', 'TIME'),              # 2025年
         ]
-        for pattern, etype in year_patterns:
+        for pattern, etype in dynamic_time_patterns:
             for match in re.finditer(pattern, text):
+                # 使用完整匹配文本作为实体 text
                 rule_matches.append({
                     'text': match.group(0),
                     'type': etype,

@@ -296,17 +296,40 @@ class SnapshotEngine(BaseEngine):
     def _extract_time_expr(self, query: str) -> Optional[str]:
         """提取时间表达式"""
 
-        # 优先匹配 年+月 组合（如 "今年3月"、"去年12月"、"2025年7月"）
+        # 绝对数字日期范围: 2026-05-01~2026-05-31, 2026/05/01-2026/05/31
+        abs_range = re.search(
+            r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s*[~到至\-]\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})',
+            query
+        )
+        if abs_range:
+            return f"{abs_range.group(1)}-{abs_range.group(2)}-{abs_range.group(3)}~{abs_range.group(4)}-{abs_range.group(5)}-{abs_range.group(6)}"
+
+        # 绝对数字日期单日: 2026-05-01, 2026/05/01, 2026.05.01
+        abs_single = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', query)
+        if abs_single:
+            return f"{abs_single.group(1)}-{abs_single.group(2)}-{abs_single.group(3)}"
+
+        # 年+月+日（如 "今年3月1日"、"2025年7月15日"）
+        year_month_day = re.search(r'(今年|去年|明年|\d{4}年)\s*(\d{1,2})月(\d{1,2})[日号]', query)
+        if year_month_day:
+            return year_month_day.group(0).replace(" ", "")
+
+        # 年+月（如 "今年3月"、"2025年7月"）
         year_month = re.search(r'(今年|去年|明年|\d{4}年)\s*(\d{1,2})月', query)
         if year_month:
             return year_month.group(0).replace(" ", "")
 
-        # 匹配 单独N月（无年份前缀）
+        # 单独N月D日（如 "3月1日", "12月25号"）
+        standalone_month_day = re.search(r'(?<![今去明\d年])\s*(\d{1,2})月(\d{1,2})[日号]', query)
+        if standalone_month_day:
+            return standalone_month_day.group(0).strip()
+
+        # 单独N月（如 "7月"）
         standalone_month = re.search(r'(?<![今去明\d年])\s*(\d{1,2})月', query)
         if standalone_month:
             return standalone_month.group(0).strip()
 
-        # 匹配季度组合（如 "今年一季度"、"去年Q3"）
+        # 季度组合（如 "今年一季度"、"去年Q3"）
         quarter = re.search(r'(今年|去年|明年|\d{4}年)\s*(一季度|二季度|三季度|四季度|[Qq]\d)', query)
         if quarter:
             return quarter.group(0).replace(" ", "")

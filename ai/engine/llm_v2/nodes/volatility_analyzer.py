@@ -870,7 +870,7 @@ ORDER BY 月份, SKU
 正向驱动（贡献最大）:
 {chr(10).join(pos_lines) if pos_lines else '无'}
 
-负向拖累（拖累最大）:
+负向波动（影响最大）:
 {chr(10).join(neg_lines) if neg_lines else '无'}
 
 ## 关联指标（同期对比）
@@ -1330,7 +1330,7 @@ ORDER BY 月份, SKU
 正向驱动（贡献最大）:
 {chr(10).join(pos_lines) if pos_lines else '无'}
 
-负向拖累（拖累最大）:
+负向波动（影响最大）:
 {chr(10).join(neg_lines) if neg_lines else '无'}
 
 ## 分析要求

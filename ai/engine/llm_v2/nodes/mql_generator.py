@@ -1119,6 +1119,8 @@ class MQLGenerator:
 - 用户说"广告效果分析" → metric.name="广告效果"，intent="query_value"，confidence=0.7（广告效果是指标名，不是维度）
 - 用户说"本月ROAS是多少" → metric.name="ROAS"，intent="query_value"
 - 用户说"广告花费对比" → metric.name="广告花费"，intent="query_comparison"，comparison={{"enabled": true, "types": ["同比"]}}
+- 用户说"XX对比上月" → intent="query_comparison"，comparison={{"enabled": true, "types": ["环比"]}}（"上月/上期/环比"是环比，不是同比！）
+- 用户说"XX同比" → intent="query_comparison"，comparison={{"enabled": true, "types": ["同比"]}}
 
 【约束条件】
 1. 必须输出合法 JSON
