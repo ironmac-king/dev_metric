@@ -700,8 +700,11 @@ FROM (
         # 除非用户明确要求按时间粒度查看(如"按月看业绩")
         non_time_dims = [d for d in dimensions if d not in _TIME_DIM_COLS]
         if non_time_dims:
-            time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度", "按月", "每月", "月度", "月均",
-                                          "按周", "每周", "周度", "按季", "季度", "按年", "每年", "年度"]
+            time_granularity_keywords = ["按天", "每日", "按日", "每天", "日度",
+                                          "按月", "按照月份", "每月", "每个月", "月度", "月均", "各月", "各个月", "分月",
+                                          "按季", "按照季度", "每季度", "季度", "各季度", "分季度",
+                                          "按年", "每年", "年度",
+                                          "按周", "每周", "周度"]
             question = getattr(mql, 'original_question', '') or ''
             user_wants_time_grain = any(kw in question for kw in time_granularity_keywords)
             if not user_wants_time_grain:
