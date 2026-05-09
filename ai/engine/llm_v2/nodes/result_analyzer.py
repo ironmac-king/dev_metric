@@ -470,7 +470,7 @@ class ResultAnalyzer:
                 if upper in dim_cols or upper.startswith("GROUP_") or col in _DIM_COL_CHINESE:
                     continue
                 skip_kw = ("环比变化", "环比上期", "同比变化", "同比上期", "MOM_CHANGE", "YOY_CHANGE",
-                           "MOM_VAL", "YOY_VAL", "FSITECODE", "FDATE", "MONTHS")
+                           "MOM_VAL", "YOY_VAL", "FSITECODE", "FDATE", "MONTHS", "_RATIO", "_PCT")
                 if any(kw in upper for kw in skip_kw):
                     continue
                 col_clean = col.replace("_raw", "").replace("当前值", "").replace("_change", "").strip(" _")

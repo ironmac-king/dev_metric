@@ -285,12 +285,19 @@
                     <div v-if="msg.needsClarification && msg.clarificationOptions && !isSlotMissingOptions(msg.clarificationOptions)" class="clarification-tags">
                       <span class="clarification-msg">{{ msg.clarificationMessage }}</span>
                       <button
-                        v-for="option in msg.clarificationOptions"
+                        v-for="option in getMetricBatch(msg.clarificationOptions, idx)"
                         :key="option.value"
                         class="clarification-tag"
                         @click="selectClarification(option, msg.originalQuestion)"
                       >
                         {{ option.label }}
+                      </button>
+                      <button
+                        v-if="msg.clarificationOptions.length > METRICS_PER_BATCH"
+                        class="clarification-tag refresh-btn"
+                        @click="refreshMetricBatch(idx, msg.clarificationOptions.length)"
+                      >
+                        换一批
                       </button>
                     </div>
 
@@ -579,6 +586,10 @@ const sessionId = ref('')
 // Expanded states
 const expandedThinking = ref({})
 const expandedInterpretation = ref({})
+
+// 指标选项"换一批"批次索引（msg index -> batch index）
+const metricBatchMap = ref({})
+const METRICS_PER_BATCH = 6
 
 // / 命令面板
 const showCommandPanel = ref(false)
@@ -953,35 +964,9 @@ async function handleSend() {
     currentThinkingSteps.value = finalSteps
     stepsVersion.value++
 
-    // 自动触发波动分析：追问"为什么"类问题且数据适合做波动分析时
-    // answer_ready 之后 mom/yoy 才有正确值，所以延迟到 nextTick 再判断
-    await nextTick()
-    const latestMsg = messages.value[messages.value.length - 1]
-    const latestResultData = streamAccumulator.getFinalResultData()
-    if (latestMsg && latestResultData && latestResultData.length > 0) {
-      const q = pendingAutoVolatilityQuestion || ''
-      const isComparisonQuestion = /为什么|为啥|为什么.比|为啥.比|哪个.高|哪个.低|对比|比较|差异/.test(q)
-      if (isComparisonQuestion && canDoVolatilityAnalysis(latestResultData)) {
-        // 如果 mom/yoy 为空，尝试从 analysis.kpi 取值
-        if (!latestMsg.momChange && latestMsg.analysis?.kpi?.mom != null) {
-          latestMsg.momChange = latestMsg.analysis.kpi.mom / 100  // trigger_analyzer 返回的是百分比值如 -100.0，需转小数
-        }
-        if (!latestMsg.yoyChange && latestMsg.analysis?.kpi?.yoy != null) {
-          latestMsg.yoyChange = latestMsg.analysis.kpi.yoy / 100
-        }
-        // 如果 timeRange 为空，从最终的 thinking steps 里取最新的 MQL time
-        if (!latestMsg.timeRange || !latestMsg.timeRange.start) {
-          for (let i = finalSteps.length - 1; i >= 0; i--) {
-            const step = finalSteps[i]
-            if (step?.mql?.time?.start) {
-              latestMsg.timeRange = step.mql.time
-              break
-            }
-          }
-        }
-        openAttribution(latestMsg)
-      }
-    }
+    // 自动触发波动分析：暂时禁用
+    // await nextTick()
+    // ... (disabled)
 
   } catch (e) {
     console.error('流式请求失败:', e)
@@ -1209,6 +1194,25 @@ function selectClarification(option, originalQuestion) {
   handleSend()
 }
 
+// 获取当前批次的指标选项（用于"换一批"）
+function getMetricBatch(allOptions, msgIdx) {
+  if (!allOptions || allOptions.length <= METRICS_PER_BATCH) {
+    return allOptions || []
+  }
+  const batchIdx = metricBatchMap.value[msgIdx] || 0
+  const totalBatches = Math.ceil(allOptions.length / METRICS_PER_BATCH)
+  const safeBatchIdx = batchIdx % totalBatches
+  const start = safeBatchIdx * METRICS_PER_BATCH
+  return allOptions.slice(start, start + METRICS_PER_BATCH)
+}
+
+// 切换到下一批指标选项
+function refreshMetricBatch(msgIdx, totalCount) {
+  const totalBatches = Math.ceil(totalCount / METRICS_PER_BATCH)
+  const current = metricBatchMap.value[msgIdx] || 0
+  metricBatchMap.value[msgIdx] = (current + 1) % totalBatches
+}
+
 // ClarificationCard 选项处理
 function handleClarificationSelect(option) {
   // 选中高亮，前端状态管理
@@ -1286,62 +1290,8 @@ function closeCommandPanel() {
 }
 
 function selectSuggestion(s, contextMsg = null) {
-  let fullQuestion = s
-
-  // 携带上下文：时间范围和筛选条件
-  if (contextMsg) {
-    // 时间范围：优先用 timeRange，其次用 mql.time
-    const timeRange = contextMsg.timeRange || contextMsg.mql?.time
-    // 筛选条件 dimensionFilters 可能是对象 {key: value}、对象数组 [{dim1: val1}, ...] 或简单数组
-    let dimensionFilters = contextMsg.dimensionFilters || contextMsg.dimensions || []
-
-    // 统一转换为字符串数组
-    if (Array.isArray(dimensionFilters)) {
-      dimensionFilters = dimensionFilters.map(dim => {
-        if (typeof dim === 'object' && dim !== null) {
-          // 处理对象如 {value: '智能云存储', column: 'GROUP_2', ...}
-          // 优先取 value 字段
-          if (dim.value !== undefined && dim.value !== null) {
-            return String(dim.value)
-          }
-          // 否则取第一个键值对
-          const entries = Object.entries(dim)
-          return entries.length > 0 ? String(entries[0][1]) : ''
-        }
-        return String(dim)
-      }).filter(v => v && v !== 'null') // 过滤空值和 "null"
-    } else if (typeof dimensionFilters === 'object' && dimensionFilters !== null) {
-      // 处理单个对象
-      dimensionFilters = Object.entries(dimensionFilters).map(([k, v]) => String(v))
-    }
-
-    // 如果有时间范围，附加到问题中
-    if (timeRange?.start && timeRange?.end) {
-      // 检查问题是否已包含时间表达
-      const hasTimeExpr = /近\d+[天日月年]|今天|昨天|本周|本月|本年|上月|去年/.test(s)
-      if (!hasTimeExpr) {
-        fullQuestion = `${timeRange.start} ~ ${timeRange.end}的${s}`
-      }
-    } else if (timeRange?.start) {
-      // 只有 start 的情况
-      const hasTimeExpr = /近\d+[天日月年]|今天|昨天|本周|本月|本年|上月|去年/.test(s)
-      if (!hasTimeExpr) {
-        fullQuestion = `${timeRange.start}以来的${s}`
-      }
-    }
-
-    // 如果有筛选条件（dimensionFilters），附加到问题中
-    if (dimensionFilters && dimensionFilters.length > 0) {
-      const dimStr = dimensionFilters.join('、')
-      // 检查问题是否已包含维度
-      const hasDimExpr = dimensionFilters.some(dim => s.includes(dim))
-      if (!hasDimExpr) {
-        fullQuestion = `${dimStr}的${fullQuestion}`
-      }
-    }
-  }
-
-  question.value = fullQuestion
+  // 直接发送建议问题，后端 V2 通过 inherited_mql 继承上下文
+  question.value = s
   handleSend()
 }
 
@@ -2082,6 +2032,20 @@ function scrollToBottom() {
   border-color: #6366F1;
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.clarification-tag.refresh-btn {
+  background: transparent;
+  color: #6b7280;
+  border: 1px dashed #d1d5db;
+}
+
+.clarification-tag.refresh-btn:hover {
+  background: #f3f4f6;
+  color: #374151;
+  border-color: #9ca3af;
+  border-style: solid;
+  box-shadow: none;
 }
 
 /* 消息数据解读 */

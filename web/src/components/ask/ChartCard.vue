@@ -506,7 +506,7 @@ function formatTableCell(key, val, colIdx) {
   if (val === null || val === undefined) return '-'
 
   // 已知维度列（不是指标列），直接返回原始值
-  const dimKeys = new Set(['MONTHS', 'FDATE', 'FDATE_START', 'FDATE_END', 'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'BRAND', 'PLATFORM', 'SHOP', 'FSITE', 'FSITECODE', '月份', '月', '年月'])
+  const dimKeys = new Set(['MONTHS', 'FDATE', 'FDATE_START', 'FDATE_END', 'SKU', 'ASIN', 'GROUP_1', 'GROUP_2', 'GROUP_3', 'GROUP_4', 'BRAND', 'PLATFORM', 'SHOP', 'FSITE', 'FSITECODE', '月份', '月', '年月', '日期', '年份', '时间', '变化标签'])
   if (dimKeys.has(key)) {
     // MONTHS 列：整数如 202601 → "202601月"；字符串如 "2026-01" → 直接返回
     if (key === 'MONTHS') {
@@ -515,6 +515,16 @@ function formatTableCell(key, val, colIdx) {
       return val + '月'
     }
     // 月份列（中文）等：直接返回原始值，不要做数字解析
+    return val
+  }
+
+  // 防御性处理：日期格式字符串（YYYY-MM-DD）不应被 parseFloat 解析为年份
+  if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val)) {
+    return val
+  }
+
+  // 已格式化的百分比字符串（如 "+8.9%", "-91.2%"）保留原值，避免丢失符号和 %
+  if (typeof val === 'string' && /^[+-]?\d+(\.\d+)?%$/.test(val)) {
     return val
   }
 
@@ -535,8 +545,9 @@ function formatTableCell(key, val, colIdx) {
   })()
 
   // 判断是否使用百分比格式（率类指标）
-  // 注意：不能用 colIdx 索引 metricNames，因为 metricNames 顺序可能与 result_data key 顺序不一致
   const usePercentFormat = (() => {
+    // 列名包含"占比"/"比率"→ 百分比格式
+    if (/占比|比率|比例/.test(key)) return true
     if (!props.metricNames || props.metricNames.length === 0) return false
     const metricNames = props.metricNames
     // 精确匹配：key === metricNames 中的某一项

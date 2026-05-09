@@ -2344,6 +2344,16 @@ class IntentRouter:
                     )
                     logger.info(f"[IntentRouter] 占比模式检测成功: 分子={molecule_text}, 分母={denominator_text}")
 
+        # ========== 维度占比分布检测（"各站点销售额占比"、"销售额占比分布"）==========
+        # 当用户问"各维度指标占比分布"时，添加 partition_ratio 计算模式
+        if mql.metric and mql.dimensions and ('占比' in question or '分布' in question):
+            # 检查是否是"各XX指标占比"或"指标占比分布"模式
+            if ('各' in question or '分布' in question) and not mql.calculation_patterns:
+                from ..schema import CalculationPattern
+                if CalculationPattern.PARTITION_RATIO not in (mql.calculation_patterns or []):
+                    mql.calculation_patterns = [CalculationPattern.PARTITION_RATIO]
+                    logger.info(f"[IntentRouter] 维度占比分布检测成功: 添加 partition_ratio 计算模式")
+
         return mql
 
     async def _llm_intent_recognition(self, question: str, inherited_mql: Optional[MQLSchema],

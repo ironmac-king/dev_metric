@@ -1043,7 +1043,7 @@ class MQLGenerator:
   }},
   "top_n": 数字,
   "bottom_n": 数字,
-  "calculation_patterns": ["yoy", "mom", "percentage", "ranking", "trend", "concentration", "mean", "multiplier", "delta"],
+  "calculation_patterns": ["yoy", "mom", "percentage", "partition_ratio", "ranking", "trend", "concentration", "mean", "multiplier", "delta"],
   "molecule_metric": {{"name": "分子指标名称，如 退款数量、亏损金额", "field": "字段名，如 REFUND_QTY", "aggregation": "SUM|AVG|COUNT"}},
   "denominator_metric": {{"name": "分母指标名称，如 销量、销售额", "field": "字段名，如 ORDERED_PRODUCTSALES", "aggregation": "SUM|AVG|COUNT"}}
 }}
@@ -1090,10 +1090,13 @@ class MQLGenerator:
 2. 其余指标放在 "metrics" 数组中
 3. 每个指标只需提供 name（code/table/field 由后续系统自动查找）
 
-【占比计算（percentage）填写说明】
-⚠️ 重要：只有当用户明确说"XX占YY的比重/比例/占比"时（即明确指定分子和分母），才使用 percentage 模式！
-❌ 错误理解："各站点销售额占比"、"按平台计算销售额占比" → 这只是按维度分组查询，不是占比计算！
-✅ 正确理解："美国站销售额占总销售额的比重" → 分子=美国站销售额, 分母=总销售额
+【占比计算（percentage / partition_ratio）填写说明】
+⚠️ 有两种占比场景：
+场景A：维度占比分布（"各站点销售额占比"、"按平台计算销售额占比"、"销售额占比分布"）
+  → 使用 calculation_patterns: ["partition_ratio"]，无需 molecule_metric/denominator_metric
+  → SQL 会自动计算每个维度值占总量的比例
+场景B：明确分子分母（"美国站销售额占总销售额的比重"、"退款占销量的比例"）
+  → 使用 calculation_patterns: ["percentage"]，需要填写 molecule_metric 和 denominator_metric
 1. 设置 calculation_patterns: ["percentage"]
 2. molecule_metric: 分子，如 {{"name": "美国站销售额", "field": "ORDERED_PRODUCTSALES", "aggregation": "SUM", "code": "MKI-02-0009"}}
 3. denominator_metric: 分母，如 {{"name": "总销售额", "field": "ORDERED_PRODUCTSALES", "aggregation": "SUM", "code": "MKI-02-0009"}}

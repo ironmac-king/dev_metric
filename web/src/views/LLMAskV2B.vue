@@ -830,31 +830,7 @@ async function handleSend() {
     currentThinkingSteps.value = finalSteps
     stepsVersion.value++
 
-    await nextTick()
-    const latestMsg = messages.value[messages.value.length - 1]
-    const latestResultData = streamAccumulator.getFinalResultData()
-    if (latestMsg && latestResultData && latestResultData.length > 0) {
-      const q = pendingAutoVolatilityQuestion || ''
-      const isComparisonQuestion = /为什么|为啥|为什么.比|为啥.比|哪个.高|哪个.低|对比|比较|差异/.test(q)
-      if (isComparisonQuestion && canDoVolatilityAnalysis(latestResultData)) {
-        if (!latestMsg.momChange && latestMsg.analysis?.kpi?.mom != null) {
-          latestMsg.momChange = latestMsg.analysis.kpi.mom / 100
-        }
-        if (!latestMsg.yoyChange && latestMsg.analysis?.kpi?.yoy != null) {
-          latestMsg.yoyChange = latestMsg.analysis.kpi.yoy / 100
-        }
-        if (!latestMsg.timeRange || !latestMsg.timeRange.start) {
-          for (let i = finalSteps.length - 1; i >= 0; i--) {
-            const step = finalSteps[i]
-            if (step?.mql?.time?.start) {
-              latestMsg.timeRange = step.mql.time
-              break
-            }
-          }
-        }
-        openAttribution(latestMsg)
-      }
-    }
+    // 自动触发波动分析：暂时禁用
 
   } catch (e) {
     console.error('流式请求失败:', e)
@@ -1033,6 +1009,8 @@ function selectClarification(option, originalQuestion) {
   if (option.replace_key && originalQuestion) {
     const rewritten = originalQuestion.replace(option.replace_key, option.value)
     question.value = rewritten
+  } else if (originalQuestion) {
+    question.value = originalQuestion + '的' + option.label
   } else {
     question.value = option.label
   }
@@ -1089,36 +1067,8 @@ function handleDrilldown(option) {
 }
 
 function selectSuggestion(s, contextMsg = null) {
-  let fullQuestion = s
-  if (contextMsg) {
-    const timeRange = contextMsg.timeRange || contextMsg.mql?.time
-    let dimensionFilters = contextMsg.dimensionFilters || contextMsg.dimensions || []
-    if (Array.isArray(dimensionFilters)) {
-      dimensionFilters = dimensionFilters.map(dim => {
-        if (typeof dim === 'object' && dim !== null) {
-          if (dim.value !== undefined && dim.value !== null) return String(dim.value)
-          const entries = Object.entries(dim)
-          return entries.length > 0 ? String(entries[0][1]) : ''
-        }
-        return String(dim)
-      }).filter(v => v && v !== 'null')
-    } else if (typeof dimensionFilters === 'object' && dimensionFilters !== null) {
-      dimensionFilters = Object.entries(dimensionFilters).map(([k, v]) => String(v))
-    }
-    if (timeRange?.start && timeRange?.end) {
-      const hasTimeExpr = /近\d+[天日月年]|今天|昨天|本周|本月|本年|上月|去年/.test(s)
-      if (!hasTimeExpr) fullQuestion = `${timeRange.start} ~ ${timeRange.end}的${s}`
-    } else if (timeRange?.start) {
-      const hasTimeExpr = /近\d+[天日月年]|今天|昨天|本周|本月|本年|上月|去年/.test(s)
-      if (!hasTimeExpr) fullQuestion = `${timeRange.start}以来的${s}`
-    }
-    if (dimensionFilters && dimensionFilters.length > 0) {
-      const dimStr = dimensionFilters.join('、')
-      const hasDimExpr = dimensionFilters.some(dim => s.includes(dim))
-      if (!hasDimExpr) fullQuestion = `${dimStr}的${fullQuestion}`
-    }
-  }
-  question.value = fullQuestion
+  // 直接发送建议问题，后端 V2 通过 inherited_mql 继承上下文
+  question.value = s
   handleSend()
 }
 
