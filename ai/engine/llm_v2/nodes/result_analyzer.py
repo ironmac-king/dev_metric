@@ -277,8 +277,8 @@ class ResultAnalyzer:
         # 对比建议
         suggestions.append(f"{dim_value}{metric_name}同比变化")
 
-        # 横向对比：同维度类型其他值
-        suggestions.append(f"其他{dim_type}{metric_name}对比")
+        # 横向对比：同维度类型不同值
+        suggestions.append(f"不同{dim_type}{metric_name}排名")
 
         # 趋势建议（兜底，保证凑够 max_count）
         if len(suggestions) < max_count:
@@ -667,7 +667,7 @@ class ResultAnalyzer:
                 "answer": "抱歉，暂未查询到数据。请尝试调整时间范围或查询条件。",
                 "suggestions": [
                     f"本月{metric_name}是多少",
-                    f"查看其他{metric_name}数据",
+                    f"查看近7天{metric_name}数据",
                 ],
             }
 
