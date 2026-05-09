@@ -935,7 +935,7 @@ FROM (
         try:
             start_dt = datetime.strptime(time_start, "%Y-%m-%d")
             end_dt = datetime.strptime(time_end, "%Y-%m-%d")
-        except:
+        except Exception:
             semantic_json = self._mql_to_semantic(mql_copy)
             from ..semantic_renderer import SemanticRenderer
             renderer = SemanticRenderer()

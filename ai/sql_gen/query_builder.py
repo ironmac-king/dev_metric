@@ -450,7 +450,7 @@ class QueryBuilder:
 
             # 如果有 GROUP BY 维度
             if group_by_dims:
-                logger.info(f"[_build_base_sql] DEBUG: entering group_by_dims block, group_by_dims={group_by_dims}")
+                logger.debug(f"[_build_base_sql] entering group_by_dims block, group_by_dims={group_by_dims}")
                 # 检查 SQL 是否已有 GROUP BY
                 has_group_by = re.search(r'\bGROUP\s+BY\b', sql, re.IGNORECASE)
                 # 查找独立的 FROM 关键字（前面有空格或换行，后面是空格+表名）
@@ -460,23 +460,23 @@ class QueryBuilder:
                     if select_start:
                         # 提取 SELECT 和 FROM 之间的内容
                         select_clause_raw = sql[select_start.end():from_pos.start()]
-                        logger.info(f"[_build_base_sql] DEBUG: select_start.end()={select_start.end()}, from_pos.start()={from_pos.start()}")
+                        logger.debug(f"[_build_base_sql] select_start.end()={select_start.end()}, from_pos.start()={from_pos.start()}")
                         # 规范化：替换多余空白为单个空格
                         select_clause = re.sub(r'\s+', ' ', select_clause_raw).strip()
                         # 找出缺失的维度列
                         missing_dims = [d for d in group_by_dims if f"`{d}`".upper() not in select_clause.upper() and d.upper() not in select_clause.upper()]
-                        logger.info(f"[_build_base_sql] DEBUG: select_clause='{select_clause}', missing_dims={missing_dims}, has_group_by={bool(has_group_by)}")
+                        logger.debug(f"[_build_base_sql] select_clause='{select_clause}', missing_dims={missing_dims}, has_group_by={bool(has_group_by)}")
                         if missing_dims:
                             # 构建维度列前缀
                             dims_to_add = ", ".join([f"`{d}`" for d in missing_dims]) + ", "
-                            logger.info(f"[_build_base_sql] DEBUG: dims_to_add='{dims_to_add}'")
+                            logger.debug(f"[_build_base_sql] dims_to_add='{dims_to_add}'")
                             if not has_group_by:
                                 # 没有 GROUP BY，添加 GROUP BY 列到 SELECT 开头
                                 new_select = f"SELECT {dims_to_add}{select_clause_raw.strip()}"
                             else:
                                 # GROUP BY 已存在，需要在聚合函数前插入维度列
                                 agg_match = re.search(r'\b(SUM|COUNT|AVG|MAX|MIN)\s*\(', select_clause, re.IGNORECASE)
-                                logger.info(f"[_build_base_sql] DEBUG: agg_match={agg_match.group() if agg_match else None}")
+                                logger.debug(f"[_build_base_sql] agg_match={agg_match.group() if agg_match else None}")
                                 if agg_match:
                                     agg_pos_in_raw = select_clause_raw.find(agg_match.group())
                                     if agg_pos_in_raw == -1:

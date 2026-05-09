@@ -341,7 +341,7 @@ class FeedbackAnalyzer:
                 if row[6]:
                     try:
                         context = json.loads(row[6])
-                    except:
+                    except Exception:
                         pass
 
                 feedbacks.append(NegativeFeedback(
@@ -503,7 +503,7 @@ class FeedbackAnalyzer:
                 if row[1]:
                     try:
                         context = json.loads(row[1])
-                    except:
+                    except Exception:
                         pass
 
                 results.append({

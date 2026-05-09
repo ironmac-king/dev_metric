@@ -442,7 +442,7 @@ class SlotClarificationEngine:
             logger.info(f"[check_required_slots] slot={slot_name}, value={slot_value}, allowed={allowed_values}")
             if slot_name == "time_range":
                 entities_debug = getattr(state, "entities", {}) or {}
-                logger.info(f"[check_required_slots] DEBUG time_range: entities={entities_debug}")
+                logger.debug(f"[check_required_slots] DEBUG time_range: entities={entities_debug}")
 
             # 【修改】值有效性校验：对于 entity 槽位，用余弦相似度判断是否匹配 dimension_configs
             # 对于其他槽位，检查是否在 allowed_values 中
@@ -468,16 +468,16 @@ class SlotClarificationEngine:
 
             if not slot_value or is_invalid_value:
                 # 【调试】打印关键值
-                logger.info(f"[check_required_slots] DEBUG: slot_name={slot_name}, intent={intent}, slot_value={slot_value}, is_invalid={is_invalid_value}")
+                logger.debug(f"[check_required_slots] DEBUG: slot_name={slot_name}, intent={intent}, slot_value={slot_value}, is_invalid={is_invalid_value}")
                 # 【关键修复】对于 query_ranking 意图 + entity 维度是品类级别的情况，
                 # 跳过 metric 追问，让 sql_gen_node 的回退逻辑（搜索"销量"指标）处理
                 if slot_name == "metric" and intent == "query_ranking":
                     entity_dim = self._get_slot_value(state, "entity")
-                    logger.info(f"[check_required_slots] DEBUG: metric检查, entity_dim={entity_dim}")
+                    logger.debug(f"[check_required_slots] DEBUG: metric检查, entity_dim={entity_dim}")
                     # 检测是否是品类级别维度（一级品类/二级品类/三级品类/四级品类）
                     category_level_keywords = ["品类", "类目"]
                     is_category_level = entity_dim and any(kw in entity_dim for kw in category_level_keywords)
-                    logger.info(f"[check_required_slots] DEBUG: is_category_level={is_category_level}")
+                    logger.debug(f"[check_required_slots] DEBUG: is_category_level={is_category_level}")
                     if is_category_level:
                         logger.info(f"[check_required_slots] query_ranking + 品类级别维度，跳过 metric 追问: entity_dim={entity_dim}")
                         continue

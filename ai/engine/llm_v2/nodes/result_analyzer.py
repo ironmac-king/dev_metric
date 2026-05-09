@@ -477,7 +477,10 @@ class ResultAnalyzer:
                 if not col_clean:
                     col_clean = metric_name
                 # 多行数据时汇总求和
+                # 注意：如果 SQL 有 LIMIT（如 ranking 查询），合计只是 Top N，需标注
                 if len(data) > 1:
+                    # 检查是否有 LIMIT（通过 mql.top_n 或 intent）
+                    has_limit = (mql.top_n > 0) or (mql.intent and mql.intent.value == "query_ranking")
                     total = 0
                     for r in data:
                         v = r.get(col)
@@ -487,7 +490,8 @@ class ResultAnalyzer:
                             except (ValueError, TypeError):
                                 pass
                     formatted = self._format_value(total)
-                    kpi_parts.append(f"{col_clean}合计：{formatted}")
+                    label = f"{col_clean}前{len(data)}名合计" if has_limit else f"{col_clean}合计"
+                    kpi_parts.append(f"{label}：{formatted}")
                 else:
                     formatted = self._format_value(val)
                     kpi_parts.append(f"{col_clean}：{formatted}")
@@ -991,6 +995,8 @@ class ResultAnalyzer:
         # 检查是否是 MoM/YOY 格式的单行数据（包含 current_val 和 compare_val，或新的 mom_val/yoy_val）
         # 注意：SQL 生成器使用中文列名（当前值/环比值/同比值），需要同时兼容英文和中文列名
         row = data[0] if data else {}
+
+        # 格式1: 通用列名 (current_val, yoy_val, mom_val)
         is_mom_format = (
             len(data) == 1 and
             isinstance(row, dict) and
@@ -999,18 +1005,35 @@ class ResultAnalyzer:
              '环比值' in row or '同比值' in row)
         )
 
-        if is_mom_format:
-            # MoM/YOY 单行数据：current_val 和 compare_val 在同一行，或者新的 mom_val/yoy_val
-            # 支持中英文列名
-            current_val = float(row.get('current_val') or row.get('当前值') or 0)
+        # 格式2: 指标名前缀列名 (业绩_raw, 业绩_yoy_val, 业绩_yoy_change)
+        raw_key = f"{metric_name}_raw"
+        yoy_val_key = f"{metric_name}_yoy_val"
+        mom_val_key = f"{metric_name}_mom_val"
+        yoy_change_key = f"{metric_name}_yoy_change"
+        mom_change_key = f"{metric_name}_mom_change"
+        is_metric_prefixed = (
+            len(data) == 1 and
+            isinstance(row, dict) and
+            raw_key in row and
+            (yoy_val_key in row or mom_val_key in row)
+        )
 
-            # 优先使用新的 mom_val/yoy_val 格式，其次使用旧的 compare_val 格式，最后尝试中文列名
-            mom_val = float(row.get('mom_val') or row.get('环比值') or 0) if 'mom_val' in row or '环比值' in row else None
-            yoy_val = float(row.get('yoy_val') or row.get('同比值') or 0) if 'yoy_val' in row or '同比值' in row else None
-            compare_val = float(row.get('compare_val', 0) or 0) if 'compare_val' in row else None
+        if is_mom_format or is_metric_prefixed:
+            if is_metric_prefixed:
+                current_val = float(row.get(raw_key, 0))
+                yoy_val = float(row.get(yoy_val_key, 0)) if yoy_val_key in row else None
+                mom_val = float(row.get(mom_val_key, 0)) if mom_val_key in row else None
+                yoy_change = row.get(yoy_change_key, '')
+                mom_change = row.get(mom_change_key, '')
+            else:
+                current_val = float(row.get('current_val') or row.get('当前值') or 0)
+                mom_val = float(row.get('mom_val') or row.get('环比值') or 0) if 'mom_val' in row or '环比值' in row else None
+                yoy_val = float(row.get('yoy_val') or row.get('同比值') or 0) if 'yoy_val' in row or '同比值' in row else None
+                mom_change = row.get('mom_change', row.get('环比变化', ''))
+                yoy_change = row.get('yoy_change', row.get('同比变化', ''))
 
-            mom_change = row.get('mom_change', row.get('环比变化', ''))
-            yoy_change = row.get('yoy_change', row.get('同比变化', ''))
+            # fallback 分支需要的变量（通用列名格式才有）
+            compare_val = float(row.get('compare_val', 0) or 0) if 'compare_val' in row else 0
             change_rate = row.get('change_rate', '')
             trend = row.get('trend', '')
 
@@ -1030,7 +1053,7 @@ class ResultAnalyzer:
                     import datetime
                     dt = datetime.datetime.strptime(start_str[:10], "%Y-%m-%d")
                     return f"{dt.year}年{dt.month}月"
-                except:
+                except Exception:
                     return start_str[:7] if start_str else "上期"
 
             current_period = format_period(time_start)

@@ -793,7 +793,7 @@ class LLMEngine:
             from ai.engine.rule_engine import RuleEngine
             rule_engine = RuleEngine()
             return list(rule_engine.metric_templates.keys())
-        except:
+        except Exception:
             return []
 
     def decide_clarification(

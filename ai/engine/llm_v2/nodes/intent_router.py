@@ -160,6 +160,14 @@ class IntentRouter:
         self._local_model = None  # 本地模型延迟加载
         self._dimension_service = None  # 维度服务延迟加载
         self._semantic_service = None  # 语义快照服务延迟加载
+        self._metric_client = None  # MetricClient 单例
+
+    def _get_metric_client(self):
+        """获取 MetricClient 单例"""
+        if self._metric_client is None:
+            from ai.client.metric_client import MetricClient
+            self._metric_client = MetricClient()
+        return self._metric_client
 
     def _get_semantic_service(self):
         """延迟加载语义快照服务（单例，从内存快照读取，不发 HTTP）"""
@@ -196,8 +204,7 @@ class IntentRouter:
         """从 API 加载维度类型映射"""
         if self._dimension_type_mappings is None:
             try:
-                from ai.client.metric_client import MetricClient
-                client = MetricClient()
+                client = self._get_metric_client()
                 # 优先使用 dimension_configs（包含业务维度配置）
                 configs = client.get_dimension_configs()
                 if configs:
@@ -337,27 +344,8 @@ class IntentRouter:
             # 复用 _build_mql_from_local 的全部逻辑（维度解析、过滤器、多指标、聚合检测等）
             mql = self._build_mql_from_local(local_result, question)
 
-            # ===== 语义层路径：检测同比/环比关键词（与本地模型路径一致） =====
-            # "对比上月/上期" → 环比；"对比去年/同比" → 同比
-            comparison_types = []
-            if "环比" in question or "对比上月" in question or "对比上期" in question or "环比上月" in question or "环比上期" in question:
-                comparison_types.append("环比")
-            if "同比" in question or "对比去年" in question or "同比去年" in question or "同比上期" in question:
-                comparison_types.append("同比")
-            # "对比" 单独出现时默认环比
-            if not comparison_types and ("对比" in question or "比较" in question):
-                comparison_types.append("环比")
-            if comparison_types:
-                from ..schema import ComparisonSpec
-                mql.comparison = ComparisonSpec(
-                    enabled=True,
-                    types=comparison_types,
-                    compare_period_start="",
-                    compare_period_end="",
-                )
-                if mql.intent.value not in ("query_comparison", "query_trend"):
-                    mql.intent = MQLIntent.QUERY_COMPARISON
-                logger.info(f"[IntentRouter] 语义层检测到对比关键词: {comparison_types}")
+            # 语义层路径：检测同比/环比关键词
+            self._apply_comparison_to_mql(mql, question)
 
             # 泛指维度校验
             mql = self._validate_generic_dimensions(mql, question)
@@ -499,13 +487,23 @@ class IntentRouter:
             semantic_svc = self._get_semantic_service()
             result = semantic_svc.resolve_metric(candidate)
             if result:
+                # MetricInfo dataclass → dict
+                if hasattr(result, '__dataclass_fields__'):
+                    return {
+                        "metric_code": result.metric_code,
+                        "code": result.metric_code,
+                        "name": result.name,
+                        "starrocks_table": result.table,
+                        "starrocks_field": result.field,
+                        "starrocks_sql": result.starrocks_sql,
+                        "unit": result.unit,
+                    }
                 return result
         except Exception:
             pass
         # 2. 同义词 + MetricClient
         try:
-            from ai.client.metric_client import MetricClient
-            client = MetricClient()
+            client = self._get_metric_client()
             info = client.get_metric_by_name(candidate)
             if info:
                 return info
@@ -543,7 +541,7 @@ class IntentRouter:
                 return False
             # 含时间表达式 + 可解析指标名的较长文本，视为完整独立查询
             if len(question) > 8:
-                has_time = any(t in question for t in ["上月", "本月", "上月", "近7天", "近30天", "去年", "本周", "上周", "本季度", "上季度", "今年", "前年"])
+                has_time = any(t in question for t in ["上月", "本月", "近7天", "近30天", "去年", "本周", "上周", "本季度", "上季度", "今年", "前年"])
                 if has_time and self._resolve_metric_name(question):
                     logger.info(f"[_is_short_followup] 完整查询（含时间+指标），不走追问: {question[:30]}")
                     return False
@@ -834,7 +832,6 @@ class IntentRouter:
 
         同时也从维表动态获取所有维度类型，检查问题中是否包含。
         """
-        import re
         candidates = []
 
         # 0. 从维表/语义快照获取所有维度类型，检查问题中是否包含（这是动态的，不是硬编码）
@@ -1056,7 +1053,6 @@ class IntentRouter:
                 break
         if not time_detected:
             # 扩展匹配："上个月"、"近N天" 等不在 MAP 中的常见时间词
-            import re
             extended_match = re.search(r'(上个月|前一个月|上上个月|近\d+天|近\d+周|近\d+个月|最近\d+天)', question)
             if extended_match:
                 time_detected = extended_match.group(1)
@@ -1196,7 +1192,7 @@ class IntentRouter:
             if re.search(pattern, question):
                 return time_expr
         # 检查文本中是否有已知时间词
-        for time_word in ["上月", "去年", "本月", "本周", "上周", "去年", "前年", "上上月"]:
+        for time_word in ["上月", "去年", "本月", "本周", "上周", "前年", "上上月"]:
             if time_word in question:
                 return time_word
         return None
@@ -1406,6 +1402,7 @@ class IntentRouter:
         mql.metrics = list(inherited_mql.metrics) if inherited_mql.metrics else []
         mql.time = inherited_mql.time
         mql.dimensions = list(inherited_mql.dimensions) if inherited_mql.dimensions else []
+        mql.filters = list(inherited_mql.filters) if inherited_mql.filters else []
         mql.order_by = inherited_mql.order_by
         mql.top_n = inherited_mql.top_n
         mql.comparison = inherited_mql.comparison
@@ -1509,8 +1506,6 @@ class IntentRouter:
     def _resolve_additional_metrics(self, question: str, add_keywords: List[str]) -> List[Dict[str, Any]]:
         """通过指标元数据和同义词表解析追问里追加的指标。"""
         try:
-            from ai.client.metric_client import MetricClient
-
             # 已知维度列名（不应作为指标解析）
             _KNOWN_DIM_NAMES = {
                 "sku": "SKU", "SKU": "SKU", "商品": "SKU", "产品": "SKU",
@@ -1521,7 +1516,7 @@ class IntentRouter:
                 "三级品类": "GROUP_3", "四级品类": "GROUP_4",
             }
 
-            client = MetricClient()
+            client = self._get_metric_client()
             candidates = self._extract_additional_metric_candidates(question, add_keywords)
             resolved = []
             seen_keys = set()
@@ -1722,29 +1717,8 @@ class IntentRouter:
                 mql = self._build_mql_from_local(local_result, question)
                 logger.info(f"[IntentRouter] 本地模型精准匹配成功，跳过 LLM: intent={mql.intent.value}")
 
-                # ===== 本地模型匹配成功后：检测同比/环比关键词 =====
-                # 注意：这些关键词在实体中被识别为 TIME，需要在这里补充检测并设置 comparison
-                # "对比上月/上期" → 环比；"对比去年/同比" → 同比
-                comparison_types = []
-                if "环比" in question or "对比上月" in question or "对比上期" in question or "环比上月" in question or "环比上期" in question:
-                    comparison_types.append("环比")
-                if "同比" in question or "对比去年" in question or "同比去年" in question or "同比上期" in question:
-                    comparison_types.append("同比")
-                # "对比" 单独出现时默认环比（用户说"对比"一般指环比）
-                if not comparison_types and ("对比" in question or "比较" in question):
-                    comparison_types.append("环比")
-                if comparison_types:
-                    from ..schema import ComparisonSpec
-                    mql.comparison = ComparisonSpec(
-                        enabled=True,
-                        types=comparison_types,
-                        compare_period_start="",
-                        compare_period_end="",
-                    )
-                    # 如果没有设置 intent 为 QUERY_COMPARISON，改为 QUERY_COMPARISON
-                    if mql.intent.value not in ("query_comparison", "query_trend"):
-                        mql.intent = MQLIntent.QUERY_COMPARISON
-                    logger.info(f"[IntentRouter] 本地模型检测到对比关键词: {comparison_types}")
+                # 本地模型匹配成功后：检测同比/环比关键词
+                self._apply_comparison_to_mql(mql, question)
 
                 # 检查是否有泛指维度 → 触发追问
                 # ===== 新增：校验泛指维度是否为具体维度值 =====
@@ -1775,6 +1749,35 @@ class IntentRouter:
         except Exception as e:
             logger.error(f"[IntentRouter] 本地模型预测异常: {e}，走 LLM 兜底")
             return await self._llm_intent_recognition(question, inherited_mql, source_override="fallback")
+
+    def _detect_comparison_types(self, question: str) -> List[str]:
+        """检测同比/环比关键词，返回对比类型列表"""
+        comparison_types = []
+        if "环比" in question or "对比上月" in question or "对比上期" in question or "环比上月" in question or "环比上期" in question:
+            comparison_types.append("环比")
+        if "同比" in question or "对比去年" in question or "同比去年" in question or "同比上期" in question:
+            comparison_types.append("同比")
+        if not comparison_types and ("对比" in question or "比较" in question):
+            comparison_types.append("环比")
+        return comparison_types
+
+    def _apply_comparison_to_mql(self, mql: "MQLSchema", question: str) -> None:
+        """检测对比关键词并应用到 MQL"""
+        comparison_types = self._detect_comparison_types(question)
+        if comparison_types:
+            from ..schema import ComparisonSpec
+            mql.comparison = ComparisonSpec(
+                enabled=True,
+                types=comparison_types,
+                compare_period_start="",
+                compare_period_end="",
+            )
+            # 用户明确要"趋势/走势"且带对比 → 保留 query_trend（按时间维度展开的对比序列）
+            # 其他情况（"同比变化"、"环比"等）→ 强制 query_comparison
+            explicit_trend = any(kw in question for kw in ["趋势", "走势", "变化趋势"])
+            if not (explicit_trend and mql.intent.value == "query_trend"):
+                mql.intent = MQLIntent.QUERY_COMPARISON
+            logger.info(f"[IntentRouter] 检测到对比关键词: {comparison_types}, intent={mql.intent.value}")
 
     def _build_mql_from_local(self, local_result: Dict[str, Any], question: str) -> MQLSchema:
         """
@@ -1937,7 +1940,6 @@ class IntentRouter:
             # 修复：当 TIME 实体是 "今年/去年/明年" 时，检查原始问题中是否有紧随其后的 "X月" 或 季度
             # 合并为完整时间表达式（如 "今年3月"、"去年12月"、"今年一季度"、"去年Q3"）
             if time_text in ('今年', '去年', '明年', '本年'):
-                import re
                 year_month_match = re.search(rf'{time_text}\s*(\d{{1,2}})月', question)
                 year_quarter_match = re.search(rf'{time_text}\s*(一季度|二季度|三季度|四季度|[Qq][1-4])', question)
                 if year_month_match:
@@ -2205,7 +2207,6 @@ class IntentRouter:
         if any(kw in question for kw in ['排名', '前几', '最高', '最低', '最好', '最差']):
             mql.intent = MQLIntent.QUERY_RANKING
             # 提取排名数量（支持阿拉伯数字和中文数字）
-            import re
             # 中文数字映射
             CN_NUM_MAP = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
             def parse_chinese_num(s):
@@ -2213,7 +2214,7 @@ class IntentRouter:
                     return CN_NUM_MAP[s]
                 try:
                     return int(s)
-                except:
+                except Exception:
                     return None
             # 优先匹配中文数字 "前三"、"前五" 等
             cn_match = re.search(r'前([一二三四五六七八九十]+)', question)
@@ -2258,7 +2259,6 @@ class IntentRouter:
 
         # 兜底：扫描纯数字片段（如 SKU "15719"），查 API 确认是否是维度值
         if not mql.dimensions and mql.metric:
-            import re
             # 匹配 4 位以上的纯数字（不用 \b，因为中文文本没有 ASCII 单词边界）
             for match in re.finditer(r'(\d{4,})', question):
                 num_value = match.group(1)
@@ -2291,7 +2291,6 @@ class IntentRouter:
         # 本地模型可能把 "XX在YY中的占比" 识别为 query_value，
         # 需要在此补充检测并修正为 QUERY_RATIO
         if mql.metric and ('占比' in question or '比重' in question or '比例' in question):
-            import re
             # 模式1: "XX在YY中的占比" 或 "XX在YY中的比重"
             match1 = re.search(r'([^\s，。,.！!？?在]+?)在([^\s，。,.！!？?中的]+?)中的[比]?占比', question)
             # 模式2: "XX占YY的占比" 或 "XX占YY比重"
@@ -2598,14 +2597,13 @@ class IntentRouter:
             top_n = result.get("top_n")
             if top_n is None or top_n == 0:
                 # LLM 返回 0 或 None 时，从问题文本中提取数字（支持中文数字和阿拉伯数字）
-                import re
                 CN_NUM_MAP = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
                 def parse_cn_num(s):
                     if s in CN_NUM_MAP:
                         return CN_NUM_MAP[s]
                     try:
                         return int(s)
-                    except:
+                    except Exception:
                         return None
                 cn_match = re.search(r'前([一二三四五六七八九十]+)', question)
                 if cn_match:

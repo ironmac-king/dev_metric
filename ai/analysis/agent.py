@@ -9,6 +9,7 @@ import httpx
 from dataclasses import dataclass
 from datetime import datetime
 
+from ..config.logging_config import get_logger
 from .sse_utils import SSEEvent, create_sse_event
 from .template_loader import template_loader
 from .template_matcher import template_matcher, MatchResult
@@ -17,6 +18,8 @@ from ..engine.time_parser import TimeParser
 from ..engine.llm import get_llm_engine, get_llm_engine_for_analysis
 from ..client.metric_client import MetricClient
 from ..config.runtime import get_go_api_base
+
+logger = get_logger("analysis.agent")
 
 
 # 内置演示模板（当无模板匹配时使用）
@@ -601,7 +604,7 @@ class AnalysisAgent:
                         from datetime import datetime
                         d = datetime.strptime(date_str, "%Y-%m-%d")
                         dates.append(f"{d.month}/{d.day}")
-                    except:
+                    except Exception:
                         dates.append(date_str)
                 values.append(item.get("value", 0))
 
@@ -1069,7 +1072,7 @@ class AnalysisAgent:
             try:
                 print(f"[Agent.run] 异常: {type(e).__name__}: {str(e)}", file=sys.stderr)
                 print(f"[Agent.run] Traceback: {tb_str}", file=sys.stderr)
-            except:
+            except Exception:
                 pass
             return {
                 "answer": f"Request Error: {type(e).__name__}: {str(e)}\n\nTraceback:\n{tb_str}",
@@ -1118,10 +1121,10 @@ class AnalysisAgent:
         # 匹配 CHART_DATA 块
         # re.DOTALL 使 . 能匹配换行符
         if '{CHART_DATA:' in template_structure:
-            print(f"[DEBUG] 模板中发现 CHART_DATA，正则替换前长度: {len(template_structure)}", flush=True)
+            logger.debug("模板中发现 CHART_DATA，正则替换前长度: %d", len(template_structure))
             # 打印 CHART_DATA 前的 50 个字符
             idx = template_structure.find('{CHART_DATA:')
-            print(f"[DEBUG] CHART_DATA 位置 {idx}，前50字符: {repr(template_structure[max(0,idx-50):idx+50])}", flush=True)
+            logger.debug("CHART_DATA 位置 %d，前50字符: %r", idx, template_structure[max(0,idx-50):idx+50])
             # 先尝试匹配标准 JSON 格式 {CHART_DATA:{...}}
             new_template, count = re.subn(
                 r'\{CHART_DATA:\s*\{[\s\S]*?\}\s*\}',
@@ -1129,7 +1132,7 @@ class AnalysisAgent:
                 template_structure,
                 flags=re.DOTALL
             )
-            print(f"[DEBUG] 正则1匹配次数: {count}", flush=True)
+            logger.debug("正则1匹配次数: %d", count)
             if count > 0:
                 template_structure = new_template
             else:
@@ -1140,12 +1143,12 @@ class AnalysisAgent:
                     template_structure,
                     flags=re.DOTALL
                 )
-                print(f"[DEBUG] 正则2匹配次数: {count2}", flush=True)
+                logger.debug("正则2匹配次数: %d", count2)
                 if count2 > 0:
                     template_structure = new_template2
                 else:
-                    print(f"[ERROR] 所有正则模式都无法匹配 CHART_DATA", flush=True)
-                    print(f"[ERROR] 模板片段: {repr(template_structure[idx:idx+200])}", flush=True)
+                    logger.error("所有正则模式都无法匹配 CHART_DATA")
+                    logger.error("模板片段: %r", template_structure[idx:idx+200])
 
         # 填充模板中的指标占位符
         for code, summary in metric_summaries.items():

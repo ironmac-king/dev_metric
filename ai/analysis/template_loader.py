@@ -125,7 +125,7 @@ class TemplateLoader:
         variables_str = template.get("variables", "{}")
         try:
             variables = json.loads(variables_str)
-        except:
+        except Exception:
             variables = {}
 
         return {

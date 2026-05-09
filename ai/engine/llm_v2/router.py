@@ -322,6 +322,10 @@ async def ask_question_v2(req: AskRequestV2):
             needs_clarification = True
             # 优先从 context_cache 读取追问消息（intent_router 设置的）
             clarification_message = result_state.context_cache.clarification_message or result_state.answer
+        elif getattr(result_state, 'needs_clarification', False):
+            # slot_clarifier 检测到槽位缺失
+            needs_clarification = True
+            clarification_message = result_state.clarification_message or "请补充查询信息"
         elif result_state.is_generic_result:
             # 泛指维度：流程已继续执行，但需要显示追问标签让用户切换级别
             needs_clarification = True
@@ -357,7 +361,7 @@ async def ask_question_v2(req: AskRequestV2):
             ],
             needs_clarification=needs_clarification,
             clarification_message=clarification_message,
-            clarification_options=result_state.context_cache.clarification_options if needs_clarification else None,
+            clarification_options=result_state.context_cache.clarification_options if needs_clarification else (result_state.clarification_options or None),
             error=result_state.error if not result_state.answer else None,
             result_data=_rename_result_columns(
                 result_state.sql_result.data if result_state.sql_result else None,
@@ -624,6 +628,25 @@ async def ask_question_v2_stream(req: AskRequestV2):
                         "momChange": step_state.get("momChange"),
                         "yoyChange": step_state.get("yoyChange"),
                         "starrocks_sql": starrocks_sql,
+                    }).to_sse()
+
+                # 槽位追问：slot_clarifier 检测到缺失时发送 answer_ready
+                if step_state.get("needs_clarification") and "answer_ready" not in sent_events:
+                    sent_events.add("answer_ready")
+                    yield StreamEvent(SSSEvent.ANSWER_READY, {
+                        "answer": step_state.get("clarification_message", "请补充查询信息"),
+                        "suggestions": [],
+                        "clarification_options": step_state.get("clarification_options", []),
+                        "clarification_message": step_state.get("clarification_message", ""),
+                        "original_question": state.question or "",
+                        "analysis": None,
+                        "mode": "direct",
+                        "multi_metric_data": [],
+                        "dimensional_data": {},
+                        "category": "",
+                        "explanation": None,
+                        "kpi_tooltip": None,
+                        "dim_mom_data": None,
                     }).to_sse()
 
                 # 发送回答（仅首次就绪）
@@ -1175,25 +1198,25 @@ async def get_v2_history(session_id: str):
                 if r[3]:
                     try:
                         result_data = json.loads(r[3])
-                    except:
+                    except Exception:
                         pass
                 comparison_results = None
                 if r[4]:
                     try:
                         comparison_results = json.loads(r[4])
-                    except:
+                    except Exception:
                         pass
                 thinking_steps = None
                 if r[5]:
                     try:
                         thinking_steps = json.loads(r[5])
-                    except:
+                    except Exception:
                         pass
                 extra_data = None
                 if r[6]:
                     try:
                         extra_data = json.loads(r[6])
-                    except:
+                    except Exception:
                         pass
                 messages.append({
                     "role": r[0],

@@ -303,7 +303,7 @@ class VolatilityTrigger(BaseTrigger):
                     for prev_row in values:
                         if prev_row[0] == prev_str and prev_row[1] != 0:
                             return (current_val - prev_row[1]) / prev_row[1] * 100
-                except:
+                except Exception:
                     pass
         return 0
 
@@ -1567,7 +1567,7 @@ class TriggerAnalyzer:
                             parts.append(f"{mcol.replace('当前值', '')} {fval*100:.1f}%")
                         else:
                             parts.append(f"{mcol.replace('当前值', '')} {fval/10000:.2f}万")
-                    except:
+                    except Exception:
                         parts.append(f"{mcol.replace('当前值', '')} {val}")
 
             # 提取 mom/yoy（breakdown 格式在 value/change 字段，attribution 格式在 mom/yoy 字段）
@@ -1579,7 +1579,7 @@ class TriggerAnalyzer:
                 if mom_str and isinstance(mom_str, str) and mom_str.endswith("%"):
                     try:
                         mom_val = float(mom_str.replace("%", ""))
-                    except:
+                    except Exception:
                         mom_val = None
             if yoy_val is None:
                 yoy_val = None

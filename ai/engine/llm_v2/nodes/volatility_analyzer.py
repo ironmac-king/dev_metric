@@ -107,9 +107,9 @@ class VolatilityAnalyzer:
                             d = datetime.strptime(str(date_val), fmt)
                             dated_values.append((d, val))
                             break
-                        except:
+                        except Exception:
                             continue
-                except:
+                except Exception:
                     continue
 
         if dated_values:
@@ -129,7 +129,7 @@ class VolatilityAnalyzer:
                     current_start = mql_start
                     current_end = mql_end
                     break
-                except:
+                except Exception:
                     continue
 
         mom = 0.0
@@ -297,7 +297,7 @@ class VolatilityAnalyzer:
                     current_start = datetime.strptime(time_range['start'], fmt)
                     current_end = datetime.strptime(time_range['end'], fmt)
                     break
-                except:
+                except Exception:
                     continue
 
         if not current_start or not current_end:
@@ -405,7 +405,7 @@ class VolatilityAnalyzer:
                     current_start = datetime.strptime(time_range['start'], fmt)
                     current_end = datetime.strptime(time_range['end'], fmt)
                     break
-                except:
+                except Exception:
                     continue
 
         if not current_start or not current_end:
@@ -957,7 +957,7 @@ ORDER BY 月份, SKU
                 if len(parts) > 1:
                     try:
                         confidence = float(parts[1].strip())
-                    except:
+                    except Exception:
                         confidence = 0.5
             elif "suggestion" in line.lower() or "建议" in line:
                 parts = line.split("：", 1) if "：" in line else line.split(":", 1)

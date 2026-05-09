@@ -108,6 +108,20 @@ async def intent_router(state: V2State):
                 logger.info("[intent_router] ★★★ 启用独立语义层进行解析")
             result = await router.route(state.question, state.inherited_mql, use_semantic_layer=use_semantic_layer)
 
+            # 空值保护：route() 不应返回 None，但加保护防止崩溃
+            if result is None:
+                logger.error("[intent_router] route() 返回 None，视为解析失败")
+                state.error = "intent_router returned None"
+                state.add_thinking_step(
+                    "intent_router",
+                    status="failed",
+                    content="意图解析异常，请重试",
+                    llm_used=False,
+                    duration_ms=int((time.time() - start_time) * 1000),
+                )
+                yield state
+                return
+
             # 更新状态
             if result.get("mql"):
                 state.mql = result["mql"]
@@ -538,10 +552,17 @@ async def slot_clarifier(state: V2State) -> V2State:
         clarifier = SlotClarifier()
         result = clarifier.check(state.mql)
 
+        needs_clarification = False
+        clarification_message = ""
+        clarification_options = []
+
         if result and result.get("needs_clarification"):
             state.needs_clarification = True
             state.clarification_message = result["message"]
             state.clarification_options = result.get("options", [])
+            needs_clarification = True
+            clarification_message = result["message"]
+            clarification_options = result.get("options", [])
             logger.info(f"[slot_clarifier] 追问: {result['message']}, missing={result.get('missing_slots')}")
 
         state.add_thinking_step(
@@ -550,6 +571,9 @@ async def slot_clarifier(state: V2State) -> V2State:
             content=f"槽位检查: {'需要追问' if result else '完整'}",
             llm_used=False,
             duration_ms=int((time.time() - start_time) * 1000),
+            needs_clarification=needs_clarification,
+            clarification_message=clarification_message,
+            clarification_options=clarification_options,
         )
     except Exception as e:
         logger.warning(f"[slot_clarifier] 槽位检查失败(非阻断): {e}")

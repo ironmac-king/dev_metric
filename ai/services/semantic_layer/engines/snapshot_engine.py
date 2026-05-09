@@ -3,6 +3,7 @@
 
 封装 SemanticSnapshotService，提供语义快照解析能力
 """
+import re
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
@@ -294,7 +295,6 @@ class SnapshotEngine(BaseEngine):
 
     def _extract_time_expr(self, query: str) -> Optional[str]:
         """提取时间表达式"""
-        import re
 
         # 优先匹配 年+月 组合（如 "今年3月"、"去年12月"、"2025年7月"）
         year_month = re.search(r'(今年|去年|明年|\d{4}年)\s*(\d{1,2})月', query)
@@ -302,8 +302,8 @@ class SnapshotEngine(BaseEngine):
             return year_month.group(0).replace(" ", "")
 
         # 匹配 单独N月（无年份前缀）
-        standalone_month = re.search(r'(?<![今去明去\d年])\s*(\d{1,2})月', query)
-        if standalone_month and not year_month:
+        standalone_month = re.search(r'(?<![今去明\d年])\s*(\d{1,2})月', query)
+        if standalone_month:
             return standalone_month.group(0).strip()
 
         # 匹配季度组合（如 "今年一季度"、"去年Q3"）
@@ -362,7 +362,7 @@ class SnapshotEngine(BaseEngine):
             return "query_ranking"
 
         # 对比
-        if has_comparison or any(kw in query_lower for kw in ["对比", "比较", "和", "比"]):
+        if has_comparison or any(kw in query_lower for kw in ["对比", "比较"]):
             return "query_comparison"
 
         # 下钻
