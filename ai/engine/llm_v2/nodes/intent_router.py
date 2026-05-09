@@ -275,9 +275,13 @@ class IntentRouter:
         if self._is_greeting(question):
             return self._handle_greeting()
 
-        # 2. 简短追问处理（仅当有继承上下文时）
+        # 2. 简短追问处理（仅当有继承上下文且上轮不是 greeting 时）
         if inherited_mql and self._is_short_followup(question):
-            return await self._handle_followup(question, inherited_mql)
+            # greeting 不建立有效查询上下文，后续问题应走独立查询
+            if inherited_mql.intent and inherited_mql.intent.value == "greeting":
+                logger.info(f"[IntentRouter] 上轮为 greeting，跳过追问路径，走独立查询")
+            else:
+                return await self._handle_followup(question, inherited_mql)
 
         # 3. 独立语义层（如果启用）
         if use_semantic_layer:
